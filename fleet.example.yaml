@@ -1,0 +1,37 @@
+host: p620
+boardUrl: https://maverick.tailnet.ts.net/api/board
+from: []
+channels:
+  - cleo
+  - cnp
+  - growth
+  - yang-auto
+  - personal
+metaChannel: meta
+workspacesRoot: ~/fleet-workspaces
+concurrency: 4
+leaseSeconds: 900
+idleTimeoutSeconds: 1800
+maxWallSeconds: 7200
+maxAttempts: 3
+maxReviewRounds: 4
+
+spawn:
+  mode: local
+  direnv: true
+  command:
+    - pi
+    - --append-system-prompt
+    - "{prompt}"
+    - --print
+    - "Read task {task} on the board with `vb read {task}` and execute it."
+  docker:
+    image: fleet-worker:latest
+    runtime: youki
+    extraArgs: []
+
+repos:
+  example-app:
+    path: ~/fleet-workspaces/personal/example-app/main
+    baseBranch: main
+    delivery: no-mistakes

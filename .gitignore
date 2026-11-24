@@ -1,0 +1,7 @@
+node_modules/
+dist/
+fleet.yaml
+.env
+.board/
+.lavish/
+*.log

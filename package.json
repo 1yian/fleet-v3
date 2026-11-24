@@ -1,0 +1,23 @@
+{
+  "name": "fleet-v3",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "fleet": "./src/cli.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "node --test e2e/*.test.ts",
+    "check": "bun run typecheck && bun run test:e2e"
+  },
+  "dependencies": {
+    "@vercel/board": "^0.56.1",
+    "yaml": "^2.7.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3"
+  }
+}
