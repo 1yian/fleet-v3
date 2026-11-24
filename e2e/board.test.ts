@@ -167,6 +167,21 @@ void test("card server enforces recursive escalation, home-mate answers, depende
       actor: "cleo",
     });
     assert.equal(toJarvis.holder, "jarvis");
+    await client.postEntry(prereq.id, { text: "jarvis side note", by: "jarvis" });
+    assert.ok(
+      await waitFor(() =>
+        jarvisWatch.events.some(
+          (ev) => ev.type === "entry.posted" && ev.payload["text"] === "jarvis side note",
+        ),
+      ),
+    );
+    assert.equal(
+      cleoWatch.events.some(
+        (ev) => ev.type === "entry.posted" && ev.payload["text"] === "jarvis side note",
+      ),
+      false,
+      "a holder-filtered stream carries only events addressed to that holder",
+    );
 
     const toCaptain = await client.escalateCard(prereq.id, {
       reason: "Approve prod migration window?",
@@ -324,6 +339,12 @@ void test("claim fences also guard queue and close, hosts outlive advertisement 
       host: "h1",
       project: "Cleo",
     });
+    const queuedPage = await client.listCards({ holder: "runner" });
+    assert.deepEqual(
+      queuedPage.cards.map((each) => each.id),
+      [card.id],
+      "execution holders are valid read filters",
+    );
     const claim = await client.claimNext({
       host: "h1",
       leaseSeconds: 60,
@@ -331,6 +352,11 @@ void test("claim fences also guard queue and close, hosts outlive advertisement 
     });
     assert.ok(claim !== null);
     const fence = { epoch: claim.epoch, token: claim.workerToken };
+    const runningPage = await client.listCards({ holder: "worker" });
+    assert.deepEqual(
+      runningPage.cards.map((each) => each.id),
+      [card.id],
+    );
 
     await assert.rejects(
       () => client.closeCard(card.id, { ...fence, result: "shipped without verification" }),

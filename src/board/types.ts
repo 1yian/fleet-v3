@@ -6,7 +6,7 @@ export type CardState = (typeof CARD_STATES)[number];
 export const DELIVERIES = ["no-mistakes", "direct-pr", "local", "ops"] as const;
 export type Delivery = (typeof DELIVERIES)[number];
 
-export const ENTRY_KINDS = ["reply", "status", "escalation", "answer", "chase"] as const;
+export const ENTRY_KINDS = ["reply", "status", "escalation", "answer"] as const;
 export type EntryKind = (typeof ENTRY_KINDS)[number];
 
 export const EVENT_TYPES = [
@@ -28,14 +28,12 @@ export type BoardEventType = (typeof EVENT_TYPES)[number];
 
 const MATE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
 const EXECUTION_HOLDERS: ReadonlySet<string> = new Set(["runner", "worker"]);
-export const HolderNameSchema = z
-  .string()
-  .regex(MATE_NAME_PATTERN, {
-    message: "names use letters, digits, underscores, and hyphens (max 64, starting alphanumeric)",
-  })
-  .refine((name) => !EXECUTION_HOLDERS.has(name), {
-    message: "runner and worker are reserved for execution",
-  });
+export const HolderFilterSchema = z.string().regex(MATE_NAME_PATTERN, {
+  message: "names use letters, digits, underscores, and hyphens (max 64, starting alphanumeric)",
+});
+export const HolderNameSchema = HolderFilterSchema.refine((name) => !EXECUTION_HOLDERS.has(name), {
+  message: "runner and worker are reserved for execution",
+});
 export const MateNameSchema = HolderNameSchema.refine((name) => name !== "captain", {
   message: "captain is reserved for the root of the hierarchy",
 });
@@ -57,7 +55,6 @@ export const CardSchema = z.object({
   host: z.string().nullable(),
   delivery: z.enum(DELIVERIES).nullable(),
   needs: z.array(z.string()),
-  labels: z.record(z.string(), z.string()),
   result: z.string(),
   epoch: z.number().int(),
   claimBy: z.string().nullable(),
@@ -198,7 +195,6 @@ export interface FinishClaimInput extends ClaimFenceInput {
   readonly outcome: "done" | "needs_mate";
   readonly summary: string;
   readonly actor?: string;
-  readonly kind?: string;
 }
 
 export interface PostEntryInput extends OptionalFenceInput {
@@ -210,6 +206,7 @@ export interface PostEntryInput extends OptionalFenceInput {
 
 export interface EscalateCardInput extends OptionalFenceInput {
   readonly reason: string;
+  readonly from?: string;
   readonly actor?: string;
 }
 

@@ -148,7 +148,6 @@ function resolveMate(config: RunnerConfig, mates: MatesConfig, item: MateItemCon
   const workspace = item.workspace ?? mates.workspace;
   const vars: Record<string, string> = {
     name: item.name,
-    parent: item.parent,
     prompt: promptPath,
     adapter: DEFAULT_PI_ADAPTER,
     cwd,
@@ -312,8 +311,6 @@ async function launchMateInPane(mate: ResolvedMate, pane: ExistingPane): Promise
     mate.item.name,
     "--display-agent",
     "mate",
-    "--token",
-    `parent=${mate.item.parent}`,
   ]).catch(() => undefined);
 
   const cmd = `${shellQuoteSingle(process.execPath)} ${shellQuoteSingle(scriptPath)} ${shellQuoteSingle(specPath)}`;

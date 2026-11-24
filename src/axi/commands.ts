@@ -12,6 +12,7 @@ import { createHttpBoardClient, type BoardClient } from "../board/client.ts";
 import {
   CARD_STATES,
   DELIVERIES,
+  MateNameSchema,
   type Card,
   type CardState,
   type Delivery,
@@ -544,9 +545,11 @@ export async function escalateCommand(
     throw new AxiError("card <id> is required for `escalate`", "VALIDATION_ERROR", [helpBlock]);
   }
   const reason = stringFlag(parsed.values, "reason") ?? "";
+  const mate = MateNameSchema.safeParse(active.actor);
   const card = await active.board().escalateCard(id, {
     ...active.fence,
     reason,
+    ...(mate.success ? { from: mate.data } : {}),
     actor: active.actor,
   });
   return {

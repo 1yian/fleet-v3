@@ -52,7 +52,6 @@ CREATE TABLE IF NOT EXISTS cards (
   host TEXT,
   delivery TEXT,
   needs_json TEXT NOT NULL DEFAULT '[]',
-  labels_json TEXT NOT NULL DEFAULT '{}',
   result TEXT NOT NULL DEFAULT '',
   epoch INTEGER NOT NULL DEFAULT 0,
   claim_token_hash TEXT,
@@ -93,7 +92,6 @@ CREATE INDEX IF NOT EXISTS idx_events_type_id ON events (type, id);
 
 const CardStateSchema = z.enum(CARD_STATES);
 const StringArraySchema = z.array(z.string());
-const StringRecordSchema = z.record(z.string(), z.string());
 const UnknownRecordSchema = z.record(z.string(), z.unknown());
 
 const CardRowSchema = z.object({
@@ -107,7 +105,6 @@ const CardRowSchema = z.object({
   host: z.string().nullable(),
   delivery: z.enum(DELIVERIES).nullable(),
   needs_json: z.string(),
-  labels_json: z.string(),
   result: z.string(),
   epoch: z.number().int(),
   claim_token_hash: z.string().nullable(),
@@ -193,7 +190,6 @@ function rowToCard(row: CardRow): Card {
     host: row.host,
     delivery: row.delivery,
     needs: StringArraySchema.parse(JSON.parse(row.needs_json)),
-    labels: StringRecordSchema.parse(JSON.parse(row.labels_json)),
     result: row.result,
     epoch: row.epoch,
     claimBy: row.claim_by,
@@ -620,8 +616,8 @@ export class CardStore {
         .prepare(
           `INSERT INTO cards (
             mate, title, body, state, holder, project, host, delivery,
-            needs_json, labels_json, result, epoch, created_by, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?, ?)`,
+            needs_json, result, epoch, created_by, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?, ?)`,
         )
         .run(
           mate,
@@ -633,7 +629,6 @@ export class CardStore {
           input.host ?? null,
           input.delivery ?? null,
           JSON.stringify(needsCheck.ids),
-          "{}",
           actor,
           now,
           now,
@@ -905,16 +900,14 @@ export class CardStore {
         return { result: card, events };
       }
 
-      const labels = StringRecordSchema.parse(JSON.parse(row.labels_json));
-      if (input.kind !== undefined) labels["return_kind"] = input.kind;
       this.db
         .prepare(
           `UPDATE cards
-           SET state = 'held', holder = ?, result = ?, labels_json = ?, claim_token_hash = NULL, worker_token_hash = NULL,
+           SET state = 'held', holder = ?, result = ?, claim_token_hash = NULL, worker_token_hash = NULL,
                claim_by = NULL, lease_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
-        .run(row.mate, input.summary, JSON.stringify(labels), now, id);
+        .run(row.mate, input.summary, now, id);
       if (input.summary.trim().length > 0) {
         this.insertEntry({
           cardId: id,
@@ -933,7 +926,7 @@ export class CardStore {
           mate: card.mate,
           holder: card.mate,
           actor,
-          payload: { id: card.id, title: card.title, summary: input.summary, kind: input.kind },
+          payload: { id: card.id, title: card.title, summary: input.summary },
           createdAt: now,
         }),
       );
@@ -994,6 +987,16 @@ export class CardStore {
       }
       const actor = input.actor ?? (row.holder === "worker" ? row.mate : row.holder);
       const fromHolder = row.holder === "worker" || row.holder === "runner" ? row.mate : row.holder;
+      if (input.from !== undefined && input.from !== fromHolder) {
+        if (row.state === "held" && row.holder === this.parentOf(input.from)) {
+          return { result: rowToCard(row), events: [] };
+        }
+        throw new BoardError(
+          409,
+          "holder_mismatch",
+          `Card #${String(id)} is held by ${row.holder}, not ${input.from}`,
+        );
+      }
       const targetHolder = this.parentOf(fromHolder);
       if (row.state === "held" && row.holder === targetHolder && row.result === reason) {
         return { result: rowToCard(row), events: [] };

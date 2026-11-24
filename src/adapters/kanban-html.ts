@@ -130,6 +130,8 @@ export const KANBAN_HTML = `<!doctype html>
     background: rgba(255, 255, 255, 0.05); color: var(--muted); border: 1px solid var(--border);
     max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
+  .chip.waiting { color: var(--amber); border-color: rgba(245, 158, 11, 0.35); background: var(--amber-bg); }
+  .card.waiting { border-left: 3px dashed var(--dim); }
   .chip.holder { color: var(--violet); border-color: rgba(167, 139, 250, 0.3); }
 
   .backdrop {
@@ -283,7 +285,7 @@ const COLS = [
   { key: "captain", title: "Needs you", color: "var(--amber)", match: c => c.state === "held" && c.holder === "captain" },
   { key: "held", title: "With mates", color: "var(--violet)", match: c => c.state === "held" && c.holder !== "captain" },
   { key: "running", title: "Running", color: "var(--emerald)", match: c => c.state === "running" },
-  { key: "queued", title: "Queued", color: "var(--sky)", match: c => c.state === "queued" || c.state === "waiting" },
+  { key: "queued", title: "Queued / waiting", color: "var(--sky)", match: c => c.state === "queued" || c.state === "waiting" },
   { key: "done", title: "Done", color: "var(--dim)", match: c => c.state === "done" },
 ];
 
@@ -388,6 +390,7 @@ function renderBoard() {
       : items.map(c => {
           const cls = c.holder === "captain" ? "captain" : c.state;
           const chips = [];
+          if (c.state === "waiting") chips.push('<span class="chip waiting">waiting on ' + c.needs.map(n => '#' + esc(n)).join(", ") + '</span>');
           if (c.holder) chips.push('<span class="chip holder">ball: ' + esc(c.holder) + '</span>');
           if (c.project) chips.push('<span class="chip">' + esc(c.project) + '</span>');
           if (c.host) chips.push('<span class="chip">' + esc(c.host) + '</span>');

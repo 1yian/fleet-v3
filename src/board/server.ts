@@ -6,6 +6,7 @@ import {
   CARD_STATES,
   DELIVERIES,
   ENTRY_KINDS,
+  HolderFilterSchema,
   HolderNameSchema,
   MateNameSchema,
   type BoardEvent,
@@ -63,7 +64,6 @@ const FinishBodySchema = z.object({
   outcome: z.enum(["done", "needs_mate"]),
   summary: z.string(),
   actor: z.string().min(1).optional(),
-  kind: z.string().min(1).optional(),
 });
 
 const EntryBodySchema = z.object({
@@ -77,6 +77,7 @@ const EntryBodySchema = z.object({
 const EscalateBodySchema = z.object({
   ...FenceFields,
   reason: z.string().min(1),
+  from: MateNameSchema.optional(),
   actor: z.string().min(1).optional(),
 });
 
@@ -175,7 +176,7 @@ function matchesEventFilter(
   holderFilter: string | null,
   mateFilter: string | null,
 ): boolean {
-  if (holderFilter !== null && event.holder !== holderFilter && event.mate !== holderFilter) {
+  if (holderFilter !== null && event.holder !== holderFilter) {
     return false;
   }
   if (mateFilter !== null && event.mate !== mateFilter) {
@@ -247,7 +248,7 @@ function handleSse(store: CardStore, url: URL, req: IncomingMessage, res: Server
     url.searchParams.get("after") ?? (typeof afterHeader === "string" ? afterHeader : null);
   const afterId =
     afterRaw !== null && /^\d+$/u.test(afterRaw) ? Number(afterRaw) : store.latestEventId();
-  const holderFilter = parseNameFilter(url.searchParams.get("holder"), HolderNameSchema);
+  const holderFilter = parseNameFilter(url.searchParams.get("holder"), HolderFilterSchema);
   const mateFilter = parseNameFilter(url.searchParams.get("mate"), MateNameSchema);
 
   res.writeHead(200, {
@@ -337,6 +338,7 @@ async function handleEscalateCard(
     card: store.escalateCard(cardId, {
       ...fenceOf(body),
       reason: body.reason,
+      ...(body.from !== undefined ? { from: body.from } : {}),
       ...(body.actor !== undefined ? { actor: body.actor } : {}),
     }),
   });
@@ -453,7 +455,6 @@ async function routeCardTerminalOrFenceAction(
         outcome: body.outcome,
         summary: body.summary,
         ...(body.actor !== undefined ? { actor: body.actor } : {}),
-        ...(body.kind !== undefined ? { kind: body.kind } : {}),
       }),
     });
     return true;
@@ -481,7 +482,7 @@ async function routeCardsCollection(
 ): Promise<boolean> {
   if (method === "GET") {
     const mate = parseNameFilter(url.searchParams.get("mate"), MateNameSchema);
-    const holder = parseNameFilter(url.searchParams.get("holder"), HolderNameSchema);
+    const holder = parseNameFilter(url.searchParams.get("holder"), HolderFilterSchema);
     const state = parseStateFilter(url.searchParams.get("state"));
     const limitRaw = url.searchParams.get("limit");
     if (limitRaw !== null && !/^[1-9]\d*$/u.test(limitRaw)) {

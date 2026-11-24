@@ -167,7 +167,6 @@ async function handleRunOutcome(params: {
       outcome: "needs_mate",
       summary,
       actor: runnerActor(params.config.host),
-      kind: "timeout",
     });
     return { done: true, failed: true, message: `Timed out (${params.run.timedOut})` };
   }
@@ -180,7 +179,6 @@ async function handleRunOutcome(params: {
       outcome: "needs_mate",
       summary,
       actor: runnerActor(params.config.host),
-      kind: "worker_error",
     });
     return { done: true, failed: true, message: `Exited ${String(params.run.exitCode)}` };
   }
@@ -234,7 +232,6 @@ async function handleVerification(params: {
       outcome: "needs_mate",
       summary: `Verification stopped at round ${String(verified.rounds)}/${String(params.config.maxReviewRounds)}: ${verified.reason}\n\n${verified.output.slice(-1500)}`,
       actor: runnerActor(params.config.host),
-      kind: "verification",
     });
     return { ok: false, message: verified.reason };
   }
@@ -248,6 +245,28 @@ async function handleVerification(params: {
     kind: "status",
   });
   return { ok: true, message: `Completed on ${params.config.host}` };
+}
+
+function openWorkerPane(
+  config: RunnerConfig,
+  claim: ClaimReceipt,
+  project: string,
+  workspace: TaskWorkspace,
+  delivery: Delivery,
+): Promise<HerdrPaneHandle | undefined> {
+  if (config.spawn.viewport !== "herdr") return Promise.resolve(undefined);
+  return openHerdrPane({
+    config: resolveHerdrConfig(config.spawn),
+    host: config.host,
+    channel: claim.card.mate,
+    project,
+    taskId: claim.card.id,
+    branch: workspace.branch,
+    delivery,
+    mode: config.spawn.mode,
+    summary: claim.card.title,
+    cwd: workspace.worktreePath,
+  });
 }
 
 async function runClaim(
@@ -266,7 +285,6 @@ async function runClaim(
       outcome: "needs_mate",
       summary: `Stopped after ${String(claim.epoch - 1)} failed or expired attempts on ${config.host}. Re-queueing cannot start another worker on this card; review the thread, then escalate, replace it with a new card, or cancel.`,
       actor: runnerActor(config.host),
-      kind: "retry_cap",
     });
     return;
   }
@@ -278,7 +296,6 @@ async function runClaim(
       outcome: "needs_mate",
       summary: `Host ${config.host} has no registered repo for project=${project ?? "(missing)"}.`,
       actor: runnerActor(config.host),
-      kind: "missing_repo",
     });
     return;
   }
@@ -286,15 +303,6 @@ async function runClaim(
   const repo = config.repos[project];
   const delivery: Delivery = claim.card.delivery ?? repo.delivery;
   const promptPath = config.workerPromptPath ?? DEFAULT_WORKER_PROMPT;
-  const workspace = await prepareWorkspace({
-    workspacesRoot: config.workspacesRoot,
-    channel: claim.card.mate,
-    project,
-    taskId: cardId,
-    epoch: claim.epoch,
-    repo,
-  });
-
   const controller = new AbortController();
   const onOuterAbort = (): void => {
     controller.abort();
@@ -310,24 +318,29 @@ async function runClaim(
 
   const herdrConfig = resolveHerdrConfig(config.spawn);
   let pane: HerdrPaneHandle | undefined;
+  let preparedWorkspace: TaskWorkspace | undefined;
   let failed = false;
   let finalPaneMessage = `Completed on ${config.host}`;
 
   try {
-    if (config.spawn.viewport === "herdr") {
-      pane = await openHerdrPane({
-        config: herdrConfig,
-        host: config.host,
-        channel: claim.card.mate,
-        project,
-        taskId: cardId,
-        branch: workspace.branch,
-        delivery,
-        mode: config.spawn.mode,
-        summary: claim.card.title,
-        cwd: workspace.worktreePath,
-      });
+    const workspace = await prepareWorkspace({
+      workspacesRoot: config.workspacesRoot,
+      channel: claim.card.mate,
+      project,
+      taskId: cardId,
+      epoch: claim.epoch,
+      repo,
+    });
+    preparedWorkspace = workspace;
+
+    if (controller.signal.aborted) {
+      await client
+        .releaseClaim(cardId, { epoch: claim.epoch, token: claim.token })
+        .catch(() => undefined);
+      return;
     }
+
+    pane = await openWorkerPane(config, claim, project, workspace, delivery);
 
     const paneSuffix = pane === undefined ? "" : `, herdr ${pane.paneId}`;
     await client.postEntry(cardId, {
@@ -407,7 +420,7 @@ async function runClaim(
         });
       }
     } finally {
-      await cleanupWorkspace(workspace);
+      if (preparedWorkspace !== undefined) await cleanupWorkspace(preparedWorkspace);
     }
   }
 }
@@ -429,7 +442,6 @@ async function executeClaim(
         outcome: "needs_mate",
         summary: `Runner on ${config.host} failed before the worker could finish: ${reason}`,
         actor: runnerActor(config.host),
-        kind: "runner_error",
       })
       .catch(() => undefined);
   }

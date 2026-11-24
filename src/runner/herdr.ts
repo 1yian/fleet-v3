@@ -326,6 +326,10 @@ export async function runCommandInHerdrPane(
     };
   },
 ): Promise<SpawnResult> {
+  if (options.signal?.aborted === true) {
+    return { exitCode: null, signal: null, timedOut: null, aborted: true, outputTail: "" };
+  }
+
   const scriptPath = join(options.tmpDir, "fleet-pane-run.mjs");
   const specPath = join(options.tmpDir, "fleet-pane-spec.json");
   const pidFile = join(options.tmpDir, "fleet-pane.pid");

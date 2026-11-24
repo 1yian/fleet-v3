@@ -218,6 +218,10 @@ void test("config load rejects cyclic, duplicated, or unrooted mate hierarchies 
     );
   }
   assert.throws(
+    () => loadConfig(write("filter.yaml", ['matesFilter: ["ops.qa"]'])),
+    /names use letters/u,
+  );
+  assert.throws(
     () => loadConfig(write("rounds.yaml", ["maxReviewRounds: 5"])),
     /too_big|<=4|Too big/iu,
   );

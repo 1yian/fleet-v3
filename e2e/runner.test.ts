@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -472,7 +480,6 @@ void test("returns card to mate instead of crash-looping once claim epoch exceed
     const thread = await client.getThread(card.id);
     assert.equal(thread.card.state, "held");
     assert.equal(thread.card.holder, "cleo");
-    assert.equal(thread.card.labels["return_kind"], "retry_cap");
     assert.ok(
       thread.entries.some((entry) => /cannot start another worker/u.test(entry.text)),
       "the retry cap summary must not advertise re-queueing as recovery",
@@ -794,6 +801,51 @@ void test("a worker executable that cannot start hands the card back to its mate
     assert.ok(
       thread.entries.some((entry) => /failed before the worker could finish/u.test(entry.text)),
     );
+  } finally {
+    await server.stop();
+  }
+});
+
+void test("shutdown during worktree setup releases the claim without launching the worker", async () => {
+  const root = makeTempDir("fleet-v3-shutdown-");
+  const repoDir = initGitRepo(root);
+  const setupMarker = join(root, "setup-started");
+  const workerMarker = join(root, "worker-launched");
+  const hookPath = join(repoDir, ".git", "hooks", "post-checkout");
+  writeFileSync(hookPath, `#!/bin/sh\ntouch "${setupMarker}"\nsleep 1\n`);
+  chmodSync(hookPath, 0o755);
+  const server = await startTestServer();
+  const { client } = server;
+  const controller = new AbortController();
+
+  try {
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Interrupted during checkout",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    const config = makeConfig(root, repoDir, {
+      spawn: {
+        mode: "local",
+        viewport: "headless",
+        direnv: false,
+        command: [
+          "node",
+          "-e",
+          `require("node:fs").writeFileSync(${JSON.stringify(workerMarker)}, "1")`,
+        ],
+      },
+    });
+
+    const run = runLoop(client, config, { once: true, signal: controller.signal });
+    assert.ok(await waitFor(() => existsSync(setupMarker), 10_000), "worktree setup must start");
+    controller.abort();
+    await run;
+
+    assert.equal(existsSync(workerMarker), false, "no worker may launch after shutdown");
+    assert.equal(await cardField(client, card.id, "state"), "queued");
   } finally {
     await server.stop();
   }

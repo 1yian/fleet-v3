@@ -195,6 +195,14 @@ void test("escalate, answer, handoff, close, cancel, charter, prefs, and init mu
     assert.equal(esc1.exitCode, 0);
     assert.match(esc1.out, /holder: jarvis/u);
 
+    const replay = await captureCli(
+      ["escalate", card.id, "--reason", "Need Jarvis check"],
+      url,
+      "cleo",
+    );
+    assert.equal(replay.exitCode, 0);
+    assert.match(replay.out, /holder: jarvis/u, "a retried escalation stops at the parent");
+
     const esc2 = await captureCli(
       ["escalate", card.id, "--reason", "Approve merge?"],
       url,
@@ -202,6 +210,14 @@ void test("escalate, answer, handoff, close, cancel, charter, prefs, and init mu
     );
     assert.equal(esc2.exitCode, 0);
     assert.match(esc2.out, /holder: captain/u);
+
+    const stale = await captureCli(
+      ["escalate", card.id, "--reason", "Late retry from cleo"],
+      url,
+      "cleo",
+    );
+    assert.notEqual(stale.exitCode, 0, "a mate cannot escalate a card it no longer holds");
+    assert.match(stale.out, /held by captain/u);
 
     const ans = await captureCli(["answer", card.id, "--text", "Merge it"], url, "captain");
     assert.equal(ans.exitCode, 0);

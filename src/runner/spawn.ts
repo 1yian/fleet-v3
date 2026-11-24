@@ -189,6 +189,11 @@ export function runIsolatedCommand(options: RunCommandOptions): Promise<SpawnRes
       return;
     }
 
+    if (options.signal?.aborted === true) {
+      resolve({ exitCode: null, signal: null, timedOut: null, aborted: true, outputTail: "" });
+      return;
+    }
+
     const child = spawn(bin, args, {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
