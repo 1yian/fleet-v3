@@ -105,18 +105,39 @@ void test("card server enforces recursive escalation, home-mate answers, depende
       () =>
         client.handoffCard(prereq.id, {
           epoch: 1,
-          token: claim1.token,
+          token: claim1.workerToken,
           text: "stale worker handoff",
         }),
       rejectsWith(409, "claim_lost"),
     );
     await assert.rejects(
       () =>
-        client.postEntry(prereq.id, { epoch: 1, token: claim1.token, text: "stale worker reply" }),
+        client.postEntry(prereq.id, {
+          epoch: 1,
+          token: claim1.workerToken,
+          text: "stale worker reply",
+        }),
       rejectsWith(409, "claim_lost"),
     );
     await assert.rejects(
-      () => client.cancelCard(prereq.id, { epoch: 1, token: claim1.token, reason: "stale" }),
+      () => client.cancelCard(prereq.id, { epoch: 1, token: claim1.workerToken, reason: "stale" }),
+      rejectsWith(409, "claim_lost"),
+    );
+    assert.equal(await cardField(client, prereq.id, "state"), "running");
+
+    await assert.rejects(
+      () =>
+        client.finishClaim(prereq.id, {
+          epoch: 2,
+          token: claim2.workerToken,
+          outcome: "done",
+          summary: "worker tries to complete its own card",
+        }),
+      rejectsWith(409, "claim_lost"),
+      "the worker's fence confers no runner completion authority",
+    );
+    await assert.rejects(
+      () => client.renewClaim(prereq.id, { epoch: 2, token: claim2.workerToken, leaseSeconds: 60 }),
       rejectsWith(409, "claim_lost"),
     );
     assert.equal(await cardField(client, prereq.id, "state"), "running");
@@ -201,7 +222,6 @@ void test("card server enforces recursive escalation, home-mate answers, depende
     await client.cancelCard(doomedPrereq.id, { reason: "Superseded", actor: "cleo" });
     for (const [id, holder] of [
       [orphan.id, "cleo"],
-      [grandchild.id, "cleo"],
       [reassigned.id, "jarvis"],
     ] as const) {
       const after = await client.getThread(id);
@@ -212,10 +232,26 @@ void test("card server enforces recursive escalation, home-mate answers, depende
         `card #${id} must be told its prerequisite was canceled`,
       );
     }
+    assert.equal(await cardField(client, grandchild.id, "state"), "waiting");
     await assert.rejects(
       () => client.queueCard(orphan.id, {}),
       rejectsWith(409, "unmet_needs"),
-      "a card whose prerequisite was canceled can never be queued",
+      "a card whose prerequisite was canceled can only be closed or canceled",
+    );
+    await assert.rejects(
+      () =>
+        client.createCard({
+          mate: "cleo",
+          title: "Needs the canceled card",
+          needs: [doomedPrereq.id],
+        }),
+      rejectsWith(400, "invalid_needs"),
+    );
+    await client.closeCard(orphan.id, { result: "Resolved by hand", actor: "cleo" });
+    assert.equal(
+      await cardField(client, grandchild.id, "state"),
+      "queued",
+      "closing the held dependent unblocks its own dependent",
     );
 
     const staleCard = await client.createCard({
@@ -240,17 +276,32 @@ void test("card server enforces recursive escalation, home-mate answers, depende
     );
 
     now += 250_000;
+    const chased = (
+      events: typeof jarvisWatch.events,
+      holder: string,
+      cardId: string,
+      state: string,
+    ): boolean =>
+      events.some(
+        (ev) =>
+          ev.type === "chase.due" &&
+          ev.holder === holder &&
+          Array.isArray(ev.payload["cards"]) &&
+          ev.payload["cards"].some(
+            (entry: unknown) =>
+              typeof entry === "object" &&
+              entry !== null &&
+              Reflect.get(entry, "id") === cardId &&
+              Reflect.get(entry, "state") === state,
+          ),
+      );
     assert.ok(
-      await waitFor(() =>
-        jarvisWatch.events.some((ev) => ev.type === "chase.due" && ev.holder === "jarvis"),
-      ),
-      "periodic chase must notify the holder of a stale held card",
+      await waitFor(() => chased(jarvisWatch.events, "jarvis", staleCard.id, "held")),
+      "the card held by jarvis since creation is chased although its thread saw recent replies",
     );
     assert.ok(
-      await waitFor(() =>
-        cleoWatch.events.some((ev) => ev.type === "chase.due" && ev.holder === "cleo"),
-      ),
-      "periodic chase must notify the mate when a queued card sits unclaimed",
+      await waitFor(() => chased(cleoWatch.events, "cleo", dependent.id, "queued")),
+      "the unclaimed queued dependent is chased to its home mate",
     );
     assert.ok(
       jarvisWatch.events.some((ev) => ev.type === "card.escalated" && ev.holder === "jarvis"),
@@ -279,7 +330,7 @@ void test("claim fences also guard queue and close, hosts outlive advertisement 
       claimBy: "runner-h1",
     });
     assert.ok(claim !== null);
-    const fence = { epoch: claim.epoch, token: claim.token };
+    const fence = { epoch: claim.epoch, token: claim.workerToken };
 
     await assert.rejects(
       () => client.closeCard(card.id, { ...fence, result: "shipped without verification" }),
@@ -317,6 +368,10 @@ void test("claim fences also guard queue and close, hosts outlive advertisement 
       hosts.map((each) => each.host),
       ["first", "second"],
     );
+
+    const inherited = await client.createCard({ mate: "constructor", title: "Unconfigured mate" });
+    const escalated = await client.escalateCard(inherited.id, { reason: "Needs the captain" });
+    assert.equal(escalated.holder, "captain", "unconfigured mates escalate straight to captain");
 
     for (const mate of ["runner", "worker", "captain"]) {
       await assert.rejects(
@@ -403,9 +458,8 @@ void test("SSE reconnect replays the full backlog so a quiet mate never misses i
     for (let i = 0; i < 520; i += 1) {
       await client.postEntry(noisy.id, { text: `note ${String(i)}`, by: "other", internal: true });
     }
-    await client.postEntry(noisy.id, { text: "ping @cleo-ops about this", by: "other" });
+    await client.postEntry(noisy.id, { text: "ping @cleo about this", by: "other" });
     const mine = await client.createCard({ mate: "cleo", title: "Card for the quiet mate" });
-    await client.postEntry(noisy.id, { text: "ping @cleo please", by: "other" });
 
     const watch = watchEvents(client, { after: cursor, holder: "cleo" });
     try {
@@ -413,18 +467,12 @@ void test("SSE reconnect replays the full backlog so a quiet mate never misses i
         await waitFor(() => watch.events.some((ev) => ev.cardId === mine.id)),
         "the card created after 520 unrelated events must still be replayed",
       );
+      await new Promise((resolve) => {
+        setTimeout(resolve, 150);
+      });
       assert.ok(
-        await waitFor(() =>
-          watch.events.some(
-            (ev) => ev.type === "entry.posted" && ev.payload["text"] === "ping @cleo please",
-          ),
-        ),
-      );
-      assert.ok(
-        !watch.events.some(
-          (ev) => ev.type === "entry.posted" && ev.payload["text"] === "ping @cleo-ops about this",
-        ),
-        "a mention of a different mate name must not wake cleo",
+        !watch.events.some((ev) => ev.cardId === noisy.id),
+        "a mention on another mate's card is not a routing path; only ownership transfer wakes a mate",
       );
     } finally {
       await watch.stop();

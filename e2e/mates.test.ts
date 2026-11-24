@@ -9,11 +9,10 @@ import { z } from "zod";
 import { attachFleetPiAdapter } from "../src/adapters/pi.ts";
 import { loadConfig, type RunnerConfig } from "../src/config.ts";
 import { ensureMatesUp, listMates, stopMates } from "../src/mates.ts";
-import { createMockPi, startTestServer } from "./support.ts";
+import { createMockPi, startTestServer, waitFor } from "./support.ts";
 
 const RecordedEnvSchema = z.object({
   mate: z.string(),
-  parent: z.string(),
   optchat: z.string(),
 });
 
@@ -58,7 +57,7 @@ afterEach(() => {
   }
 });
 
-void test("unified Pi mate adapter scopes ambient context and wakes on escalations, answers, mentions, and chase", async () => {
+void test("unified Pi mate adapter scopes ambient context and wakes on escalations, answers, and chase", async () => {
   let now = 1_700_000_000_000;
   const server = await startTestServer({
     parents: { jarvis: "captain", cleo: "jarvis", other: "jarvis" },
@@ -112,16 +111,23 @@ void test("unified Pi mate adapter scopes ambient context and wakes on escalatio
     await client.postEntry(otherCard.id, { text: "Noise in another domain", by: "other" });
     await client.escalateCard(cleoCard.id, { reason: "Need Jarvis decision", actor: "cleo" });
     await client.postEntry(otherCard.id, { text: "Hey @cleo can you cross-check?", by: "other" });
+    const secondCard = await client.createCard({
+      mate: "cleo",
+      title: "Second Hayward check",
+      project: "Cleo",
+      actor: "captain",
+    });
+    await client.escalateCard(secondCard.id, { reason: "Approve the plan?", actor: "cleo" });
+    await client.answerCard(secondCard.id, { text: "Go ahead with the plan", actor: "jarvis" });
 
     now += 650_000;
 
-    const deadline = Date.now() + 3000;
-    while (
-      (jarvisMock.delivered.length < 2 || cleoMock.delivered.length === 0) &&
-      Date.now() < deadline
-    ) {
-      await delay(25);
-    }
+    await waitFor(
+      () =>
+        jarvisMock.delivered.some((text) => text.includes("Cards waiting in your court")) &&
+        cleoMock.delivered.some((text) => text.includes("Go ahead with the plan")),
+      5000,
+    );
     await cleoMock.emitShutdown();
     await jarvisMock.emitShutdown();
 
@@ -129,7 +135,11 @@ void test("unified Pi mate adapter scopes ambient context and wakes on escalatio
     assert.ok(jarvisMock.delivered.some((text) => text.includes("Cards waiting in your court")));
     assert.ok(!jarvisMock.delivered.some((text) => text.includes("Noise in another domain")));
 
-    assert.ok(cleoMock.delivered.some((text) => text.includes("Hey @cleo can you cross-check?")));
+    assert.ok(cleoMock.delivered.some((text) => text.includes("Go ahead with the plan")));
+    assert.ok(
+      !cleoMock.delivered.some((text) => text.includes("cross-check")),
+      "a mention on another mate's card does not wake cleo",
+    );
     assert.ok(!cleoMock.delivered.some((text) => text.includes("Noise in another domain")));
   } finally {
     await server.stop();
@@ -226,13 +236,13 @@ void test("fleet mates up idempotently manages permanent interactive panes in He
   const sleeperScript = `import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(envDump)}, JSON.stringify({
   mate: process.env.FLEET_MATE,
-  parent: process.env.FLEET_PARENT,
   optchat: process.env.YPI_OPTCHAT_CONFIG,
 }));
 setInterval(() => {}, 1000);`;
 
   const config: RunnerConfig = {
     host: "test-host",
+    boardUrl: "http://127.0.0.1:4100",
     matesFilter: [],
     workspacesRoot: join(root, "workspaces"),
     concurrency: 1,
@@ -312,7 +322,6 @@ setInterval(() => {}, 1000);`;
     assert.ok(recordedRaw !== undefined, "permanent mate pane must launch its command with env");
     const recorded = RecordedEnvSchema.parse(JSON.parse(recordedRaw));
     assert.equal(recorded.mate, "cleo");
-    assert.equal(recorded.parent, "jarvis");
     assert.equal(recorded.optchat, join(root, "mates-state", "cleo", "optchat.json"));
 
     const second = await ensureMatesUp(config);

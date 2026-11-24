@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import type { BoardClient } from "../board/client.ts";
-import type { ClaimReceipt, Delivery } from "../board/types.ts";
+import { runnerActor, type ClaimReceipt, type Delivery } from "../board/types.ts";
 import { resolveHerdrConfig, type RunnerConfig } from "../config.ts";
 import {
   closeHerdrPane,
@@ -62,7 +62,7 @@ function buildWorkerEnv(params: {
   readonly config: RunnerConfig;
   readonly cardId: string;
   readonly epoch: number;
-  readonly token: string;
+  readonly workerToken: string;
   readonly mate: string;
   readonly project: string;
   readonly delivery: Delivery;
@@ -72,7 +72,7 @@ function buildWorkerEnv(params: {
   return {
     FLEET_CARD: params.cardId,
     FLEET_CLAIM_EPOCH: String(params.epoch),
-    FLEET_CLAIM_TOKEN: params.token,
+    FLEET_CLAIM_TOKEN: params.workerToken,
     FLEET_MATE: params.mate,
     FLEET_HOST: params.config.host,
     FLEET_PROJECT: params.project,
@@ -81,7 +81,7 @@ function buildWorkerEnv(params: {
     FLEET_BRANCH: params.workspace.branch,
     FLEET_PROMPT: params.promptPath,
     TMPDIR: params.workspace.tmpDir,
-    ...(params.config.boardUrl !== undefined ? { BOARD_URL: params.config.boardUrl } : {}),
+    BOARD_URL: params.config.boardUrl,
   };
 }
 
@@ -166,7 +166,7 @@ async function handleRunOutcome(params: {
       token: params.claim.token,
       outcome: "needs_mate",
       summary,
-      actor: `runner-${params.config.host}`,
+      actor: runnerActor(params.config.host),
       kind: "timeout",
     });
     return { done: true, failed: true, message: `Timed out (${params.run.timedOut})` };
@@ -179,7 +179,7 @@ async function handleRunOutcome(params: {
       token: params.claim.token,
       outcome: "needs_mate",
       summary,
-      actor: `runner-${params.config.host}`,
+      actor: runnerActor(params.config.host),
       kind: "worker_error",
     });
     return { done: true, failed: true, message: `Exited ${String(params.run.exitCode)}` };
@@ -233,7 +233,7 @@ async function handleVerification(params: {
       token: params.claim.token,
       outcome: "needs_mate",
       summary: `Verification stopped at round ${String(verified.rounds)}/${String(params.config.maxReviewRounds)}: ${verified.reason}\n\n${verified.output.slice(-1500)}`,
-      actor: `runner-${params.config.host}`,
+      actor: runnerActor(params.config.host),
       kind: "verification",
     });
     return { ok: false, message: verified.reason };
@@ -241,9 +241,9 @@ async function handleVerification(params: {
 
   await params.client.postEntry(cardId, {
     epoch: params.claim.epoch,
-    token: params.claim.token,
+    token: params.claim.workerToken,
     text: `Verification passed in ${String(verified.rounds)} round(s).`,
-    by: `runner-${params.config.host}`,
+    by: runnerActor(params.config.host),
     internal: true,
     kind: "status",
   });
@@ -265,7 +265,7 @@ async function runClaim(
       token: claim.token,
       outcome: "needs_mate",
       summary: `Stopped after ${String(claim.epoch - 1)} failed or expired attempts on ${config.host}. Re-queueing cannot start another worker on this card; review the thread, then escalate, replace it with a new card, or cancel.`,
-      actor: `runner-${config.host}`,
+      actor: runnerActor(config.host),
       kind: "retry_cap",
     });
     return;
@@ -277,7 +277,7 @@ async function runClaim(
       token: claim.token,
       outcome: "needs_mate",
       summary: `Host ${config.host} has no registered repo for project=${project ?? "(missing)"}.`,
-      actor: `runner-${config.host}`,
+      actor: runnerActor(config.host),
       kind: "missing_repo",
     });
     return;
@@ -300,6 +300,7 @@ async function runClaim(
     controller.abort();
   };
   outerSignal?.addEventListener("abort", onOuterAbort, { once: true });
+  if (outerSignal?.aborted === true) controller.abort();
 
   let leaseLost = false;
   const stopRenewal = startLeaseRenewal(client, claim, config.leaseSeconds, () => {
@@ -331,9 +332,9 @@ async function runClaim(
     const paneSuffix = pane === undefined ? "" : `, herdr ${pane.paneId}`;
     await client.postEntry(cardId, {
       epoch: claim.epoch,
-      token: claim.token,
+      token: claim.workerToken,
       text: `Runner ${config.host} claimed card #${cardId} (attempt ${String(claim.epoch)}, branch ${workspace.branch}, worktree ${workspace.worktreePath}, delivery ${delivery}${paneSuffix}).`,
-      by: `runner-${config.host}`,
+      by: runnerActor(config.host),
       internal: true,
       kind: "status",
     });
@@ -342,7 +343,7 @@ async function runClaim(
       config,
       cardId,
       epoch: claim.epoch,
-      token: claim.token,
+      workerToken: claim.workerToken,
       mate: claim.card.mate,
       project,
       delivery,
@@ -388,19 +389,26 @@ async function runClaim(
       token: claim.token,
       outcome: "done",
       summary: `Completed on ${config.host} (${workspace.branch})`,
-      actor: `runner-${config.host}`,
+      actor: runnerActor(config.host),
     });
+  } catch (error) {
+    failed = true;
+    finalPaneMessage = error instanceof Error ? error.message : String(error);
+    throw error;
   } finally {
     stopRenewal();
     outerSignal?.removeEventListener("abort", onOuterAbort);
-    if (pane !== undefined) {
-      await closeHerdrPane(pane, {
-        failed,
-        keepPane: herdrConfig.keepPane,
-        message: finalPaneMessage,
-      });
+    try {
+      if (pane !== undefined) {
+        await closeHerdrPane(pane, {
+          failed,
+          keepPane: herdrConfig.keepPane,
+          message: finalPaneMessage,
+        });
+      }
+    } finally {
+      await cleanupWorkspace(workspace);
     }
-    await cleanupWorkspace(workspace);
   }
 }
 
@@ -420,7 +428,7 @@ async function executeClaim(
         token: claim.token,
         outcome: "needs_mate",
         summary: `Runner on ${config.host} failed before the worker could finish: ${reason}`,
-        actor: `runner-${config.host}`,
+        actor: runnerActor(config.host),
         kind: "runner_error",
       })
       .catch(() => undefined);
@@ -439,7 +447,7 @@ function claimNextReady(
       host: config.host,
       ...(config.matesFilter.length > 0 ? { mates: config.matesFilter } : {}),
       leaseSeconds: config.leaseSeconds,
-      claimBy: `runner-${config.host}`,
+      claimBy: runnerActor(config.host),
       waitSeconds,
     },
     signal !== undefined ? { signal } : {},

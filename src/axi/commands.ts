@@ -103,11 +103,10 @@ Flags:
   --reason <text>    Required question, evidence, and recommendation`,
   handoff: `fleet handoff - pass a card to a mate (default: its home mate)
 Usage:
-  fleet handoff <id> [--to <mate>] [--text "<context>"] [--internal]
+  fleet handoff <id> [--to <mate>] [--text "<context>"]
 Flags:
   --to <mate>        Target holder (default: card's home mate)
-  --text <message>   Optional handoff note
-  --internal         Mark note internal`,
+  --text <message>   Optional handoff note`,
   answer: `fleet answer - answer an escalated card and hand it back to its mate
 Usage:
   fleet answer <id> --text "<answer>"
@@ -567,7 +566,6 @@ export async function handoffCommand(
     {
       to: { type: "string" },
       text: { type: "string" },
-      internal: { type: "boolean" },
     },
     helpBlock,
   );
@@ -577,12 +575,10 @@ export async function handoffCommand(
   }
   const to = stringFlag(parsed.values, "to");
   const text = stringFlag(parsed.values, "text");
-  const internal = boolFlag(parsed.values, "internal");
   const card = await active.board().handoffCard(id, {
     ...active.fence,
     ...(to !== undefined ? { to } : {}),
     ...(text !== undefined ? { text } : {}),
-    internal,
     actor: active.actor,
   });
   return { card: { id: card.id, state: card.state, holder: card.holder } };
@@ -792,7 +788,7 @@ export async function runCommand(args: string[]): Promise<Record<string, unknown
     helpBlock,
   );
   const config = loadConfig(stringFlag(parsed.values, "config"));
-  const client = createHttpBoardClient(config.boardUrl ?? "http://127.0.0.1:4100");
+  const client = createHttpBoardClient(config.boardUrl);
   const controller = new AbortController();
   const stop = (): void => {
     controller.abort();

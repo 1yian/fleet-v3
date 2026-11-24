@@ -19,6 +19,7 @@ const WorkerReceiptSchema = z.object({
   epoch: z.string(),
   tokenLength: z.number(),
   legacyTask: z.null(),
+  boardUrl: z.string(),
   cwd: z.string(),
   worktree: z.string(),
   branch: z.string(),
@@ -70,6 +71,7 @@ function makeConfig(
 ): RunnerConfig {
   return {
     host: "test-host",
+    boardUrl: "http://127.0.0.1:4100",
     matesFilter: [],
     workspacesRoot: join(root, "workspaces"),
     concurrency: 1,
@@ -149,6 +151,7 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
         epoch: process.env.FLEET_CLAIM_EPOCH,
         tokenLength: (process.env.FLEET_CLAIM_TOKEN ?? "").length,
         legacyTask: process.env.BOARD_TASK ?? null,
+        boardUrl: process.env.BOARD_URL,
         cwd: process.cwd(),
         worktree: process.env.FLEET_WORKTREE,
         branch: process.env.FLEET_BRANCH,
@@ -157,6 +160,7 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
     `;
 
     const config = makeConfig(root, repoDir, {
+      boardUrl: server.url,
       spawn: {
         mode: "local",
         viewport: "headless",
@@ -172,6 +176,7 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
     assert.equal(receipt.card, card.id);
     assert.equal(receipt.argCard, card.id);
     assert.equal(receipt.epoch, "1");
+    assert.equal(receipt.boardUrl, server.url, "workers always target the claiming board");
     assert.ok(receipt.tokenLength >= 32, "worker receives its claim fencing token");
     assert.equal(receipt.branch, `fleet/t-${card.id}-e1`);
     assert.notEqual(receipt.worktree, repoDir);
@@ -719,6 +724,29 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
       panesAfterFail.result.panes.length,
       1,
       "keepPane: on-failure must keep failed pane open for inspection",
+    );
+
+    const crashCard = await client.createCard({
+      mate: "cleo",
+      title: "Verifier cannot start inside herdr",
+      host: "test-host",
+      project: "demo",
+      delivery: "no-mistakes",
+    });
+    const crashConfig = makeConfig(root, repoDir, {
+      spawn: { ...baseHerdrSpawn, command: ["node", "-e", "process.exit(0)"] },
+      verify: {
+        command: ["fleet-e2e-no-such-verifier"],
+        respondCommand: ["fleet-e2e-no-such-verifier"],
+      },
+    });
+    await runLoop(client, crashConfig, { once: true });
+    assert.equal(await cardField(client, crashCard.id, "state"), "held");
+    const panesAfterCrash = HerdrPaneListSchema.parse(JSON.parse(herdrExec("pane", "list")));
+    assert.equal(
+      panesAfterCrash.result.panes.length,
+      2,
+      "a runner exception counts as a failure and keeps the pane open",
     );
   } finally {
     tryExecSilent(() => {

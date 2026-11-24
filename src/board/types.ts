@@ -40,8 +40,10 @@ export const MateNameSchema = HolderNameSchema.refine((name) => name !== "captai
   message: "captain is reserved for the root of the hierarchy",
 });
 
-export function mentionsMate(text: string, mate: string): boolean {
-  return new RegExp(`@${mate}(?![A-Za-z0-9_-])`, "iu").test(text);
+export const SERVER_ACTOR = "system:server";
+
+export function runnerActor(host: string): string {
+  return `runner:${host}`;
 }
 
 export const CardSchema = z.object({
@@ -103,6 +105,7 @@ export const ClaimReceiptSchema = z.object({
   card: CardSchema,
   epoch: z.number().int(),
   token: z.string(),
+  workerToken: z.string(),
   leaseUntil: z.number().int(),
 });
 export type ClaimReceipt = z.infer<typeof ClaimReceiptSchema>;
@@ -156,7 +159,6 @@ export interface CreateCardInput {
   readonly host?: string;
   readonly delivery?: Delivery;
   readonly needs?: readonly string[];
-  readonly labels?: Readonly<Record<string, string>>;
   readonly actor?: string;
 }
 
@@ -215,7 +217,6 @@ export interface HandoffCardInput extends OptionalFenceInput {
   readonly to?: string;
   readonly text?: string;
   readonly actor?: string;
-  readonly internal?: boolean;
 }
 
 export interface AnswerCardInput extends OptionalFenceInput {

@@ -10,6 +10,8 @@ import {
   ENTRY_KINDS,
   EVENT_TYPES,
   MateNameSchema,
+  SERVER_ACTOR,
+  runnerActor,
   type AdvertiseHostInput,
   type AnswerCardInput,
   type BoardEvent,
@@ -54,6 +56,7 @@ CREATE TABLE IF NOT EXISTS cards (
   result TEXT NOT NULL DEFAULT '',
   epoch INTEGER NOT NULL DEFAULT 0,
   claim_token_hash TEXT,
+  worker_token_hash TEXT,
   claim_by TEXT,
   lease_until INTEGER,
   created_by TEXT NOT NULL,
@@ -108,6 +111,7 @@ const CardRowSchema = z.object({
   result: z.string(),
   epoch: z.number().int(),
   claim_token_hash: z.string().nullable(),
+  worker_token_hash: z.string().nullable(),
   claim_by: z.string().nullable(),
   lease_until: z.number().int().nullable(),
   created_by: z.string(),
@@ -288,7 +292,7 @@ export class CardStore {
 
   public parentOf(holder: string): string {
     if (holder === "captain") return "captain";
-    return this.parents[holder] ?? "captain";
+    return Object.hasOwn(this.parents, holder) ? (this.parents[holder] ?? "captain") : "captain";
   }
 
   private publish(events: readonly BoardEvent[]): void {
@@ -401,13 +405,19 @@ export class CardStore {
     return CardRowSchema.parse(raw);
   }
 
-  private static assertFence(row: CardRow, fence: ClaimFenceInput, now: number): void {
+  private static assertFence(
+    row: CardRow,
+    fence: ClaimFenceInput,
+    now: number,
+    holder: "runner" | "worker",
+  ): void {
     const leaseValid = row.lease_until !== null && row.lease_until > now;
+    const expectedHash = holder === "runner" ? row.claim_token_hash : row.worker_token_hash;
     if (
       row.state !== "running" ||
       row.epoch !== fence.epoch ||
       !leaseValid ||
-      !tokenMatches(fence.token, row.claim_token_hash)
+      !tokenMatches(fence.token, expectedHash)
     ) {
       throw new BoardError(
         409,
@@ -422,7 +432,7 @@ export class CardStore {
     if (input.epoch === undefined || input.token === undefined) {
       throw new BoardError(400, "invalid_fence", "epoch and token must be provided together");
     }
-    CardStore.assertFence(row, { epoch: input.epoch, token: input.token }, now);
+    CardStore.assertFence(row, { epoch: input.epoch, token: input.token }, now, "worker");
   }
 
   private expireLeasesInternal(now: number): BoardEvent[] {
@@ -437,7 +447,7 @@ export class CardStore {
       this.db
         .prepare(
           `UPDATE cards
-           SET state = 'queued', holder = 'runner', claim_token_hash = NULL, claim_by = NULL,
+           SET state = 'queued', holder = 'runner', claim_token_hash = NULL, worker_token_hash = NULL, claim_by = NULL,
                lease_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
@@ -448,7 +458,7 @@ export class CardStore {
           cardId: row.id,
           mate: row.mate,
           holder: "runner",
-          actor: "server",
+          actor: SERVER_ACTOR,
           payload: { id: String(row.id), epoch: row.epoch, title: row.title },
           createdAt: now,
         }),
@@ -494,7 +504,7 @@ export class CardStore {
           cardId: row.id,
           mate: row.mate,
           holder: nextHolder,
-          actor: "server",
+          actor: SERVER_ACTOR,
           payload: {
             id: String(row.id),
             title: row.title,
@@ -509,61 +519,54 @@ export class CardStore {
 
   private holdDependentsOfCanceled(canceledId: string, now: number): BoardEvent[] {
     const events: BoardEvent[] = [];
-    const text = `Prerequisite #${canceledId} was canceled; this card depends on it and can never be queued. Cancel this card or create a replacement.`;
-    const visited = new Set<string>();
-    const frontier = [canceledId];
-    for (let id = frontier.pop(); id !== undefined; id = frontier.pop()) {
-      for (const row of this.dependentsOf(id, ["waiting", "held"])) {
-        const rowId = String(row.id);
-        if (visited.has(rowId)) continue;
-        visited.add(rowId);
-        frontier.push(rowId);
-        const entry = this.insertEntry({
-          cardId: row.id,
-          by: "server",
-          kind: "status",
-          text,
-          internal: false,
-          createdAt: now,
-        });
-        if (row.state === "held") {
-          events.push(
-            this.appendEvent({
-              type: "entry.posted",
-              cardId: row.id,
-              mate: row.mate,
-              holder: row.holder,
-              actor: "server",
-              payload: {
-                id: entry.id,
-                cardId: rowId,
-                title: row.title,
-                text,
-                internal: false,
-                kind: entry.kind,
-              },
-              createdAt: now,
-            }),
-          );
-          continue;
-        }
-        this.db
-          .prepare(
-            `UPDATE cards SET state = 'held', holder = ?, result = ?, updated_at = ? WHERE id = ?`,
-          )
-          .run(row.mate, text, now, row.id);
+    const text = `Prerequisite #${canceledId} was canceled; resolve and close this card manually, or cancel it.`;
+    for (const row of this.dependentsOf(canceledId, ["waiting", "held"])) {
+      const rowId = String(row.id);
+      const entry = this.insertEntry({
+        cardId: row.id,
+        by: SERVER_ACTOR,
+        kind: "status",
+        text,
+        internal: false,
+        createdAt: now,
+      });
+      if (row.state === "held") {
         events.push(
           this.appendEvent({
-            type: "card.handed_off",
+            type: "entry.posted",
             cardId: row.id,
             mate: row.mate,
-            holder: row.mate,
-            actor: "server",
-            payload: { id: rowId, title: row.title, to: row.mate, text },
+            holder: row.holder,
+            actor: SERVER_ACTOR,
+            payload: {
+              id: entry.id,
+              cardId: rowId,
+              title: row.title,
+              text,
+              internal: false,
+              kind: entry.kind,
+            },
             createdAt: now,
           }),
         );
+        continue;
       }
+      this.db
+        .prepare(
+          `UPDATE cards SET state = 'held', holder = ?, result = ?, updated_at = ? WHERE id = ?`,
+        )
+        .run(row.mate, text, now, row.id);
+      events.push(
+        this.appendEvent({
+          type: "card.handed_off",
+          cardId: row.id,
+          mate: row.mate,
+          holder: row.mate,
+          actor: SERVER_ACTOR,
+          payload: { id: rowId, title: row.title, to: row.mate, text },
+          createdAt: now,
+        }),
+      );
     }
     return events;
   }
@@ -630,7 +633,7 @@ export class CardStore {
           input.host ?? null,
           input.delivery ?? null,
           JSON.stringify(needsCheck.ids),
-          JSON.stringify(input.labels ?? {}),
+          "{}",
           actor,
           now,
           now,
@@ -784,15 +787,24 @@ export class CardStore {
       const row = CardRowSchema.parse(rowRaw);
       const nextEpoch = row.epoch + 1;
       const token = randomBytes(24).toString("hex");
+      const workerToken = randomBytes(24).toString("hex");
       const leaseUntil = now + input.leaseSeconds * 1000;
       this.db
         .prepare(
           `UPDATE cards
-           SET state = 'running', holder = 'worker', epoch = ?, claim_token_hash = ?,
+           SET state = 'running', holder = 'worker', epoch = ?, claim_token_hash = ?, worker_token_hash = ?,
                claim_by = ?, lease_until = ?, updated_at = ?
            WHERE id = ?`,
         )
-        .run(nextEpoch, hashToken(token), input.claimBy, leaseUntil, now, row.id);
+        .run(
+          nextEpoch,
+          hashToken(token),
+          hashToken(workerToken),
+          input.claimBy,
+          leaseUntil,
+          now,
+          row.id,
+        );
       const card = rowToCard(this.getCardRow(row.id));
       events.push(
         this.appendEvent({
@@ -806,7 +818,7 @@ export class CardStore {
         }),
       );
       return {
-        result: { card, epoch: nextEpoch, token, leaseUntil },
+        result: { card, epoch: nextEpoch, token, workerToken, leaseUntil },
         events,
       };
     });
@@ -822,7 +834,7 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
-      CardStore.assertFence(row, fence, now);
+      CardStore.assertFence(row, fence, now, "runner");
       const leaseUntil = now + fence.leaseSeconds * 1000;
       this.db
         .prepare("UPDATE cards SET lease_until = ?, updated_at = ? WHERE id = ?")
@@ -836,11 +848,11 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
-      CardStore.assertFence(row, fence, now);
+      CardStore.assertFence(row, fence, now, "runner");
       this.db
         .prepare(
           `UPDATE cards
-           SET state = 'queued', holder = 'runner', claim_token_hash = NULL,
+           SET state = 'queued', holder = 'runner', claim_token_hash = NULL, worker_token_hash = NULL,
                claim_by = NULL, lease_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
@@ -864,7 +876,7 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
-      CardStore.assertFence(row, input, now);
+      CardStore.assertFence(row, input, now, "runner");
       const actor = input.actor ?? row.claim_by ?? "runner";
       const events: BoardEvent[] = [];
 
@@ -872,7 +884,7 @@ export class CardStore {
         this.db
           .prepare(
             `UPDATE cards
-             SET state = 'done', holder = '', result = ?, claim_token_hash = NULL,
+             SET state = 'done', holder = '', result = ?, claim_token_hash = NULL, worker_token_hash = NULL,
                  claim_by = NULL, lease_until = NULL, updated_at = ?
              WHERE id = ?`,
           )
@@ -898,7 +910,7 @@ export class CardStore {
       this.db
         .prepare(
           `UPDATE cards
-           SET state = 'held', holder = ?, result = ?, labels_json = ?, claim_token_hash = NULL,
+           SET state = 'held', holder = ?, result = ?, labels_json = ?, claim_token_hash = NULL, worker_token_hash = NULL,
                claim_by = NULL, lease_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
@@ -990,7 +1002,7 @@ export class CardStore {
         .prepare(
           `UPDATE cards
            SET state = 'held', holder = ?, result = ?,
-               claim_token_hash = NULL, claim_by = NULL, lease_until = NULL,
+               claim_token_hash = NULL, worker_token_hash = NULL, claim_by = NULL, lease_until = NULL,
                updated_at = ?
            WHERE id = ?`,
         )
@@ -1034,7 +1046,7 @@ export class CardStore {
         .prepare(
           `UPDATE cards
            SET state = 'held', holder = ?, result = ?,
-               claim_token_hash = NULL, claim_by = NULL, lease_until = NULL,
+               claim_token_hash = NULL, worker_token_hash = NULL, claim_by = NULL, lease_until = NULL,
                updated_at = ?
            WHERE id = ?`,
         )
@@ -1045,7 +1057,7 @@ export class CardStore {
           by: actor,
           kind: "reply",
           text,
-          internal: input.internal === true,
+          internal: false,
           createdAt: now,
         });
       }
@@ -1081,7 +1093,7 @@ export class CardStore {
         .prepare(
           `UPDATE cards
            SET state = 'held', holder = ?, result = ?,
-               claim_token_hash = NULL, claim_by = NULL, lease_until = NULL,
+               claim_token_hash = NULL, worker_token_hash = NULL, claim_by = NULL, lease_until = NULL,
                updated_at = ?
            WHERE id = ?`,
         )
@@ -1130,7 +1142,7 @@ export class CardStore {
         .prepare(
           `UPDATE cards
            SET state = 'done', holder = '', result = ?,
-               claim_token_hash = NULL, claim_by = NULL, lease_until = NULL,
+               claim_token_hash = NULL, worker_token_hash = NULL, claim_by = NULL, lease_until = NULL,
                updated_at = ?
            WHERE id = ?`,
         )
@@ -1180,7 +1192,7 @@ export class CardStore {
         .prepare(
           `UPDATE cards
            SET state = 'canceled', holder = '', result = ?,
-               claim_token_hash = NULL, claim_by = NULL, lease_until = NULL,
+               claim_token_hash = NULL, worker_token_hash = NULL, claim_by = NULL, lease_until = NULL,
                updated_at = ?
            WHERE id = ?`,
         )
@@ -1219,7 +1231,7 @@ export class CardStore {
         cardId: null,
         mate: null,
         holder: null,
-        actor: `runner-${input.host}`,
+        actor: runnerActor(input.host),
         payload: {
           host: input.host,
           mode: input.mode,
@@ -1324,7 +1336,7 @@ export class CardStore {
             cardId: null,
             mate: holder,
             holder,
-            actor: "server",
+            actor: SERVER_ACTOR,
             payload: { holder, cards },
             createdAt: now,
           }),

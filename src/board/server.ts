@@ -8,7 +8,6 @@ import {
   ENTRY_KINDS,
   HolderNameSchema,
   MateNameSchema,
-  mentionsMate,
   type BoardEvent,
   type CardState,
   type ClaimReceipt,
@@ -28,7 +27,6 @@ const CreateCardBodySchema = z.object({
   host: z.string().min(1).optional(),
   delivery: z.enum(DELIVERIES).optional(),
   needs: z.array(z.string()).optional(),
-  labels: z.record(z.string(), z.string()).optional(),
   actor: z.string().min(1).optional(),
 });
 
@@ -87,7 +85,6 @@ const HandoffBodySchema = z.object({
   to: HolderNameSchema.optional(),
   text: z.string().optional(),
   actor: z.string().min(1).optional(),
-  internal: z.boolean().optional(),
 });
 
 const AnswerBodySchema = z.object({
@@ -178,14 +175,8 @@ function matchesEventFilter(
   holderFilter: string | null,
   mateFilter: string | null,
 ): boolean {
-  if (holderFilter !== null) {
-    const mentionsHolder =
-      event.holder === holderFilter ||
-      event.mate === holderFilter ||
-      (event.type === "entry.posted" &&
-        typeof event.payload["text"] === "string" &&
-        mentionsMate(event.payload["text"], holderFilter));
-    if (!mentionsHolder) return false;
+  if (holderFilter !== null && event.holder !== holderFilter && event.mate !== holderFilter) {
+    return false;
   }
   if (mateFilter !== null && event.mate !== mateFilter) {
     return false;
@@ -364,7 +355,6 @@ async function handleHandoffCard(
       ...(body.to !== undefined ? { to: body.to } : {}),
       ...(body.text !== undefined ? { text: body.text } : {}),
       ...(body.actor !== undefined ? { actor: body.actor } : {}),
-      ...(body.internal !== undefined ? { internal: body.internal } : {}),
     }),
   });
 }
@@ -520,7 +510,6 @@ async function routeCardsCollection(
         ...(body.host !== undefined ? { host: body.host } : {}),
         ...(body.delivery !== undefined ? { delivery: body.delivery } : {}),
         ...(body.needs !== undefined ? { needs: body.needs } : {}),
-        ...(body.labels !== undefined ? { labels: body.labels } : {}),
         ...(body.actor !== undefined ? { actor: body.actor } : {}),
       }),
     });

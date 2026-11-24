@@ -409,6 +409,10 @@ function renderBoard() {
 async function openDrawer(id) {
   openCardId = id;
   footKey = "";
+  $("drawer-meta").innerHTML = "";
+  $("drawer-title").textContent = "";
+  $("drawer-body").innerHTML = "";
+  $("drawer-foot").innerHTML = '<div style="color:var(--muted);font-size:12px">Loading...</div>';
   $("drawer-backdrop").classList.add("open");
   await loadDrawer(id);
 }
@@ -525,7 +529,9 @@ const ACTIONS = {
   "reply": data => submitDraft(data.id, "/entries", text => ({ text, by: "captain" })),
   "close-card": async data => { await post("/cards/" + encodeURIComponent(data.id) + "/close", { actor: "captain" }); await refresh(); },
   "cancel-card": async data => {
-    const reason = prompt("Cancel reason?") || "Canceled from board";
+    const answer = prompt("Cancel reason?");
+    if (answer === null) return;
+    const reason = answer.trim() || "Canceled from board";
     await post("/cards/" + encodeURIComponent(data.id) + "/cancel", { reason, actor: "captain" });
     await refresh();
   },

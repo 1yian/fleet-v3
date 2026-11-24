@@ -158,8 +158,7 @@ function resolveMate(config: RunnerConfig, mates: MatesConfig, item: MateItemCon
   const argv = commandTemplate.map((token) => interpolate(token, vars));
   const mergedEnv: Record<string, string> = {
     FLEET_MATE: item.name,
-    FLEET_PARENT: item.parent,
-    ...(config.boardUrl !== undefined ? { BOARD_URL: config.boardUrl } : {}),
+    BOARD_URL: config.boardUrl,
   };
   for (const [key, value] of Object.entries(mates.env)) {
     mergedEnv[key] = interpolate(value, vars);

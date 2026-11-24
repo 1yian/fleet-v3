@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import { createHttpBoardClient, type BoardClient } from "../board/client.ts";
-import { mentionsMate, type BoardEvent } from "../board/types.ts";
+import type { BoardEvent } from "../board/types.ts";
 import { loadConfig } from "../config.ts";
 
 interface BeforeAgentStartEvent {
@@ -29,7 +29,6 @@ export interface PiExtensionApi {
 export interface FleetPiAdapterOptions {
   readonly boardUrl?: string;
   readonly mate?: string;
-  readonly parent?: string;
   readonly reconnectDelayMs?: number;
 }
 
@@ -47,7 +46,6 @@ const ChasePayloadSchema = z.object({
 function resolveBoardClient(overrides: FleetPiAdapterOptions = {}): {
   readonly client: BoardClient;
   readonly mate: string;
-  readonly parent: string | undefined;
 } {
   let boardUrl = overrides.boardUrl ?? process.env["BOARD_URL"];
   const candidates = [
@@ -66,11 +64,9 @@ function resolveBoardClient(overrides: FleetPiAdapterOptions = {}): {
   if (mate === undefined) {
     throw new Error("fleet Pi adapter requires FLEET_MATE (the configured mate this pane serves)");
   }
-  const parent = overrides.parent ?? process.env["FLEET_PARENT"];
   return {
     client: createHttpBoardClient(effectiveUrl),
     mate,
-    parent,
   };
 }
 
@@ -127,7 +123,7 @@ function formatEntryNotice(
 ): string | undefined {
   if (event.payload["internal"] === true) return undefined;
   const text = payloadString(event.payload, "text");
-  if (event.holder !== mate && !mentionsMate(text, mate)) return undefined;
+  if (event.holder !== mate) return undefined;
   return `[fleet] Reply on card #${cardId} (${title}) from ${event.actor ?? "unknown"}:\n${text}`;
 }
 
@@ -148,11 +144,7 @@ function formatMateEvent(event: BoardEvent, mate: string): string | undefined {
   return formatHolderTransition(event, mate, cardId, title);
 }
 
-async function buildAmbientBlock(
-  client: BoardClient,
-  mate: string,
-  explicitParent: string | undefined,
-): Promise<string> {
+async function buildAmbientBlock(client: BoardClient, mate: string): Promise<string> {
   const [charter, heldCards, domainCards, hosts, prefs, parents] = await Promise.all([
     client.getCharter(mate).catch(() => ""),
     client
@@ -168,7 +160,7 @@ async function buildAmbientBlock(
     client.getParents().catch((): Record<string, string> => ({})),
   ]);
 
-  const parent = explicitParent ?? parents[mate] ?? "captain";
+  const parent = Object.hasOwn(parents, mate) ? (parents[mate] ?? "captain") : "captain";
   const children = Object.entries(parents)
     .filter(([, p]) => p === mate)
     .map(([name]) => name)
@@ -214,7 +206,7 @@ export function attachFleetPiAdapter(
   pi: PiExtensionApi,
   overrides: FleetPiAdapterOptions = {},
 ): void {
-  const { client, mate, parent } = resolveBoardClient(overrides);
+  const { client, mate } = resolveBoardClient(overrides);
   const baseDelayMs = overrides.reconnectDelayMs ?? 1500;
   let controller: AbortController | undefined;
   let ambientBlock = "";
@@ -251,7 +243,7 @@ export function attachFleetPiAdapter(
 
   pi.on("session_start", async () => {
     const cursor = await client.latestEventId().catch(() => undefined);
-    ambientBlock = await buildAmbientBlock(client, mate, parent);
+    ambientBlock = await buildAmbientBlock(client, mate);
     controller = new AbortController();
     void watchEvents(controller.signal, cursor);
   });

@@ -84,7 +84,7 @@ const VerifyConfigSchema = z.object({
 const RunnerConfigSchema = z
   .object({
     host: z.string().min(1),
-    boardUrl: z.url().optional(),
+    boardUrl: z.url().default("http://127.0.0.1:4100"),
     matesFilter: z.array(z.string().min(1)).default([]),
     workspacesRoot: z.string().min(1).default("~/fleet-workspaces"),
     concurrency: z.number().int().min(1).max(32).default(4),
