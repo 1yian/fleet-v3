@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { board, type Board } from "@vercel/board";
 import { runAxiCli } from "axi-sdk-js";
@@ -53,13 +54,23 @@ export interface RunFleetCliOptions {
   readonly stdout?: { write: (chunk: string) => unknown };
 }
 
+function findDefaultConfig(): string | undefined {
+  const candidates = [
+    process.env["FLEET_CONFIG"],
+    resolve(process.cwd(), "fleet.yaml"),
+    resolve(homedir(), ".config", "fleet", "fleet.yaml"),
+    resolve(homedir(), ".fleet-v3", "fleet.yaml"),
+  ];
+  return candidates.find((path): path is string => path !== undefined && existsSync(path));
+}
+
 function defaultBoardContext(): FleetAxiContext {
   const envUrl = process.env["BOARD_URL"];
   let boardUrl = envUrl;
   let metaChannel = "meta";
-  const defaultConfigPath = process.env["FLEET_CONFIG"] ?? resolve(process.cwd(), "fleet.yaml");
-  if (boardUrl === undefined && existsSync(defaultConfigPath)) {
-    const cfg = loadConfig(defaultConfigPath);
+  const configPath = findDefaultConfig();
+  if (boardUrl === undefined && configPath !== undefined) {
+    const cfg = loadConfig(configPath);
     boardUrl = cfg.boardUrl;
     metaChannel = cfg.metaChannel;
   }
