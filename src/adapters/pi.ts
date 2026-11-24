@@ -4,7 +4,7 @@ import { resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import { createHttpBoardClient, type BoardClient } from "../board/client.ts";
 import type { BoardEvent } from "../board/types.ts";
-import { loadConfig } from "../config.ts";
+import { loadFleetConfig } from "../config.ts";
 
 interface BeforeAgentStartEvent {
   readonly systemPrompt: string;
@@ -56,7 +56,7 @@ function resolveBoardClient(overrides: FleetPiAdapterOptions = {}): {
   ];
   const cfgPath = candidates.find((p): p is string => p !== undefined && existsSync(p));
   if (boardUrl === undefined && cfgPath !== undefined) {
-    const cfg = loadConfig(cfgPath);
+    const cfg = loadFleetConfig(cfgPath);
     boardUrl = cfg.boardUrl;
   }
   const effectiveUrl = boardUrl ?? "http://127.0.0.1:4100";

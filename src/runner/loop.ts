@@ -271,6 +271,23 @@ function openWorkerPane(
   });
 }
 
+async function abandonLaunch(
+  client: BoardClient,
+  claim: ClaimReceipt,
+  pane: HerdrPaneHandle | undefined,
+): Promise<void> {
+  if (pane !== undefined) {
+    await closeHerdrPane(pane, {
+      failed: false,
+      keepPane: "never",
+      message: "Shutdown before launch",
+    });
+  }
+  await client
+    .releaseClaim(claim.card.id, { epoch: claim.epoch, token: claim.token })
+    .catch(() => undefined);
+}
+
 async function runClaim(
   client: BoardClient,
   config: RunnerConfig,
@@ -335,14 +352,13 @@ async function runClaim(
     });
     preparedWorkspace = workspace;
 
+    pane = await openWorkerPane(config, claim, project, workspace, delivery, controller.signal);
     if (controller.signal.aborted) {
-      await client
-        .releaseClaim(cardId, { epoch: claim.epoch, token: claim.token })
-        .catch(() => undefined);
+      const unlaunched = pane;
+      pane = undefined;
+      await abandonLaunch(client, claim, unlaunched);
       return;
     }
-
-    pane = await openWorkerPane(config, claim, project, workspace, delivery, controller.signal);
 
     const paneSuffix = pane === undefined ? "" : `, herdr ${pane.paneId}`;
     await client.postEntry(cardId, {

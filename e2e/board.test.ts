@@ -580,3 +580,61 @@ void test("stopping the card server ends open SSE streams instead of hanging shu
     controller.abort();
   }
 });
+
+void test("recent done follows completion time, escalation needs a held card, and foreign browser writes are refused", async () => {
+  let now = 1_700_000_000_000;
+  const server = await startTestServer({
+    parents: { cleo: "captain" },
+    now: () => {
+      now += 1000;
+      return now;
+    },
+  });
+  const { client } = server;
+
+  try {
+    const oldest = await client.createCard({ mate: "cleo", title: "Closed last" });
+    for (let i = 0; i < 52; i += 1) {
+      const filler = await client.createCard({ mate: "cleo", title: `Filler ${String(i)}` });
+      await client.closeCard(filler.id, {});
+    }
+    await client.closeCard(oldest.id, { result: "finally" });
+    const overview = await client.getOverview();
+    assert.equal(overview.recentDone.length, 50);
+    assert.equal(
+      overview.recentDone[0]?.id,
+      oldest.id,
+      "the most recently completed card leads the done column even with an old id",
+    );
+
+    const queued = await client.createCard({
+      mate: "cleo",
+      title: "Queued work",
+      host: "h1",
+      project: "Cleo",
+    });
+    await assert.rejects(
+      () => client.escalateCard(queued.id, { reason: "skip the mate" }),
+      rejectsWith(409, "invalid_state"),
+    );
+    assert.equal(await cardField(client, queued.id, "holder"), "runner");
+
+    const foreign = await fetch(`${server.url}/api/cards/${queued.id}/cancel`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "http://evil.example" },
+      body: JSON.stringify({ reason: "cross-site" }),
+    });
+    assert.equal(foreign.status, 403);
+    await foreign.text();
+    const plain = await fetch(`${server.url}/api/cards/${queued.id}/cancel`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ reason: "simple request" }),
+    });
+    assert.equal(plain.status, 415);
+    await plain.text();
+    assert.equal(await cardField(client, queued.id, "state"), "queued");
+  } finally {
+    await server.stop();
+  }
+});

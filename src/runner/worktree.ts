@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import type { RepoConfig } from "../config.ts";
@@ -37,6 +38,15 @@ export function hasEnvrcInAncestry(startDir: string): boolean {
   }
 }
 
+async function branchExists(repoPath: string, branch: string): Promise<boolean> {
+  try {
+    await runGit(repoPath, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function prepareWorkspace(params: {
   readonly workspacesRoot: string;
   readonly channel: string;
@@ -51,9 +61,13 @@ export async function prepareWorkspace(params: {
   const baseDir = join(params.workspacesRoot, safeChannel, safeProject);
   const worktreePath = join(baseDir, "worktrees", `t-${safeTask}`);
   const tmpDir = join(baseDir, "tmp", `t-${safeTask}`);
-  const branch = `fleet/t-${safeTask}`;
+  const preferredBranch = `fleet/t-${safeTask}`;
+  const branch = (await branchExists(params.repo.path, preferredBranch))
+    ? `${preferredBranch}-${randomBytes(3).toString("hex")}`
+    : preferredBranch;
 
   mkdirSync(dirname(worktreePath), { recursive: true });
+  const createdTmpDir = !existsSync(tmpDir);
   mkdirSync(tmpDir, { recursive: true });
 
   try {
@@ -68,7 +82,7 @@ export async function prepareWorkspace(params: {
     await runGit(params.repo.path, [
       "worktree",
       "add",
-      "-B",
+      "-b",
       branch,
       worktreePath,
       params.repo.baseBranch,
@@ -91,7 +105,7 @@ export async function prepareWorkspace(params: {
     await runGit(params.repo.path, ["worktree", "prune"]).catch(() => undefined);
     await runGit(params.repo.path, ["branch", "-D", branch]).catch(() => undefined);
     rmSync(worktreePath, { recursive: true, force: true });
-    rmSync(tmpDir, { recursive: true, force: true });
+    if (createdTmpDir) rmSync(tmpDir, { recursive: true, force: true });
     throw error;
   }
 }

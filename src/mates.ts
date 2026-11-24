@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import type { MateItemConfig, MatesConfig, RunnerConfig } from "./config.ts";
+import type { FleetConfig, MateItemConfig, MatesConfig } from "./config.ts";
 import { runHerdr, shellQuoteSingle } from "./runner/herdr.ts";
 
 const DEFAULT_MATE_PROMPT = fileURLToPath(new URL("../prompts/mate.md", import.meta.url));
@@ -141,7 +141,7 @@ function interpolate(template: string, vars: Readonly<Record<string, string>>): 
   return out;
 }
 
-function resolveMate(config: RunnerConfig, mates: MatesConfig, item: MateItemConfig): ResolvedMate {
+function resolveMate(config: FleetConfig, mates: MatesConfig, item: MateItemConfig): ResolvedMate {
   const stateDir = join(mates.stateDir, item.name);
   const cwd = item.cwd ?? stateDir;
   const promptPath = item.promptPath ?? mates.promptPath ?? DEFAULT_MATE_PROMPT;
@@ -177,7 +177,7 @@ function resolveMate(config: RunnerConfig, mates: MatesConfig, item: MateItemCon
   };
 }
 
-function requireMates(config: RunnerConfig): MatesConfig {
+function requireMates(config: FleetConfig): MatesConfig {
   if (config.mates === undefined) {
     return {
       workspace: "mates",
@@ -333,7 +333,7 @@ function selectMates(
   return mates.items.filter((entry) => entry.autoStart);
 }
 
-export async function listMates(config: RunnerConfig): Promise<MateStatus[]> {
+export async function listMates(config: FleetConfig): Promise<MateStatus[]> {
   const mates = requireMates(config);
   const results: MateStatus[] = [];
   for (const item of mates.items) {
@@ -367,7 +367,7 @@ export async function listMates(config: RunnerConfig): Promise<MateStatus[]> {
 }
 
 export async function ensureMatesUp(
-  config: RunnerConfig,
+  config: FleetConfig,
   options: { readonly name?: string; readonly all?: boolean } = {},
 ): Promise<MateActionResult[]> {
   const mates = requireMates(config);
@@ -421,7 +421,7 @@ export async function ensureMatesUp(
 }
 
 export async function stopMates(
-  config: RunnerConfig,
+  config: FleetConfig,
   options: { readonly name?: string; readonly all?: boolean } = {},
 ): Promise<MateStopResult[]> {
   const mates = requireMates(config);

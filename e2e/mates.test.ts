@@ -7,7 +7,7 @@ import { afterEach, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { attachFleetPiAdapter } from "../src/adapters/pi.ts";
-import { loadConfig, type RunnerConfig } from "../src/config.ts";
+import { loadConfig, loadFleetConfig, type RunnerConfig } from "../src/config.ts";
 import { ensureMatesUp, listMates, stopMates } from "../src/mates.ts";
 import { createMockPi, startTestServer, waitFor } from "./support.ts";
 
@@ -135,7 +135,11 @@ void test("unified Pi mate adapter scopes ambient context and wakes on escalatio
     assert.ok(jarvisMock.delivered.some((text) => text.includes("Cards waiting in your court")));
     assert.ok(!jarvisMock.delivered.some((text) => text.includes("Noise in another domain")));
 
-    assert.ok(cleoMock.delivered.some((text) => text.includes("Go ahead with the plan")));
+    const answerIndex = cleoMock.delivered.findIndex((text) =>
+      text.includes("Go ahead with the plan"),
+    );
+    assert.notEqual(answerIndex, -1);
+    assert.equal(cleoMock.woke[answerIndex], true, "a holder transfer must trigger a Pi turn");
     assert.ok(
       !cleoMock.delivered.some((text) => text.includes("cross-check")),
       "a mention on another mate's card does not wake cleo",
@@ -217,6 +221,19 @@ void test("config load rejects cyclic, duplicated, or unrooted mate hierarchies 
       /reserved/u,
     );
   }
+  const boardOnly = join(root, "board-only.yaml");
+  writeFileSync(
+    boardOnly,
+    ["server:", "  port: 4321", ...matesYaml("- name: cleo|  parent: captain")].join("\n"),
+  );
+  const board = loadFleetConfig(boardOnly);
+  assert.equal(board.server?.port, 4321);
+  assert.equal(board.mates?.items[0]?.name, "cleo");
+  assert.throws(() => loadConfig(boardOnly), /host/u);
+  const shared = loadFleetConfig(
+    write("shared.yaml", matesYaml("- name: jarvis|  parent: captain")),
+  );
+  assert.equal(shared.mates?.items[0]?.name, "jarvis", "one shared file serves every entry point");
   assert.throws(
     () => loadConfig(write("filter.yaml", ['matesFilter: ["ops.qa"]'])),
     /names use letters/u,

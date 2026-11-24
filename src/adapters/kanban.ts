@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { checkWriteIngress } from "../board/ingress.ts";
 import { KANBAN_HTML } from "./kanban-html.ts";
 
 export interface KanbanServerOptions {
@@ -94,6 +95,12 @@ export async function startKanbanServer(
           return;
         }
         if (rawUrl.startsWith("/api/")) {
+          const rejected = checkWriteIngress(req);
+          if (rejected !== undefined) {
+            res.writeHead(rejected.status, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: rejected.code, message: rejected.message }));
+            return;
+          }
           await proxyUpstream(options.boardUrl, req, res, rawUrl);
           return;
         }

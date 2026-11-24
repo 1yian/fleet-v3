@@ -939,3 +939,76 @@ void test("a failed worktree setup leaves no scratch directory or branch behind"
     await server.stop();
   }
 });
+
+void test("a branch left from an earlier board is never overwritten or deleted by a new attempt", async () => {
+  const root = makeTempDir("fleet-v3-branch-");
+  const repoDir = initGitRepo(root);
+  const retained = "fleet/t-1-e1";
+  execFileSync("git", ["-C", repoDir, "branch", retained]);
+  const retainedSha = execFileSync("git", ["-C", repoDir, "rev-parse", retained], {
+    encoding: "utf8",
+  }).trim();
+  writeFileSync(join(repoDir, "next.txt"), "advance main\n");
+  execFileSync("git", ["-C", repoDir, "add", "next.txt"]);
+  execFileSync("git", ["-C", repoDir, "commit", "-m", "advance"], { stdio: "ignore" });
+  const receiptPath = join(root, "branch-receipt.json");
+
+  const failing = await startTestServer();
+  try {
+    const card = await failing.client.createCard({
+      mate: "cleo",
+      title: "Fresh board card 1, missing base",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    assert.equal(card.id, "1");
+    const config = makeConfig(root, repoDir, {
+      repos: { demo: { path: repoDir, baseBranch: "no-such-branch", delivery: "direct-pr" } },
+    });
+    await runLoop(failing.client, config, { once: true });
+  } finally {
+    await failing.stop();
+  }
+  const afterFailure = execFileSync("git", ["-C", repoDir, "rev-parse", retained], {
+    encoding: "utf8",
+  }).trim();
+  assert.equal(
+    afterFailure,
+    retainedSha,
+    "a failed attempt must not delete a branch it never created",
+  );
+
+  const succeeding = await startTestServer();
+  try {
+    await succeeding.client.createCard({
+      mate: "cleo",
+      title: "Fresh board card 1, healthy",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    const config = makeConfig(root, repoDir, {
+      spawn: {
+        mode: "local",
+        viewport: "headless",
+        direnv: false,
+        command: [
+          "node",
+          "-e",
+          `require("node:fs").writeFileSync(${JSON.stringify(receiptPath)}, process.env.FLEET_BRANCH)`,
+        ],
+      },
+    });
+    await runLoop(succeeding.client, config, { once: true });
+  } finally {
+    await succeeding.stop();
+  }
+  const used = readFileSync(receiptPath, "utf8");
+  assert.notEqual(used, retained, "the new attempt takes its own branch");
+  assert.ok(used.startsWith(`${retained}-`));
+  const afterSuccess = execFileSync("git", ["-C", repoDir, "rev-parse", retained], {
+    encoding: "utf8",
+  }).trim();
+  assert.equal(afterSuccess, retainedSha, "the earlier branch keeps its commit");
+});

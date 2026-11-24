@@ -265,6 +265,17 @@ void test("cards lists report the true total and keep open work visible behind c
       url,
     );
     assert.match(filtered.out, /fleet cards --mate cleo --state all --fields project --limit 4/u);
+
+    const spaced = await captureCli(
+      ["cards", "--state", "all", "--fields", "project, host", "--limit", "1"],
+      url,
+    );
+    const hint = /Run `fleet (cards[^`]*)`/u.exec(spaced.out);
+    assert.ok(hint?.[1] !== undefined, "a truncated list prints a continuation");
+    const followed = await captureCli(hint[1].split(" "), url);
+    assert.equal(followed.exitCode, 0, "the printed continuation runs as written");
+    assert.match(followed.out, /count: 4 of 4 total/u);
+    assert.match(followed.out, /host/u);
   } finally {
     await server.stop();
   }

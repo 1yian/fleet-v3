@@ -28,7 +28,7 @@ import { createHttpBoardClient } from "./board/client.ts";
 import { startBoardServer } from "./board/server.ts";
 import { CardStore } from "./board/store.ts";
 import type { OptionalFenceInput } from "./board/types.ts";
-import { extractMateParents, loadConfig, type RunnerConfig } from "./config.ts";
+import { extractMateParents, loadFleetConfig, type FleetConfig } from "./config.ts";
 import { ensureMatesUp, listMates, stopMates } from "./mates.ts";
 import { VERSION } from "./version.ts";
 
@@ -96,7 +96,7 @@ function resolveBoardUrl(explicit: string | undefined): string {
   let boardUrl = explicit ?? process.env["BOARD_URL"];
   const configPath = findDefaultConfig();
   if (boardUrl === undefined && configPath !== undefined) {
-    boardUrl = loadConfig(configPath).boardUrl;
+    boardUrl = loadFleetConfig(configPath).boardUrl;
   }
   return boardUrl ?? "http://127.0.0.1:4100";
 }
@@ -141,8 +141,8 @@ function resolveServeOptions(
   readonly staleAfterMs: number;
 } {
   const configPath = stringFlag(values, "config") ?? findDefaultConfig();
-  const cfg: RunnerConfig | undefined =
-    configPath === undefined ? undefined : loadConfig(configPath);
+  const cfg: FleetConfig | undefined =
+    configPath === undefined ? undefined : loadFleetConfig(configPath);
   const serverCfg = cfg?.server;
   const dataDir =
     stringFlag(values, "dir") ?? serverCfg?.dataDir ?? resolvePath(homedir(), ".fleet-v3", "board");
@@ -251,7 +251,7 @@ async function matesCommand(args: string[]): Promise<Record<string, unknown>> {
       "Pass --config <path> or run `fleet init`",
     ]);
   }
-  const config = loadConfig(configPath);
+  const config = loadFleetConfig(configPath);
 
   if (sub === "status" || sub === "list") {
     return { mates: await listMates(config) };

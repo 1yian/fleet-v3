@@ -12,7 +12,7 @@ Read [VISION.md](VISION.md) for the design principles and [AGENTS.md](AGENTS.md)
 - `src/mates.ts` - `fleet mates` idempotently manages permanent interactive mate panes in `herdr` (Jarvis with `parent: captain` and domain mates with `parent: jarvis` are the same primitive).
 - `src/adapters/` - thin optional viewports: the unified Pi/ypi SSE mate adapter (`pi.ts`) and visual Kanban UI (`kanban.ts`, served only by `fleet web`, which proxies the Card Server API).
 - `prompts/` - always-loaded role prompts for mates and workers (`prompts/mate.md`, `prompts/worker.md` - under 700 words total).
-- `fleet.example.yaml` - per-host configuration template. Copy to `fleet.yaml` (gitignored) via `fleet init`.
+- `fleet.example.yaml` - configuration template. One shared file can serve every command: `fleet serve` and `fleet mates` read only `boardUrl`, `server`, and `mates`, while `fleet run` also requires `host`, `spawn`, and `repos`. Copy to `fleet.yaml` (gitignored) via `fleet init`.
 - `e2e/` - end-to-end tests against real `node:sqlite`, live HTTP/SSE servers, real git worktrees, Apple containers, and isolated Herdr sessions.
 
 ## Quick start

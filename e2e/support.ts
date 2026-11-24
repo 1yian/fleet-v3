@@ -91,6 +91,7 @@ export async function waitFor(
 export function createMockPi(): {
   readonly api: PiExtensionApi;
   readonly delivered: string[];
+  readonly woke: boolean[];
   readonly emitStart: () => Promise<void>;
   readonly emitShutdown: () => Promise<void>;
   readonly emitBeforeStart: (systemPrompt: string) => Promise<{ systemPrompt: string } | undefined>;
@@ -103,6 +104,7 @@ export function createMockPi(): {
     }) => Promise<{ systemPrompt: string } | undefined> | { systemPrompt: string } | undefined;
   } = {};
   const delivered: string[] = [];
+  const woke: boolean[] = [];
 
   const on: PiExtensionApi["on"] = (event: string, handler: (...args: never[]) => unknown) => {
     if (event === "session_start") {
@@ -134,11 +136,13 @@ export function createMockPi(): {
   return {
     api: {
       on,
-      sendMessage(message) {
+      sendMessage(message, options) {
         delivered.push(message.content);
+        woke.push(options.triggerTurn);
       },
     },
     delivered,
+    woke,
     async emitStart() {
       await handlers.start?.();
     },

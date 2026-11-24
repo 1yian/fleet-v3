@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { z } from "zod";
+import { checkWriteIngress } from "./ingress.ts";
 import type { CardStore } from "./store.ts";
 import {
   BoardError,
@@ -631,6 +632,8 @@ export async function startBoardServer(options: BoardServerOptions): Promise<Sta
   const server = createServer((req, res) => {
     void (async () => {
       try {
+        const rejected = checkWriteIngress(req);
+        if (rejected !== undefined) throw rejected;
         const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
         await routeApiRequest(options.store, url, req, res);
       } catch (error) {

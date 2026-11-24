@@ -45,6 +45,14 @@ void test("kanban proxy exposes the card server API so a held captain card is an
     assert.equal(cardServerRoot.status, 404, "the card server serves no UI");
     await cardServerRoot.text();
 
+    const foreign = await fetch(`${kanban.url}/api/cards`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "http://evil.example" },
+      body: JSON.stringify({ mate: "cleo", title: "Cross-site card" }),
+    });
+    assert.equal(foreign.status, 403, "browser writes from another origin never reach the board");
+    await foreign.text();
+
     const created = await postJson(`${kanban.url}/api/cards`, {
       mate: "cleo",
       title: "Kanban smoke card",

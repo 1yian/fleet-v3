@@ -987,8 +987,15 @@ export class CardStore {
       if (row.state === "done" || row.state === "canceled") {
         throw new BoardError(409, "card_terminal", `Card #${String(id)} is ${row.state}`);
       }
-      const actor = input.actor ?? (row.holder === "worker" ? row.mate : row.holder);
-      const fromHolder = row.holder === "worker" || row.holder === "runner" ? row.mate : row.holder;
+      if (row.state !== "held") {
+        throw new BoardError(
+          409,
+          "invalid_state",
+          `Card #${String(id)} is ${row.state}; only held cards escalate, workers hand off to their mate`,
+        );
+      }
+      const actor = input.actor ?? row.holder;
+      const fromHolder = row.holder;
       const targetHolder = this.parentOf(fromHolder);
       if (row.state === "held" && row.holder === targetHolder && row.result === reason) {
         return { result: rowToCard(row), events: [] };
@@ -1371,7 +1378,12 @@ export class CardStore {
       counts,
       hosts: this.listHosts(),
       cards: this.listCards({ state: "open" }).cards,
-      recentDone: this.listCards({ state: "done", limit: RECENT_DONE_LIMIT }).cards,
+      recentDone: this.db
+        .prepare(
+          `${CARD_SELECT} WHERE c.state = 'done' ORDER BY c.updated_at DESC, c.id DESC LIMIT ?`,
+        )
+        .all(RECENT_DONE_LIMIT)
+        .map((raw) => rowToCard(CardRowSchema.parse(raw))),
     };
   }
 

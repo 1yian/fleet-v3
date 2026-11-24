@@ -318,7 +318,7 @@ export async function cardsCommand(
       ...(mate !== undefined ? [`--mate ${mate}`] : []),
       ...(holder !== undefined ? [`--holder ${holder}`] : []),
       ...(state === "open" ? [] : [`--state ${state}`]),
-      ...(fieldsRaw !== undefined ? [`--fields ${fieldsRaw}`] : []),
+      ...(extraFields.length > 0 ? [`--fields ${extraFields.join(",")}`] : []),
       `--limit ${String(page.total)}`,
     ].join(" ");
     help.push(`Run \`${continuation}\` to see all ${String(page.total)}`);
