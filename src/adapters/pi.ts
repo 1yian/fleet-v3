@@ -91,7 +91,6 @@ function formatHighSignalEvent(event: BoardEventView, profile: string): string |
 export default function fleetPiAdapter(pi: PiExtensionApi): void {
   const { client, boardUrl, metaChannel, profile } = resolveBoardClient();
   let controller: AbortController | undefined;
-  let injectedAmbient = false;
   let ambientBlock = "";
 
   const loadAmbient = async (): Promise<void> => {
@@ -128,8 +127,7 @@ export default function fleetPiAdapter(pi: PiExtensionApi): void {
   });
 
   pi.on("before_agent_start", (event) => {
-    if (injectedAmbient || ambientBlock === "") return undefined;
-    injectedAmbient = true;
+    if (ambientBlock === "") return undefined;
     return {
       systemPrompt: `${event.systemPrompt}\n\n## Ambient Fleet Context (live at session start)\n\n${ambientBlock}`,
     };
