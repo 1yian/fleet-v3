@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { RunnerConfig } from "../src/config.ts";
 import { runLoop } from "../src/runner/loop.ts";
-import { cardField, startTestServer, waitFor } from "./support.ts";
+import { attachFleetPiAdapter } from "../src/adapters/pi.ts";
+import { cardField, createMockPi, startTestServer, waitFor } from "./support.ts";
 
 const BIN_PATH = fileURLToPath(new URL("../src/bin.ts", import.meta.url));
 
@@ -28,7 +29,11 @@ const AttemptReceiptSchema = z.object({
   worktree: z.string(),
   existedAtStart: z.boolean(),
   existedAtEnd: z.boolean(),
+  staleStatus: z.number().nullable(),
+  staleOut: z.string(),
 });
+
+const ProbeSchema = z.object({ status: z.number().nullable(), out: z.string() });
 
 const HerdrReceiptSchema = z.object({
   card: z.string(),
@@ -199,10 +204,17 @@ void test("worker handoff goes through the fenced fleet CLI and survives exit 0"
       delivery: "direct-pr",
     });
 
+    const closeProbe = join(root, "close-probe.json");
     const workerScript = `
-      const { execFileSync } = require("node:child_process");
+      const { execFileSync, spawnSync } = require("node:child_process");
+      const bin = ${JSON.stringify(BIN_PATH)};
+      const attempt = spawnSync(process.execPath, [bin, "close", process.env.FLEET_CARD, "--result", "all done"], { encoding: "utf8" });
+      require("node:fs").writeFileSync(${JSON.stringify(closeProbe)}, JSON.stringify({
+        status: attempt.status,
+        out: attempt.stdout + attempt.stderr,
+      }));
       execFileSync(process.execPath, [
-        ${JSON.stringify(BIN_PATH)}, "handoff", process.env.FLEET_CARD,
+        bin, "handoff", process.env.FLEET_CARD,
         "--text", "Missing API key; returning to mate",
       ], { stdio: "inherit" });
     `;
@@ -217,17 +229,40 @@ void test("worker handoff goes through the fenced fleet CLI and survives exit 0"
       },
     });
 
-    const handled = await runLoop(client, config, { once: true });
-    assert.equal(handled, 1);
+    const cleoPane = createMockPi();
+    attachFleetPiAdapter(cleoPane.api, { boardUrl: server.url, mate: "cleo" });
+    await cleoPane.emitStart();
 
-    const thread = await client.getThread(card.id);
-    assert.equal(thread.card.state, "held", "must not overwrite worker handoff with done");
-    assert.equal(thread.card.holder, "cleo");
-    assert.ok(
-      thread.entries.some(
-        (entry) => entry.by === "cleo" && entry.text === "Missing API key; returning to mate",
-      ),
-    );
+    try {
+      const handled = await runLoop(client, config, { once: true });
+      assert.equal(handled, 1);
+
+      const thread = await client.getThread(card.id);
+      assert.equal(thread.card.state, "held", "must not overwrite worker handoff with done");
+      assert.equal(thread.card.holder, "cleo");
+      assert.ok(
+        thread.entries.some(
+          (entry) =>
+            entry.by === "worker:cleo" && entry.text === "Missing API key; returning to mate",
+        ),
+        "worker writes are attributed to a worker actor, not the home mate",
+      );
+
+      const probe = ProbeSchema.parse(JSON.parse(readFileSync(closeProbe, "utf8")));
+      assert.notEqual(probe.status, 0, "a worker cannot close its own card");
+      assert.match(probe.out, /exiting cleanly/u);
+
+      assert.ok(
+        await waitFor(() =>
+          cleoPane.delivered.some(
+            (text) => text.includes("handed to you") && text.includes("Missing API key"),
+          ),
+        ),
+        "the home mate's pane is woken by the worker handoff",
+      );
+    } finally {
+      await cleoPane.emitShutdown();
+    }
   } finally {
     await server.stop();
   }
@@ -254,24 +289,34 @@ void test("a requeued card runs its next attempt in its own workspace while the 
 
     const workerScript = `
       const fs = require("node:fs");
-      const { execFileSync } = require("node:child_process");
+      const { execFileSync, spawnSync } = require("node:child_process");
       const epoch = process.env.FLEET_CLAIM_EPOCH;
       const worktree = process.env.FLEET_WORKTREE;
       const existedAtStart = fs.existsSync(worktree);
       const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const startedMarker = ${JSON.stringify(receiptDir)} + "/e2-started";
       (async () => {
+        let stale = { status: null, out: "" };
         if (epoch === "1") {
           execFileSync(process.execPath, [
             ${JSON.stringify(BIN_PATH)}, "handoff", process.env.FLEET_CARD, "--text", "first attempt hands back",
           ], { stdio: "inherit" });
-          await sleep(1500);
+          for (let i = 0; i < 200 && !fs.existsSync(startedMarker); i += 1) await sleep(50);
+          const attempt = spawnSync(process.execPath, [
+            ${JSON.stringify(BIN_PATH)}, "reply", process.env.FLEET_CARD, "--text", "stale reply from attempt 1",
+          ], { encoding: "utf8" });
+          stale = { status: attempt.status, out: attempt.stdout + attempt.stderr };
+          await sleep(1000);
         } else {
+          fs.writeFileSync(startedMarker, "1");
           await sleep(2500);
         }
         fs.writeFileSync(${JSON.stringify(receiptDir)} + "/e" + epoch + ".json", JSON.stringify({
           worktree,
           existedAtStart,
           existedAtEnd: fs.existsSync(worktree),
+          staleStatus: stale.status,
+          staleOut: stale.out,
         }));
       })();
     `;
@@ -309,6 +354,13 @@ void test("a requeued card runs its next attempt in its own workspace while the 
     assert.notEqual(first.worktree, second.worktree);
     assert.equal(second.existedAtStart, true);
     assert.equal(second.existedAtEnd, true, "cleaning up attempt 1 must not remove attempt 2");
+    assert.notEqual(first.staleStatus, 0, "the superseded worker's CLI write must fail");
+    assert.match(first.staleOut, /no longer valid/u);
+    const thread = await client.getThread(card.id);
+    assert.ok(
+      !thread.entries.some((entry) => entry.text === "stale reply from attempt 1"),
+      "the CLI forwards its fence so a superseded worker cannot write to the thread",
+    );
 
     assert.ok(
       await waitFor(async () => (await cardField(client, card.id, "state")) === "done", 10_000),
@@ -679,6 +731,42 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
     tryExecSilent(() => {
       execFileSync("herdr", ["session", "delete", sessionName], { stdio: "ignore", timeout: 5000 });
     });
+    await server.stop();
+  }
+});
+
+void test("a worker executable that cannot start hands the card back to its mate instead of stranding the claim", async () => {
+  const root = makeTempDir("fleet-v3-spawn-failure-");
+  const repoDir = initGitRepo(root);
+  const server = await startTestServer();
+  const { client } = server;
+
+  try {
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Worker binary is missing",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    const config = makeConfig(root, repoDir, {
+      spawn: {
+        mode: "local",
+        viewport: "headless",
+        direnv: false,
+        command: ["fleet-e2e-no-such-worker-binary"],
+      },
+    });
+
+    await runLoop(client, config, { once: true });
+
+    const thread = await client.getThread(card.id);
+    assert.equal(thread.card.state, "held");
+    assert.equal(thread.card.holder, "cleo");
+    assert.ok(
+      thread.entries.some((entry) => /failed before the worker could finish/u.test(entry.text)),
+    );
+  } finally {
     await server.stop();
   }
 });

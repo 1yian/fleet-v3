@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { DELIVERIES, MateNameSchema } from "./board/types.ts";
+import { DELIVERIES, HolderNameSchema, MateNameSchema } from "./board/types.ts";
 
 export type SpawnMode = "local" | "docker" | "container";
 export type KeepPanePolicy = "never" | "on-failure" | "always";
@@ -33,7 +33,7 @@ const HerdrConfigSchema = z.object({
 
 const MateItemConfigSchema = z.object({
   name: MateNameSchema,
-  parent: MateNameSchema.default("captain"),
+  parent: HolderNameSchema.default("captain"),
   cwd: z.string().min(1).optional(),
   workspace: z.string().min(1).optional(),
   promptPath: z.string().min(1).optional(),
@@ -108,10 +108,10 @@ const RunnerConfigSchema = z
     const items = cfg.mates?.items ?? [];
     const parentOf = new Map<string, string>();
     for (const [index, item] of items.entries()) {
-      if (item.name === "captain" || parentOf.has(item.name)) {
+      if (parentOf.has(item.name)) {
         ctx.addIssue({
           code: "custom",
-          message: `mate name "${item.name}" is reserved or duplicated`,
+          message: `mate name "${item.name}" is duplicated`,
           path: ["mates", "items", index, "name"],
         });
         continue;

@@ -250,7 +250,7 @@ async function handleVerification(params: {
   return { ok: true, message: `Completed on ${params.config.host}` };
 }
 
-async function executeClaim(
+async function runClaim(
   client: BoardClient,
   config: RunnerConfig,
   claim: ClaimReceipt,
@@ -401,6 +401,29 @@ async function executeClaim(
       });
     }
     await cleanupWorkspace(workspace);
+  }
+}
+
+async function executeClaim(
+  client: BoardClient,
+  config: RunnerConfig,
+  claim: ClaimReceipt,
+  outerSignal?: AbortSignal,
+): Promise<void> {
+  try {
+    await runClaim(client, config, claim, outerSignal);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    await client
+      .finishClaim(claim.card.id, {
+        epoch: claim.epoch,
+        token: claim.token,
+        outcome: "needs_mate",
+        summary: `Runner on ${config.host} failed before the worker could finish: ${reason}`,
+        actor: `runner-${config.host}`,
+        kind: "runner_error",
+      })
+      .catch(() => undefined);
   }
 }
 

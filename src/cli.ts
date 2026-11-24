@@ -103,11 +103,19 @@ function resolveBoardUrl(explicit: string | undefined): string {
 
 function boardContext(options: RunFleetCliOptions): FleetAxiContext {
   const boardUrl = resolveBoardUrl(options.boardUrl);
+  const fence = fenceFromEnv();
+  const mate = process.env["FLEET_MATE"];
+  const envActor =
+    fence.epoch === undefined
+      ? (mate ?? "captain")
+      : mate === undefined
+        ? "worker"
+        : `worker:${mate}`;
   return {
     board: () => createHttpBoardClient(boardUrl),
     boardUrl,
-    actor: options.actor ?? process.env["FLEET_MATE"] ?? "captain",
-    fence: fenceFromEnv(),
+    actor: options.actor ?? envActor,
+    fence,
   };
 }
 

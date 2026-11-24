@@ -27,9 +27,17 @@ export const EVENT_TYPES = [
 export type BoardEventType = (typeof EVENT_TYPES)[number];
 
 const MATE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
-export const MateNameSchema = z.string().regex(MATE_NAME_PATTERN, {
-  message:
-    "mate names use letters, digits, underscores, and hyphens (max 64, starting alphanumeric)",
+const EXECUTION_HOLDERS: ReadonlySet<string> = new Set(["runner", "worker"]);
+export const HolderNameSchema = z
+  .string()
+  .regex(MATE_NAME_PATTERN, {
+    message: "names use letters, digits, underscores, and hyphens (max 64, starting alphanumeric)",
+  })
+  .refine((name) => !EXECUTION_HOLDERS.has(name), {
+    message: "runner and worker are reserved for execution",
+  });
+export const MateNameSchema = HolderNameSchema.refine((name) => name !== "captain", {
+  message: "captain is reserved for the root of the hierarchy",
 });
 
 export function mentionsMate(text: string, mate: string): boolean {
@@ -125,7 +133,6 @@ export const OverviewSchema = z.object({
   }),
   hosts: z.array(HostInfoSchema),
   cards: z.array(CardSchema),
-  parents: z.record(z.string(), z.string()),
 });
 export type BoardOverview = z.infer<typeof OverviewSchema>;
 
@@ -150,7 +157,6 @@ export interface CreateCardInput {
   readonly delivery?: Delivery;
   readonly needs?: readonly string[];
   readonly labels?: Readonly<Record<string, string>>;
-  readonly holder?: string;
   readonly actor?: string;
 }
 
@@ -161,7 +167,7 @@ export interface ListCardsQuery {
   readonly limit?: number;
 }
 
-export interface QueueCardInput {
+export interface QueueCardInput extends OptionalFenceInput {
   readonly project?: string;
   readonly host?: string;
   readonly delivery?: Delivery;
@@ -203,7 +209,6 @@ export interface PostEntryInput extends OptionalFenceInput {
 export interface EscalateCardInput extends OptionalFenceInput {
   readonly reason: string;
   readonly actor?: string;
-  readonly kind?: string;
 }
 
 export interface HandoffCardInput extends OptionalFenceInput {

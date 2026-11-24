@@ -24,6 +24,22 @@ function execBin(args: readonly string[]): Promise<string> {
   });
 }
 
+function runBin(
+  args: readonly string[],
+): Promise<{ readonly exitCode: number | null; readonly output: string }> {
+  return new Promise((resolve) => {
+    execFile(
+      process.execPath,
+      [BIN_PATH, ...args],
+      { encoding: "utf8", timeout: 15_000 },
+      (error, stdout, stderr) => {
+        const code: unknown = error === null ? 0 : Reflect.get(error, "code");
+        resolve({ exitCode: typeof code === "number" ? code : null, output: `${stdout}${stderr}` });
+      },
+    );
+  });
+}
+
 function makeTempDir(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   tempDirs.push(dir);
@@ -249,7 +265,9 @@ void test("cards lists report the true total and keep open work visible behind c
 });
 
 void test("fleet serve refuses an explicit --config that does not exist", async () => {
-  await assert.rejects(() =>
-    execBin(["serve", "--config", "/nonexistent/fleet.yaml", "--port", "0"]),
-  );
+  const missing = "/nonexistent/fleet.yaml";
+  const result = await runBin(["serve", "--config", missing, "--port", "4199"]);
+  assert.equal(result.exitCode, 1);
+  assert.match(result.output, /not found/iu);
+  assert.ok(result.output.includes(missing), "the diagnostic names the missing explicit path");
 });

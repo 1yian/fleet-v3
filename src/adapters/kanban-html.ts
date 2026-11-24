@@ -276,6 +276,8 @@ let activeMate = null;
 let openCardId = null;
 let showInternal = false;
 let footKey = "";
+let refreshSeq = 0;
+let drawerSeq = 0;
 
 const COLS = [
   { key: "captain", title: "Needs you", color: "var(--amber)", match: c => c.state === "held" && c.holder === "captain" },
@@ -318,14 +320,17 @@ function post(path, payload) {
 }
 
 async function refresh() {
+  const seq = ++refreshSeq;
   try {
-    const [overview, done] = await Promise.all([
+    const [overview, done, mates] = await Promise.all([
       api("/overview"),
       api("/cards?state=done&limit=50"),
+      api("/mates"),
     ]);
+    if (seq !== refreshSeq) return;
     allCards = overview.cards.concat(done.cards);
     hosts = overview.hosts || [];
-    parents = overview.parents || {};
+    parents = mates.parents || {};
     $("live-dot").classList.remove("offline");
     renderHosts();
     renderFilters();
@@ -415,8 +420,9 @@ function closeDrawer() {
 }
 
 async function loadDrawer(id) {
+  const seq = ++drawerSeq;
   const { card, entries } = await api("/cards/" + encodeURIComponent(id));
-  if (openCardId !== id) return;
+  if (openCardId !== id || seq !== drawerSeq) return;
   $("drawer-meta").innerHTML =
     '<span class="card-domain">' + esc(card.mate) + '</span>'
     + '<span>#' + esc(card.id) + ' · ' + esc(card.state) + (card.holder ? ' · ball: ' + esc(card.holder) : '') + '</span>';
@@ -468,15 +474,12 @@ async function loadDrawer(id) {
     + '</div>';
 }
 
-function draftText() {
-  return $("drawer-reply").value.trim();
-}
-
 async function submitDraft(id, path, payload) {
-  const text = draftText();
+  const editor = $("drawer-reply");
+  const text = editor.value.trim();
   if (!text) return;
   await post("/cards/" + encodeURIComponent(id) + path, payload(text));
-  $("drawer-reply").value = "";
+  if (editor.isConnected && editor.value.trim() === text) editor.value = "";
   await refresh();
 }
 
@@ -550,6 +553,7 @@ function connectEvents() {
   };
   es.onopen = () => {
     $("live-dot").classList.remove("offline");
+    refresh();
   };
 }
 

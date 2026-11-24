@@ -19,6 +19,6 @@ Read [VISION.md](VISION.md) for the design principles and [AGENTS.md](AGENTS.md)
 
 1. Run `bun install && bun run check`.
 2. Run `fleet init`, edit `fleet.yaml`, and start the Card Server with `fleet serve` (serves API + SSE at `http://127.0.0.1:4100`; run `fleet web` for the Kanban viewport).
-3. Start the host runner with `fleet run` to claim queued cards and run isolated ephemeral workers.
+3. Start the host runner with `fleet run` to claim queued cards and run isolated ephemeral workers. The example config runs workers locally in per-card git worktrees against the loopback Card Server. To isolate workers in `docker` or Apple `container`, set `spawn.mode` and give `boardUrl` an address the guest can reach (a LAN, bridge, or Tailscale address, with `server.host: 0.0.0.0`), because the guest's `127.0.0.1` is not the host.
 4. Start permanent interactive mates in Herdr with `fleet mates up` (or attach any harness - ypi/Pi, Claude Code, Codex, Grok Bot - with `prompts/mate.md`, `FLEET_MATE`, and `BOARD_URL`; workers also receive `FLEET_CLAIM_EPOCH` and `FLEET_CLAIM_TOKEN`, which the `fleet` CLI forwards automatically).
 5. Run `fleet` (no args) for a live TOON overview of counts, advertised hosts, and open cards.

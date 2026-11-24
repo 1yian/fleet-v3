@@ -6,6 +6,7 @@ import {
   CARD_STATES,
   DELIVERIES,
   ENTRY_KINDS,
+  HolderNameSchema,
   MateNameSchema,
   mentionsMate,
   type BoardEvent,
@@ -28,11 +29,11 @@ const CreateCardBodySchema = z.object({
   delivery: z.enum(DELIVERIES).optional(),
   needs: z.array(z.string()).optional(),
   labels: z.record(z.string(), z.string()).optional(),
-  holder: MateNameSchema.optional(),
   actor: z.string().min(1).optional(),
 });
 
 const QueueCardBodySchema = z.object({
+  ...FenceFields,
   project: z.string().min(1).optional(),
   host: z.string().min(1).optional(),
   delivery: z.enum(DELIVERIES).optional(),
@@ -79,12 +80,11 @@ const EscalateBodySchema = z.object({
   ...FenceFields,
   reason: z.string().min(1),
   actor: z.string().min(1).optional(),
-  kind: z.string().min(1).optional(),
 });
 
 const HandoffBodySchema = z.object({
   ...FenceFields,
-  to: MateNameSchema.optional(),
+  to: HolderNameSchema.optional(),
   text: z.string().optional(),
   actor: z.string().min(1).optional(),
   internal: z.boolean().optional(),
@@ -164,9 +164,9 @@ function parseStateFilter(value: string | null): CardState | "open" | "all" {
   return matched;
 }
 
-function parseMateFilter(value: string | null): string | null {
+function parseNameFilter(value: string | null, schema: z.ZodType<string>): string | null {
   if (value === null || value.length === 0) return null;
-  const parsed = MateNameSchema.safeParse(value);
+  const parsed = schema.safeParse(value);
   if (!parsed.success) {
     throw new BoardError(400, "invalid_mate", `Invalid mate name: "${value}"`);
   }
@@ -256,8 +256,8 @@ function handleSse(store: CardStore, url: URL, req: IncomingMessage, res: Server
     url.searchParams.get("after") ?? (typeof afterHeader === "string" ? afterHeader : null);
   const afterId =
     afterRaw !== null && /^\d+$/u.test(afterRaw) ? Number(afterRaw) : store.latestEventId();
-  const holderFilter = parseMateFilter(url.searchParams.get("holder"));
-  const mateFilter = parseMateFilter(url.searchParams.get("mate"));
+  const holderFilter = parseNameFilter(url.searchParams.get("holder"), HolderNameSchema);
+  const mateFilter = parseNameFilter(url.searchParams.get("mate"), MateNameSchema);
 
   res.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
@@ -326,6 +326,7 @@ async function handleQueueCard(
   const body = QueueCardBodySchema.parse(await readJsonBody(req));
   sendJson(res, 200, {
     card: store.queueCard(cardId, {
+      ...fenceOf(body),
       ...(body.project !== undefined ? { project: body.project } : {}),
       ...(body.host !== undefined ? { host: body.host } : {}),
       ...(body.delivery !== undefined ? { delivery: body.delivery } : {}),
@@ -346,7 +347,6 @@ async function handleEscalateCard(
       ...fenceOf(body),
       reason: body.reason,
       ...(body.actor !== undefined ? { actor: body.actor } : {}),
-      ...(body.kind !== undefined ? { kind: body.kind } : {}),
     }),
   });
 }
@@ -490,8 +490,8 @@ async function routeCardsCollection(
   res: ServerResponse,
 ): Promise<boolean> {
   if (method === "GET") {
-    const mate = parseMateFilter(url.searchParams.get("mate"));
-    const holder = parseMateFilter(url.searchParams.get("holder"));
+    const mate = parseNameFilter(url.searchParams.get("mate"), MateNameSchema);
+    const holder = parseNameFilter(url.searchParams.get("holder"), HolderNameSchema);
     const state = parseStateFilter(url.searchParams.get("state"));
     const limitRaw = url.searchParams.get("limit");
     if (limitRaw !== null && !/^[1-9]\d*$/u.test(limitRaw)) {
@@ -521,7 +521,6 @@ async function routeCardsCollection(
         ...(body.delivery !== undefined ? { delivery: body.delivery } : {}),
         ...(body.needs !== undefined ? { needs: body.needs } : {}),
         ...(body.labels !== undefined ? { labels: body.labels } : {}),
-        ...(body.holder !== undefined ? { holder: body.holder } : {}),
         ...(body.actor !== undefined ? { actor: body.actor } : {}),
       }),
     });

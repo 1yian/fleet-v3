@@ -232,7 +232,6 @@ export interface CardStoreOptions {
   readonly dataDir?: string;
   readonly memory?: boolean;
   readonly parents?: Readonly<Record<string, string>>;
-  readonly defaultParent?: string;
   readonly now?: () => number;
 }
 
@@ -245,7 +244,6 @@ export class CardStore {
   private readonly db: DatabaseSync;
   private readonly dataDir: string | undefined;
   private readonly parents: Record<string, string>;
-  private readonly defaultParent: string;
   private readonly nowFn: () => number;
   private readonly memoryCharters = new Map<string, string>();
   private memoryPrefs = "";
@@ -255,7 +253,6 @@ export class CardStore {
 
   public constructor(options: CardStoreOptions = {}) {
     this.nowFn = options.now ?? (() => Date.now());
-    this.defaultParent = options.defaultParent ?? "captain";
     this.parents = { ...options.parents };
     if (options.memory === true || options.dataDir === undefined) {
       this.dataDir = undefined;
@@ -291,7 +288,7 @@ export class CardStore {
 
   public parentOf(holder: string): string {
     if (holder === "captain") return "captain";
-    return this.parents[holder] ?? this.defaultParent;
+    return this.parents[holder] ?? "captain";
   }
 
   private publish(events: readonly BoardEvent[]): void {
@@ -469,10 +466,12 @@ export class CardStore {
     });
   }
 
-  private waitingDependentsOf(prerequisiteId: string): CardRow[] {
+  private dependentsOf(prerequisiteId: string, states: readonly CardState[]): CardRow[] {
     return this.db
-      .prepare(`${CARD_SELECT} WHERE c.state = 'waiting'`)
-      .all()
+      .prepare(
+        `${CARD_SELECT} WHERE c.state IN (${states.map(() => "?").join(", ")}) ORDER BY c.id`,
+      )
+      .all(...states)
       .map((raw) => CardRowSchema.parse(raw))
       .filter((row) =>
         StringArraySchema.parse(JSON.parse(row.needs_json)).includes(prerequisiteId),
@@ -481,7 +480,7 @@ export class CardStore {
 
   private unblockDependentsInternal(completedId: string, now: number): BoardEvent[] {
     const events: BoardEvent[] = [];
-    for (const row of this.waitingDependentsOf(completedId)) {
+    for (const row of this.dependentsOf(completedId, ["waiting"])) {
       if (this.unmetNeeds(StringArraySchema.parse(JSON.parse(row.needs_json))).length > 0) continue;
       const readyForRunner = row.host !== null && row.project !== null;
       const nextState: CardState = readyForRunner ? "queued" : "held";
@@ -510,32 +509,61 @@ export class CardStore {
 
   private holdDependentsOfCanceled(canceledId: string, now: number): BoardEvent[] {
     const events: BoardEvent[] = [];
-    for (const row of this.waitingDependentsOf(canceledId)) {
-      const text = `Prerequisite #${canceledId} was canceled, so this card can never unblock. Decide whether to cancel it or replace the prerequisite.`;
-      this.db
-        .prepare(
-          `UPDATE cards SET state = 'held', holder = ?, result = ?, updated_at = ? WHERE id = ?`,
-        )
-        .run(row.mate, text, now, row.id);
-      this.insertEntry({
-        cardId: row.id,
-        by: "server",
-        kind: "status",
-        text,
-        internal: false,
-        createdAt: now,
-      });
-      events.push(
-        this.appendEvent({
-          type: "card.handed_off",
+    const text = `Prerequisite #${canceledId} was canceled; this card depends on it and can never be queued. Cancel this card or create a replacement.`;
+    const visited = new Set<string>();
+    const frontier = [canceledId];
+    for (let id = frontier.pop(); id !== undefined; id = frontier.pop()) {
+      for (const row of this.dependentsOf(id, ["waiting", "held"])) {
+        const rowId = String(row.id);
+        if (visited.has(rowId)) continue;
+        visited.add(rowId);
+        frontier.push(rowId);
+        const entry = this.insertEntry({
           cardId: row.id,
-          mate: row.mate,
-          holder: row.mate,
-          actor: "server",
-          payload: { id: String(row.id), title: row.title, to: row.mate, text },
+          by: "server",
+          kind: "status",
+          text,
+          internal: false,
           createdAt: now,
-        }),
-      );
+        });
+        if (row.state === "held") {
+          events.push(
+            this.appendEvent({
+              type: "entry.posted",
+              cardId: row.id,
+              mate: row.mate,
+              holder: row.holder,
+              actor: "server",
+              payload: {
+                id: entry.id,
+                cardId: rowId,
+                title: row.title,
+                text,
+                internal: false,
+                kind: entry.kind,
+              },
+              createdAt: now,
+            }),
+          );
+          continue;
+        }
+        this.db
+          .prepare(
+            `UPDATE cards SET state = 'held', holder = ?, result = ?, updated_at = ? WHERE id = ?`,
+          )
+          .run(row.mate, text, now, row.id);
+        events.push(
+          this.appendEvent({
+            type: "card.handed_off",
+            cardId: row.id,
+            mate: row.mate,
+            holder: row.mate,
+            actor: "server",
+            payload: { id: rowId, title: row.title, to: row.mate, text },
+            createdAt: now,
+          }),
+        );
+      }
     }
     return events;
   }
@@ -583,7 +611,7 @@ export class CardStore {
           : hasRunnerTarget
             ? "queued"
             : "held";
-      const holder = state === "queued" ? "runner" : (input.holder ?? mate);
+      const holder = state === "queued" ? "runner" : mate;
 
       const info = this.db
         .prepare(
@@ -678,6 +706,7 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
+      CardStore.guardFence(row, input, now);
       if (row.state === "done" || row.state === "canceled") {
         throw new BoardError(409, "card_terminal", `Card #${String(id)} is ${row.state}`);
       }
@@ -919,7 +948,6 @@ export class CardStore {
         internal,
         createdAt: now,
       });
-      this.db.prepare("UPDATE cards SET updated_at = ? WHERE id = ?").run(now, id);
       const event = this.appendEvent({
         type: "entry.posted",
         cardId: id,
@@ -958,17 +986,15 @@ export class CardStore {
       if (row.state === "held" && row.holder === targetHolder && row.result === reason) {
         return { result: rowToCard(row), events: [] };
       }
-      const labels = StringRecordSchema.parse(JSON.parse(row.labels_json));
-      if (input.kind !== undefined) labels["escalation_kind"] = input.kind;
       this.db
         .prepare(
           `UPDATE cards
-           SET state = 'held', holder = ?, result = ?, labels_json = ?,
+           SET state = 'held', holder = ?, result = ?,
                claim_token_hash = NULL, claim_by = NULL, lease_until = NULL,
                updated_at = ?
            WHERE id = ?`,
         )
-        .run(targetHolder, reason, JSON.stringify(labels), now, id);
+        .run(targetHolder, reason, now, id);
       this.insertEntry({
         cardId: id,
         by: actor,
@@ -1087,7 +1113,13 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
-      CardStore.guardFence(row, input, now);
+      if (input.epoch !== undefined || input.token !== undefined) {
+        throw new BoardError(
+          409,
+          "worker_close_rejected",
+          "Workers finish by exiting cleanly so the runner can verify; use handoff when stuck",
+        );
+      }
       if (row.state === "done") return { result: rowToCard(row), events: [] };
       if (row.state === "canceled") {
         throw new BoardError(409, "card_canceled", `Card #${String(id)} is canceled`);
@@ -1211,14 +1243,20 @@ export class CardStore {
 
   public listHosts(): HostInfo[] {
     const rows = this.db
-      .prepare("SELECT * FROM events WHERE type = 'host.seen' ORDER BY id DESC LIMIT 200")
+      .prepare(
+        `SELECT * FROM events
+         WHERE id IN (
+           SELECT MAX(id) FROM events WHERE type = 'host.seen'
+           GROUP BY json_extract(payload_json, '$.host')
+         )`,
+      )
       .all();
-    const byHost = new Map<string, HostInfo>();
+    const hosts: HostInfo[] = [];
     for (const raw of rows) {
       const event = rowToEvent(raw);
       const parsed = HostPayloadSchema.safeParse(event.payload);
-      if (!parsed.success || byHost.has(parsed.data.host)) continue;
-      byHost.set(parsed.data.host, {
+      if (!parsed.success) continue;
+      hosts.push({
         host: parsed.data.host,
         mode: parsed.data.mode,
         viewport: parsed.data.viewport,
@@ -1226,7 +1264,7 @@ export class CardStore {
         updatedAt: event.createdAt,
       });
     }
-    return [...byHost.values()].toSorted((a, b) => a.host.localeCompare(b.host));
+    return hosts.toSorted((a, b) => a.host.localeCompare(b.host));
   }
 
   public listEventsSince(afterId: number, limit = 200): BoardEvent[] {
@@ -1326,7 +1364,6 @@ export class CardStore {
       counts,
       hosts: this.listHosts(),
       cards: this.listCards({ state: "open" }).cards,
-      parents: this.getParents(),
     };
   }
 

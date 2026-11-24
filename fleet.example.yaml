@@ -17,7 +17,7 @@ server:
   staleAfterSeconds: 600
 
 spawn:
-  mode: container
+  mode: local
   viewport: herdr
   direnv: true
   command:

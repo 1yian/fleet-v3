@@ -6,10 +6,10 @@ import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
-import { attachFleetPiAdapter, type PiExtensionApi } from "../src/adapters/pi.ts";
+import { attachFleetPiAdapter } from "../src/adapters/pi.ts";
 import { loadConfig, type RunnerConfig } from "../src/config.ts";
 import { ensureMatesUp, listMates, stopMates } from "../src/mates.ts";
-import { startTestServer } from "./support.ts";
+import { createMockPi, startTestServer } from "./support.ts";
 
 const RecordedEnvSchema = z.object({
   mate: z.string(),
@@ -49,69 +49,6 @@ function matesYaml(...items: readonly string[]): string[] {
     "  items:",
     ...items.flatMap((entry) => entry.split("|").map((line) => `    ${line}`)),
   ];
-}
-
-function createMockPi(): {
-  readonly api: PiExtensionApi;
-  readonly delivered: string[];
-  readonly emitStart: () => Promise<void>;
-  readonly emitShutdown: () => Promise<void>;
-  readonly emitBeforeStart: (systemPrompt: string) => Promise<{ systemPrompt: string } | undefined>;
-} {
-  const handlers: {
-    start?: () => Promise<void> | void;
-    shutdown?: () => Promise<void> | void;
-    beforeStart?: (event: {
-      readonly systemPrompt: string;
-    }) => Promise<{ systemPrompt: string } | undefined> | { systemPrompt: string } | undefined;
-  } = {};
-  const delivered: string[] = [];
-
-  const on: PiExtensionApi["on"] = (event: string, handler: (...args: never[]) => unknown) => {
-    if (event === "session_start") {
-      handlers.start = () => {
-        const result: unknown = Reflect.apply(handler, undefined, []);
-        return result instanceof Promise ? result.then(() => undefined) : undefined;
-      };
-      return;
-    }
-    if (event === "session_shutdown") {
-      handlers.shutdown = () => {
-        const result: unknown = Reflect.apply(handler, undefined, []);
-        return result instanceof Promise ? result.then(() => undefined) : undefined;
-      };
-      return;
-    }
-    if (event === "before_agent_start") {
-      handlers.beforeStart = async (ev) => {
-        const raw: unknown = await Promise.resolve(Reflect.apply(handler, undefined, [ev]));
-        if (typeof raw === "object" && raw !== null && "systemPrompt" in raw) {
-          const prompt: unknown = Reflect.get(raw, "systemPrompt");
-          if (typeof prompt === "string") return { systemPrompt: prompt };
-        }
-        return undefined;
-      };
-    }
-  };
-
-  return {
-    api: {
-      on,
-      sendMessage(message) {
-        delivered.push(message.content);
-      },
-    },
-    delivered,
-    async emitStart() {
-      await handlers.start?.();
-    },
-    async emitShutdown() {
-      await handlers.shutdown?.();
-    },
-    emitBeforeStart(systemPrompt: string) {
-      return Promise.resolve(handlers.beforeStart?.({ systemPrompt }));
-    },
-  };
 }
 
 afterEach(() => {
@@ -261,8 +198,15 @@ void test("config load rejects cyclic, duplicated, or unrooted mate hierarchies 
   );
   assert.throws(
     () => loadConfig(write("punctuation.yaml", matesYaml("- name: ops.qa|  parent: captain"))),
-    /mate names use letters/u,
+    /names use letters/u,
   );
+  for (const reserved of ["runner", "worker", "captain"]) {
+    assert.throws(
+      () =>
+        loadConfig(write(`${reserved}.yaml`, matesYaml(`- name: ${reserved}|  parent: captain`))),
+      /reserved/u,
+    );
+  }
   assert.throws(
     () => loadConfig(write("rounds.yaml", ["maxReviewRounds: 5"])),
     /too_big|<=4|Too big/iu,

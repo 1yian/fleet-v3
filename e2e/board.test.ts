@@ -116,7 +116,7 @@ void test("card server enforces recursive escalation, home-mate answers, depende
       rejectsWith(409, "claim_lost"),
     );
     await assert.rejects(
-      () => client.closeCard(prereq.id, { epoch: 1, token: claim1.token, result: "stale" }),
+      () => client.cancelCard(prereq.id, { epoch: 1, token: claim1.token, reason: "stale" }),
       rejectsWith(409, "claim_lost"),
     );
     assert.equal(await cardField(client, prereq.id, "state"), "running");
@@ -182,11 +182,41 @@ void test("card server enforces recursive escalation, home-mate answers, depende
       needs: [doomedPrereq.id],
     });
     assert.equal(orphan.state, "waiting");
+    const grandchild = await client.createCard({
+      mate: "cleo",
+      title: "Depends on the orphan",
+      host: "maverick",
+      project: "Cleo",
+      needs: [orphan.id],
+    });
+    assert.equal(grandchild.state, "waiting");
+    const reassigned = await client.createCard({
+      mate: "cleo",
+      title: "Reassigned before its prerequisite died",
+      host: "maverick",
+      project: "Cleo",
+      needs: [doomedPrereq.id],
+    });
+    await client.handoffCard(reassigned.id, { to: "jarvis", text: "Take a look" });
     await client.cancelCard(doomedPrereq.id, { reason: "Superseded", actor: "cleo" });
-    const orphanAfter = await client.getThread(orphan.id);
-    assert.equal(orphanAfter.card.state, "held");
-    assert.equal(orphanAfter.card.holder, "cleo");
-    assert.ok(orphanAfter.entries.some((entry) => /was canceled/u.test(entry.text)));
+    for (const [id, holder] of [
+      [orphan.id, "cleo"],
+      [grandchild.id, "cleo"],
+      [reassigned.id, "jarvis"],
+    ] as const) {
+      const after = await client.getThread(id);
+      assert.equal(after.card.state, "held");
+      assert.equal(after.card.holder, holder);
+      assert.ok(
+        after.entries.some((entry) => /was canceled/u.test(entry.text)),
+        `card #${id} must be told its prerequisite was canceled`,
+      );
+    }
+    await assert.rejects(
+      () => client.queueCard(orphan.id, {}),
+      rejectsWith(409, "unmet_needs"),
+      "a card whose prerequisite was canceled can never be queued",
+    );
 
     const staleCard = await client.createCard({
       mate: "jarvis",
@@ -194,7 +224,22 @@ void test("card server enforces recursive escalation, home-mate answers, depende
     });
     assert.equal(staleCard.holder, "jarvis");
 
-    now += 650_000;
+    now += 400_000;
+    await client.postEntry(staleCard.id, {
+      text: "coordination note",
+      by: "jarvis",
+      internal: true,
+    });
+    await new Promise((resolve) => {
+      setTimeout(resolve, 200);
+    });
+    assert.equal(
+      jarvisWatch.events.some((ev) => ev.type === "chase.due"),
+      false,
+      "a card younger than the stale threshold is not chased",
+    );
+
+    now += 250_000;
     assert.ok(
       await waitFor(() =>
         jarvisWatch.events.some((ev) => ev.type === "chase.due" && ev.holder === "jarvis"),
@@ -213,6 +258,77 @@ void test("card server enforces recursive escalation, home-mate answers, depende
   } finally {
     await jarvisWatch.stop();
     await cleoWatch.stop();
+    await server.stop();
+  }
+});
+
+void test("claim fences also guard queue and close, hosts outlive advertisement history, and execution holders are reserved names", async () => {
+  const server = await startTestServer({ parents: { cleo: "captain" } });
+  const { client } = server;
+
+  try {
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Fenced writes",
+      host: "h1",
+      project: "Cleo",
+    });
+    const claim = await client.claimNext({
+      host: "h1",
+      leaseSeconds: 60,
+      claimBy: "runner-h1",
+    });
+    assert.ok(claim !== null);
+    const fence = { epoch: claim.epoch, token: claim.token };
+
+    await assert.rejects(
+      () => client.closeCard(card.id, { ...fence, result: "shipped without verification" }),
+      rejectsWith(409, "worker_close_rejected"),
+    );
+    assert.equal(await cardField(client, card.id, "state"), "running");
+
+    const handed = await client.handoffCard(card.id, { ...fence, text: "Stuck" });
+    assert.equal(handed.holder, "cleo");
+    await assert.rejects(
+      () => client.queueCard(card.id, fence),
+      rejectsWith(409, "claim_lost"),
+      "a worker whose claim ended cannot put the card back on the runner queue",
+    );
+    assert.equal(await cardField(client, card.id, "state"), "held");
+    const requeued = await client.queueCard(card.id, {});
+    assert.equal(requeued.state, "queued");
+
+    await client.advertiseHost({
+      host: "first",
+      mode: "local",
+      viewport: "headless",
+      repos: ["a"],
+    });
+    for (let i = 0; i < 210; i += 1) {
+      await client.advertiseHost({
+        host: "second",
+        mode: "local",
+        viewport: "headless",
+        repos: ["b"],
+      });
+    }
+    const hosts = await client.listHosts();
+    assert.deepEqual(
+      hosts.map((each) => each.host),
+      ["first", "second"],
+    );
+
+    for (const mate of ["runner", "worker", "captain"]) {
+      await assert.rejects(
+        () => client.createCard({ mate, title: "Reserved identity" }),
+        rejectsWith(400, "validation_error"),
+      );
+    }
+    await assert.rejects(
+      () => client.handoffCard(card.id, { to: "runner" }),
+      rejectsWith(400, "validation_error"),
+    );
+  } finally {
     await server.stop();
   }
 });
@@ -328,11 +444,8 @@ void test("open cards stay visible and counted regardless of how much terminal h
   const { client } = server;
 
   try {
-    const old = await client.createCard({
-      mate: "cleo",
-      title: "Old captain item",
-      holder: "captain",
-    });
+    const old = await client.createCard({ mate: "cleo", title: "Old captain item" });
+    await client.handoffCard(old.id, { to: "captain" });
     for (let i = 0; i < 210; i += 1) {
       const filler = await client.createCard({ mate: "cleo", title: `Filler ${String(i)}` });
       await client.closeCard(filler.id, {});

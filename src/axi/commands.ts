@@ -71,7 +71,7 @@ Examples:
   fleet view 42 --full`,
   dispatch: `fleet dispatch - create a card on the Card Server
 Usage:
-  fleet dispatch --mate <name> --title "<text>" [--body "<spec>"] [--project <repo>] [--host <host>] [--delivery <mode>] [--needs <ids>] [--holder <actor>]
+  fleet dispatch --mate <name> --title "<text>" [--body "<spec>"] [--project <repo>] [--host <host>] [--delivery <mode>] [--needs <ids>]
 Flags:
   --mate <name>      Required home mate owning the card (e.g. cleo, jarvis)
   --title <text>     Required card title or intent
@@ -80,7 +80,6 @@ Flags:
   --host <host>      Execution host name (e.g. maverick, p620)
   --delivery <mode>  ${DELIVERIES.join(" | ")}
   --needs <ids>      Comma-separated prerequisite card IDs
-  --holder <actor>   Initial holder when not immediately queued (default: mate)
 Examples:
   fleet dispatch --mate cleo --project Cleo --host p620 --title "Fix webhook timeout"
   fleet dispatch --mate cleo --title "Audit recent conversion drop"`,
@@ -99,10 +98,9 @@ Flags:
   --internal         Mark entry internal (quiet coordination note)`,
   escalate: `fleet escalate - hand a card up to the parent mate (or captain)
 Usage:
-  fleet escalate <id> --reason "<evidence, question, and recommendation>" [--kind <kind>]
+  fleet escalate <id> --reason "<evidence, question, and recommendation>" 
 Flags:
-  --reason <text>    Required question, evidence, and recommendation
-  --kind <kind>      Optional escalation label`,
+  --reason <text>    Required question, evidence, and recommendation`,
   handoff: `fleet handoff - pass a card to a mate (default: its home mate)
 Usage:
   fleet handoff <id> [--to <mate>] [--text "<context>"] [--internal]
@@ -115,7 +113,7 @@ Usage:
   fleet answer <id> --text "<answer>"
 Flags:
   --text <message>   Required answer text`,
-  close: `fleet close - mark a card done and unblock waiting dependents
+  close: `fleet close - mark a card done and unblock waiting dependents (captain and mates only; workers exit cleanly or hand off)
 Usage:
   fleet close <id> [--result "<summary>"]
 Flags:
@@ -415,7 +413,6 @@ export async function dispatchCommand(
       host: { type: "string" },
       delivery: { type: "string" },
       needs: { type: "string" },
-      holder: { type: "string" },
     },
     helpBlock,
   );
@@ -426,7 +423,6 @@ export async function dispatchCommand(
   const project = stringFlag(parsed.values, "project");
   const host = stringFlag(parsed.values, "host");
   const delivery = parseDeliveryFlag(stringFlag(parsed.values, "delivery"), helpBlock);
-  const holder = stringFlag(parsed.values, "holder");
   const needsRaw = stringFlag(parsed.values, "needs");
   const needs =
     needsRaw === undefined
@@ -444,7 +440,6 @@ export async function dispatchCommand(
     ...(host !== undefined ? { host } : {}),
     ...(delivery !== undefined ? { delivery } : {}),
     ...(needs !== undefined && needs.length > 0 ? { needs } : {}),
-    ...(holder !== undefined ? { holder } : {}),
     actor: active.actor,
   });
 
@@ -484,6 +479,7 @@ export async function queueCommand(
   const host = stringFlag(parsed.values, "host");
   const delivery = parseDeliveryFlag(stringFlag(parsed.values, "delivery"), helpBlock);
   const card = await active.board().queueCard(id, {
+    ...active.fence,
     ...(project !== undefined ? { project } : {}),
     ...(host !== undefined ? { host } : {}),
     ...(delivery !== undefined ? { delivery } : {}),
@@ -541,7 +537,6 @@ export async function escalateCommand(
     args,
     {
       reason: { type: "string", required: true },
-      kind: { type: "string" },
     },
     helpBlock,
   );
@@ -550,11 +545,9 @@ export async function escalateCommand(
     throw new AxiError("card <id> is required for `escalate`", "VALIDATION_ERROR", [helpBlock]);
   }
   const reason = stringFlag(parsed.values, "reason") ?? "";
-  const kind = stringFlag(parsed.values, "kind");
   const card = await active.board().escalateCard(id, {
     ...active.fence,
     reason,
-    ...(kind !== undefined ? { kind } : {}),
     actor: active.actor,
   });
   return {

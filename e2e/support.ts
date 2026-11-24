@@ -1,3 +1,4 @@
+import type { PiExtensionApi } from "../src/adapters/pi.ts";
 import { createHttpBoardClient, type BoardClient } from "../src/board/client.ts";
 import { startBoardServer } from "../src/board/server.ts";
 import { CardStore } from "../src/board/store.ts";
@@ -85,4 +86,67 @@ export async function waitFor(
     });
   }
   return predicate();
+}
+
+export function createMockPi(): {
+  readonly api: PiExtensionApi;
+  readonly delivered: string[];
+  readonly emitStart: () => Promise<void>;
+  readonly emitShutdown: () => Promise<void>;
+  readonly emitBeforeStart: (systemPrompt: string) => Promise<{ systemPrompt: string } | undefined>;
+} {
+  const handlers: {
+    start?: () => Promise<void> | void;
+    shutdown?: () => Promise<void> | void;
+    beforeStart?: (event: {
+      readonly systemPrompt: string;
+    }) => Promise<{ systemPrompt: string } | undefined> | { systemPrompt: string } | undefined;
+  } = {};
+  const delivered: string[] = [];
+
+  const on: PiExtensionApi["on"] = (event: string, handler: (...args: never[]) => unknown) => {
+    if (event === "session_start") {
+      handlers.start = () => {
+        const result: unknown = Reflect.apply(handler, undefined, []);
+        return result instanceof Promise ? result.then(() => undefined) : undefined;
+      };
+      return;
+    }
+    if (event === "session_shutdown") {
+      handlers.shutdown = () => {
+        const result: unknown = Reflect.apply(handler, undefined, []);
+        return result instanceof Promise ? result.then(() => undefined) : undefined;
+      };
+      return;
+    }
+    if (event === "before_agent_start") {
+      handlers.beforeStart = async (ev) => {
+        const raw: unknown = await Promise.resolve(Reflect.apply(handler, undefined, [ev]));
+        if (typeof raw === "object" && raw !== null && "systemPrompt" in raw) {
+          const prompt: unknown = Reflect.get(raw, "systemPrompt");
+          if (typeof prompt === "string") return { systemPrompt: prompt };
+        }
+        return undefined;
+      };
+    }
+  };
+
+  return {
+    api: {
+      on,
+      sendMessage(message) {
+        delivered.push(message.content);
+      },
+    },
+    delivered,
+    async emitStart() {
+      await handlers.start?.();
+    },
+    async emitShutdown() {
+      await handlers.shutdown?.();
+    },
+    emitBeforeStart(systemPrompt: string) {
+      return Promise.resolve(handlers.beforeStart?.({ systemPrompt }));
+    },
+  };
 }
