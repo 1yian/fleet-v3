@@ -15,7 +15,7 @@ module.exports = {
     {
       name: "core-never-imports-adapters",
       severity: "error",
-      from: { path: "^src/(runner|axi)/" },
+      from: { path: "^src/(board|runner|axi)/" },
       to: { path: "^src/adapters/" },
     },
     {

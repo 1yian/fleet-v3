@@ -3,7 +3,7 @@ export const KANBAN_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>fleet - board</title>
+<title>fleet - cards</title>
 <style>
   :root {
     --bg: #0b0d11;
@@ -88,11 +88,11 @@ export const KANBAN_HTML = `<!doctype html>
 
   .board {
     flex: 1; display: grid; gap: 16px; padding: 16px 24px 32px;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     align-items: start;
   }
-  @media (max-width: 1180px) { .board { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  @media (max-width: 680px) { .board { grid-template-columns: 1fr; padding: 12px; } .topbar { padding: 12px; } .filters { padding: 10px 12px 0; } }
+  @media (max-width: 1360px) { .board { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  @media (max-width: 820px) { .board { grid-template-columns: 1fr; padding: 12px; } .topbar { padding: 12px; } .filters { padding: 10px 12px 0; } }
 
   .col {
     background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
@@ -110,13 +110,13 @@ export const KANBAN_HTML = `<!doctype html>
   .card {
     background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 12px; cursor: pointer; display: flex; flex-direction: column; gap: 8px;
-    transition: border-color 120ms, transform 120ms, background 120ms;
+    transition: border-color 120ms, background 120ms;
     min-width: 0;
   }
   .card:hover { border-color: var(--border-strong); background: var(--surface-hover); }
-  .card.blocked { border-left: 3px solid var(--amber); }
-  .card.failed { border-left: 3px solid var(--rose); }
-  .card.claimed { border-left: 3px solid var(--emerald); }
+  .card.captain { border-left: 3px solid var(--amber); }
+  .card.held { border-left: 3px solid var(--violet); }
+  .card.running { border-left: 3px solid var(--emerald); }
   .card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--muted); }
   .card-domain { font-weight: 600; color: var(--sky); }
   .card-title { font-size: 14px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; line-height: 1.35; }
@@ -124,14 +124,13 @@ export const KANBAN_HTML = `<!doctype html>
     font-size: 12px; color: #f7d794; background: var(--amber-bg);
     border-radius: 6px; padding: 7px 9px; overflow-wrap: anywhere; line-height: 1.4;
   }
-  .card.failed .card-reason { color: #fda4af; background: var(--rose-bg); }
   .card-meta { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
   .chip {
     font-size: 11px; padding: 2px 7px; border-radius: 6px;
     background: rgba(255, 255, 255, 0.05); color: var(--muted); border: 1px solid var(--border);
     max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .chip.pr { color: var(--violet); border-color: rgba(167, 139, 250, 0.3); }
+  .chip.holder { color: var(--violet); border-color: rgba(167, 139, 250, 0.3); }
 
   .backdrop {
     position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 40;
@@ -197,14 +196,12 @@ export const KANBAN_HTML = `<!doctype html>
       <div class="hosts" id="hosts"></div>
     </div>
     <div class="top-actions">
-      <input class="search" id="search" placeholder="Filter tasks..." oninput="renderBoard()">
-      <button class="btn btn-primary" onclick="openNewModal()">+ New task</button>
-      <a class="btn btn-ghost" href="/inspect" target="_blank" rel="noreferrer">Raw inspector</a>
+      <input class="search" id="search" placeholder="Filter cards..." oninput="renderBoard()">
+      <button class="btn btn-primary" onclick="openNewModal()">+ New card</button>
     </div>
   </header>
 
   <nav class="filters" id="filters"></nav>
-
   <main class="board" id="board"></main>
 </div>
 
@@ -223,31 +220,31 @@ export const KANBAN_HTML = `<!doctype html>
 </div>
 
 <div class="modal-backdrop" id="new-modal" onclick="if(event.target===this)closeNewModal()">
-  <form class="modal" onsubmit="submitNewTask(event)">
+  <form class="modal" onsubmit="submitNewCard(event)">
     <div style="display:flex;justify-content:space-between;align-items:center">
-      <strong style="font-size:16px">New task</strong>
+      <strong style="font-size:16px">New card</strong>
       <button type="button" class="btn btn-ghost" onclick="closeNewModal()">Close</button>
     </div>
     <div class="grid-2">
       <div class="field">
-        <label>Domain channel</label>
-        <input id="nt-channel" value="domains/personal" list="channel-list" required>
-        <datalist id="channel-list"></datalist>
+        <label>Mate</label>
+        <input id="nc-mate" value="jarvis" list="mate-list" required>
+        <datalist id="mate-list"></datalist>
       </div>
       <div class="field">
         <label>Host (optional)</label>
-        <select id="nt-host"><option value="">None (mate handles)</option></select>
+        <select id="nc-host"><option value="">None (mate handles)</option></select>
       </div>
     </div>
     <div class="grid-2">
       <div class="field">
         <label>Project (optional)</label>
-        <input id="nt-project" placeholder="e.g. Cleo, fleet-v3" list="repo-list">
+        <input id="nc-project" placeholder="e.g. Cleo, fleet-v3" list="repo-list">
         <datalist id="repo-list"></datalist>
       </div>
       <div class="field">
         <label>Delivery</label>
-        <select id="nt-delivery">
+        <select id="nc-delivery">
           <option value="no-mistakes">no-mistakes</option>
           <option value="direct-pr">direct-pr</option>
           <option value="local">local</option>
@@ -257,32 +254,34 @@ export const KANBAN_HTML = `<!doctype html>
     </div>
     <div class="field">
       <label>Title / Intent</label>
-      <input id="nt-title" placeholder="What outcome do you want?" required>
+      <input id="nc-title" placeholder="What outcome do you want?" required>
     </div>
     <div class="field">
       <label>Details / Spec (optional)</label>
-      <textarea id="nt-body" rows="3" placeholder="Context, links, constraints..."></textarea>
+      <textarea id="nc-body" rows="3" placeholder="Context, links, constraints..."></textarea>
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px">
       <button type="button" class="btn" onclick="closeNewModal()">Cancel</button>
-      <button type="submit" class="btn btn-primary">Create task</button>
+      <button type="submit" class="btn btn-primary">Create card</button>
     </div>
   </form>
 </div>
 
 <script>
-const API = "/api/board";
-let allTasks = [];
+const API = "/api";
+let allCards = [];
 let hosts = [];
-let activeDomain = "all";
-let openTaskId = null;
+let parents = {};
+let activeMate = "all";
+let openCardId = null;
 let showInternal = false;
 
 const COLS = [
-  { key: "needs", title: "Needs you", color: "var(--amber)", states: new Set(["blocked", "failed"]) },
-  { key: "running", title: "Running", color: "var(--emerald)", states: new Set(["claimed"]) },
-  { key: "queued", title: "Queued", color: "var(--sky)", states: new Set(["ready", "waiting"]) },
-  { key: "done", title: "Done", color: "var(--dim)", states: new Set(["completed"]) },
+  { key: "captain", title: "Needs you", color: "var(--amber)", match: c => c.state === "held" && c.holder === "captain" },
+  { key: "held", title: "With mates", color: "var(--violet)", match: c => c.state === "held" && c.holder !== "captain" },
+  { key: "running", title: "Running", color: "var(--emerald)", match: c => c.state === "running" },
+  { key: "queued", title: "Queued", color: "var(--sky)", match: c => c.state === "queued" || c.state === "waiting" },
+  { key: "done", title: "Done", color: "var(--dim)", match: c => c.state === "done" },
 ];
 
 function esc(s) {
@@ -293,29 +292,13 @@ function linkify(s) {
   return esc(s).replace(/(https?:\\/\\/[^\\s<)"']+)/g, '<a href="$1" target="_blank" rel="noreferrer">$1</a>');
 }
 
-function domainOf(ch) {
-  return ch.startsWith("domains/") ? ch.slice("domains/".length) : ch;
-}
-
-function ago(iso) {
-  if (!iso) return "";
-  const ms = Date.now() - Date.parse(iso);
-  const s = Math.max(0, Math.floor(ms / 1000));
+function ago(ts) {
+  if (!ts) return "";
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
   if (s < 60) return s + "s";
   if (s < 3600) return Math.floor(s / 60) + "m";
   if (s < 86400) return Math.floor(s / 3600) + "h";
   return Math.floor(s / 86400) + "d";
-}
-
-function firstLine(text) {
-  const line = String(text || "").split("\\n").map(x => x.trim()).find(Boolean) || "";
-  return line;
-}
-
-function extractPr(text, labels) {
-  if (labels && labels.pr) return labels.pr;
-  const m = String(text || "").match(/https:\\/\\/github\\.com\\/[^\\s)]+\\/pull\\/\\d+/);
-  return m ? m[0] : "";
 }
 
 async function api(path, init = {}) {
@@ -327,34 +310,21 @@ async function api(path, init = {}) {
   return res.json();
 }
 
-function parseHosts(messages) {
-  const map = new Map();
-  for (const m of messages || []) {
-    if (m.labels?.kind !== "host") continue;
-    const h = m.labels?.host;
-    if (!h) continue;
-    const mode = (/\\bmode=(\\S+)/.exec(m.text) || [])[1] || "local";
-    const reposRaw = (/\\brepos=(.+)$/.exec(m.text) || [])[1] || "";
-    const repos = reposRaw.split(",").map(r => r.trim()).filter(Boolean);
-    map.set(h, { host: h, mode, repos });
-  }
-  return [...map.values()].sort((a, b) => a.host.localeCompare(b.host));
-}
-
 async function refresh() {
   try {
-    const [taskPage, metaPage] = await Promise.all([
-      api("/tasks?state=all&limit=100"),
-      api("/messages?channel=meta&limit=50").catch(() => ({ messages: [] })),
+    const [cardsRes, overview] = await Promise.all([
+      api("/cards?state=all&limit=200"),
+      api("/overview"),
     ]);
-    allTasks = (taskPage.tasks || []).filter(t => t.message?.task?.state !== "canceled");
-    hosts = parseHosts(metaPage.messages || []);
+    allCards = cardsRes.cards || [];
+    hosts = overview.hosts || [];
+    parents = overview.parents || {};
     document.getElementById("live-dot").classList.remove("offline");
     renderHosts();
     renderFilters();
     renderBoard();
-    if (openTaskId) await loadDrawer(openTaskId);
-  } catch (err) {
+    if (openCardId) await loadDrawer(openCardId);
+  } catch {
     document.getElementById("live-dot").classList.add("offline");
   }
 }
@@ -362,229 +332,231 @@ async function refresh() {
 function renderHosts() {
   const el = document.getElementById("hosts");
   el.innerHTML = hosts.map(h =>
-    '<span class="host-pill"><b>' + esc(h.host) + '</b> ' + h.repos.length + ' repos</span>'
+    '<span class="host-pill"><b>' + esc(h.host) + '</b> ' + esc(h.mode) + ' · ' + h.repos.length + ' repos</span>'
   ).join("");
-  const hostSel = document.getElementById("nt-host");
-  const prev = hostSel.value;
+  const hostSel = document.getElementById("nc-host");
+  const current = hostSel.value;
   hostSel.innerHTML = '<option value="">None (mate handles)</option>' +
-    hosts.map(h => '<option value="' + esc(h.host) + '">' + esc(h.host) + ' (' + esc(h.mode) + ')</option>').join("");
-  hostSel.value = prev;
+    hosts.map(h => '<option value="' + esc(h.host) + '">' + esc(h.host) + '</option>').join("");
+  hostSel.value = current;
   const repoSet = new Set();
   for (const h of hosts) for (const r of h.repos) repoSet.add(r);
-  document.getElementById("repo-list").innerHTML = [...repoSet].sort().map(r => '<option value="' + esc(r) + '">').join("");
+  document.getElementById("repo-list").innerHTML = [...repoSet].sort().map(r => '<option value="' + esc(r) + '"></option>').join("");
 }
 
 function renderFilters() {
   const counts = new Map();
-  const channels = new Set();
-  for (const item of allTasks) {
-    const ch = item.message.channel;
-    channels.add(ch);
-    const d = domainOf(ch);
-    const open = item.message.task?.state !== "completed";
-    counts.set(d, (counts.get(d) || 0) + (open ? 1 : 0));
+  for (const name of Object.keys(parents)) counts.set(name, 0);
+  for (const c of allCards) {
+    if (c.state === "done" || c.state === "canceled") continue;
+    counts.set(c.mate, (counts.get(c.mate) || 0) + 1);
   }
-  document.getElementById("channel-list").innerHTML = [...channels].sort().map(c => '<option value="' + esc(c) + '">').join("");
-  const domains = [...counts.keys()].sort();
-  const totalOpen = allTasks.filter(t => t.message.task?.state !== "completed").length;
-  const pills = ['<button class="pill ' + (activeDomain === "all" ? "active" : "") + '" onclick="setDomain(\\'all\\')">All <span class="cnt">' + totalOpen + '</span></button>'];
-  for (const d of domains) {
-    pills.push('<button class="pill ' + (activeDomain === d ? "active" : "") + '" onclick="setDomain(\\'' + esc(d) + '\\')">' + esc(d) + ' <span class="cnt">' + counts.get(d) + '</span></button>');
+  const mates = [...counts.keys()].sort();
+  document.getElementById("mate-list").innerHTML = mates.map(m => '<option value="' + esc(m) + '"></option>').join("");
+  const totalOpen = allCards.filter(c => c.state !== "done" && c.state !== "canceled").length;
+  const pills = ['<button class="pill ' + (activeMate === "all" ? "active" : "") + '" onclick="setMate(\\'all\\')">All <span class="cnt">' + totalOpen + '</span></button>'];
+  for (const m of mates) {
+    pills.push('<button class="pill ' + (activeMate === m ? "active" : "") + '" onclick="setMate(\\'' + esc(m) + '\\')">' + esc(m) + ' <span class="cnt">' + counts.get(m) + '</span></button>');
   }
   document.getElementById("filters").innerHTML = pills.join("");
 }
 
-function setDomain(d) {
-  activeDomain = d;
+function setMate(mate) {
+  activeMate = mate;
   renderFilters();
   renderBoard();
 }
 
 function renderBoard() {
-  const q = (document.getElementById("search").value || "").trim().toLowerCase();
-  const filtered = allTasks.filter(item => {
-    const m = item.message;
-    if (activeDomain !== "all" && domainOf(m.channel) !== activeDomain) return false;
-    if (q && !(m.text + " " + m.channel + " " + JSON.stringify(m.labels || {})).toLowerCase().includes(q)) return false;
-    return true;
+  const q = document.getElementById("search").value.trim().toLowerCase();
+  const visible = allCards.filter(c => {
+    if (c.state === "canceled") return false;
+    if (activeMate !== "all" && c.mate !== activeMate) return false;
+    if (!q) return true;
+    return (c.title + " " + c.body + " " + c.mate + " " + c.holder + " " + (c.project || "") + " #" + c.id).toLowerCase().includes(q);
   });
 
   const boardEl = document.getElementById("board");
   boardEl.innerHTML = COLS.map(col => {
-    const items = filtered.filter(item => col.states.has(item.message.task?.state));
-    const sorted = col.key === "done" ? items.slice().reverse().slice(0, 20) : items;
-    const cards = sorted.length === 0
+    const items = visible.filter(col.match);
+    const cardsHtml = items.length === 0
       ? '<div class="col-empty">Nothing here</div>'
-      : sorted.map(renderCard).join("");
-    return '<section class="col">' +
-      '<div class="col-head"><span class="col-title"><span class="col-dot" style="background:' + col.color + '"></span>' + col.title + '</span><span class="col-count">' + items.length + '</span></div>' +
-      cards +
-      '</section>';
+      : items.map(c => {
+          const cls = c.holder === "captain" ? "captain" : c.state;
+          const chips = [];
+          if (c.holder) chips.push('<span class="chip holder">ball: ' + esc(c.holder) + '</span>');
+          if (c.project) chips.push('<span class="chip">' + esc(c.project) + '</span>');
+          if (c.host) chips.push('<span class="chip">' + esc(c.host) + '</span>');
+          if (c.delivery) chips.push('<span class="chip">' + esc(c.delivery) + '</span>');
+          const reasonHtml = c.state === "held" && c.result
+            ? '<div class="card-reason">' + esc(c.result.slice(0, 180)) + '</div>'
+            : "";
+          return '<article class="card ' + esc(cls) + '" onclick="openDrawer(\\'' + esc(c.id) + '\\')">'
+            + '<div class="card-top"><span class="card-domain">' + esc(c.mate) + '</span><span>#' + esc(c.id) + ' · ' + ago(c.updatedAt) + '</span></div>'
+            + '<div class="card-title">' + esc(c.title) + '</div>'
+            + reasonHtml
+            + (chips.length ? '<div class="card-meta">' + chips.join("") + '</div>' : "")
+            + '</article>';
+        }).join("");
+    return '<section class="col"><div class="col-head"><div class="col-title"><span class="col-dot" style="background:' + col.color + '"></span>' + col.title + '</div><span class="col-count">' + items.length + '</span></div>' + cardsHtml + '</section>';
   }).join("");
 }
 
-function renderCard(item) {
-  const m = item.message;
-  const t = m.task || {};
-  const state = t.state || "ready";
-  const reason = (state === "blocked" || state === "failed") && t.result ? '<div class="card-reason">' + esc(t.result) + '</div>' : "";
-  const pr = extractPr(m.text + " " + (t.result || ""), m.labels);
-  const chips = [];
-  if (m.labels?.project) chips.push('<span class="chip">' + esc(m.labels.project) + '</span>');
-  if (m.labels?.host) chips.push('<span class="chip">' + esc(m.labels.host) + '</span>');
-  if (m.labels?.delivery) chips.push('<span class="chip">' + esc(m.labels.delivery) + '</span>');
-  if (t.by && state === "claimed") chips.push('<span class="chip">' + esc(t.by) + '</span>');
-  if (pr) chips.push('<span class="chip pr">PR #' + pr.split("/").pop() + '</span>');
-  if (item.replies > 0) chips.push('<span class="chip">' + item.replies + ' replies</span>');
-
-  return '<article class="card ' + esc(state) + '" onclick="openDrawer(\\'' + esc(m.id) + '\\')">' +
-    '<div class="card-top"><span class="card-domain">' + esc(domainOf(m.channel)) + '</span><span>#' + esc(m.id) + ' · ' + ago(m.createdAt) + '</span></div>' +
-    '<div class="card-title">' + esc(firstLine(m.text)) + '</div>' +
-    reason +
-    (chips.length ? '<div class="card-meta">' + chips.join("") + '</div>' : "") +
-    '</article>';
-}
-
 async function openDrawer(id) {
-  openTaskId = id;
+  openCardId = id;
   document.getElementById("drawer-backdrop").classList.add("open");
   await loadDrawer(id);
 }
 
 function closeDrawer() {
-  openTaskId = null;
+  openCardId = null;
   document.getElementById("drawer-backdrop").classList.remove("open");
 }
 
 async function loadDrawer(id) {
-  const data = await api("/messages/" + encodeURIComponent(id) + "?limit=100");
-  const m = data.message;
-  const t = m.task || {};
-  const state = t.state || "ready";
+  const { card, entries } = await api("/cards/" + encodeURIComponent(id));
   document.getElementById("drawer-meta").innerHTML =
-    '<span class="card-domain">' + esc(domainOf(m.channel)) + '</span>' +
-    '<span>#' + esc(m.id) + ' · ' + esc(state) + ' · ' + ago(m.createdAt) + '</span>';
-  document.getElementById("drawer-title").textContent = firstLine(m.text);
+    '<span class="card-domain">' + esc(card.mate) + '</span>'
+    + '<span>#' + esc(card.id) + ' · ' + esc(card.state) + (card.holder ? ' · ball: ' + esc(card.holder) : '') + '</span>';
+  document.getElementById("drawer-title").textContent = card.title;
 
-  const restBody = m.text.split("\\n").slice(1).join("\\n").trim();
-  const visibleReplies = (data.replies || []).filter(r => showInternal || !r.noSync);
-  const hiddenCount = (data.replies || []).length - visibleReplies.length;
-  const bodyParts = [];
-
-  if (state === "blocked" || state === "failed") {
-    bodyParts.push('<div class="block-box"><strong>' + (state === "blocked" ? "Needs your decision" : "Failed") + '</strong><div class="prose">' + linkify(t.result || "Waiting on input.") + '</div></div>');
-  } else if (state === "completed" && t.result) {
-    bodyParts.push('<div class="block-box" style="background:var(--emerald-bg);border-color:rgba(16,185,129,0.35)"><strong style="color:var(--emerald)">Completed</strong><div class="prose">' + linkify(t.result) + '</div></div>');
+  const shownEntries = entries.filter(e => showInternal || !e.internal);
+  const parts = [];
+  if (card.state === "held" && card.result) {
+    parts.push('<div class="block-box"><strong>Ball with ' + esc(card.holder) + '</strong><div class="prose">' + linkify(card.result) + '</div></div>');
   }
-
-  if (restBody) bodyParts.push('<div class="prose">' + linkify(restBody) + '</div>');
-
-  const labelEntries = Object.entries(m.labels || {}).filter(([k]) => !k.startsWith("board."));
-  if (labelEntries.length) {
-    bodyParts.push('<div class="card-meta">' + labelEntries.map(([k, v]) => '<span class="chip">' + esc(k) + '=' + esc(v) + '</span>').join("") + '</div>');
+  if (card.body) {
+    parts.push('<div class="prose">' + linkify(card.body) + '</div>');
   }
-
-  bodyParts.push(
-    '<div class="thread-head"><span>Thread (' + visibleReplies.length + ')</span>' +
-    (hiddenCount > 0 || showInternal ? '<button class="btn btn-ghost" style="padding:2px 8px;font-size:11px" onclick="toggleInternal()">' + (showInternal ? "Hide internal" : "Show " + hiddenCount + " internal") + '</button>' : "") +
-    '</div>'
+  parts.push(
+    '<div class="thread-head"><span>Thread (' + shownEntries.length + '/' + entries.length + ')</span>'
+    + '<button class="btn btn-ghost" style="padding:2px 8px;font-size:12px" onclick="toggleInternal()">' + (showInternal ? "Hide internal" : "Show internal") + '</button></div>'
   );
+  parts.push(shownEntries.map(e =>
+    '<div class="reply ' + (e.internal ? "internal" : "") + '">'
+    + '<div class="reply-meta"><span><b>' + esc(e.by) + '</b> · ' + esc(e.kind) + '</span><span>' + ago(e.createdAt) + '</span></div>'
+    + '<div class="prose">' + linkify(e.text) + '</div>'
+    + '</div>'
+  ).join("") || '<div class="col-empty">No entries yet</div>');
+  document.getElementById("drawer-body").innerHTML = parts.join("");
 
-  if (visibleReplies.length === 0) {
-    bodyParts.push('<div class="col-empty">No replies yet</div>');
-  } else {
-    for (const r of visibleReplies) {
-      bodyParts.push(
-        '<div class="reply ' + (r.noSync ? "internal" : "") + '">' +
-        '<div class="reply-meta"><strong>' + esc(r.by?.actor || "agent") + (r.noSync ? " · internal" : "") + '</strong><span>' + ago(r.createdAt) + '</span></div>' +
-        '<div class="prose">' + linkify(r.text) + '</div>' +
-        '</div>'
-      );
-    }
-  }
-  document.getElementById("drawer-body").innerHTML = bodyParts.join("");
-
+  const isOpen = card.state !== "done" && card.state !== "canceled";
   const foot = document.getElementById("drawer-foot");
+  if (!isOpen) {
+    foot.innerHTML = '<div style="color:var(--muted);font-size:12px">Card is ' + esc(card.state) + '.</div>';
+    return;
+  }
   foot.innerHTML =
-    '<textarea class="textarea" id="reply-box" placeholder="' + (state === "blocked" ? "Type your answer to unblock..." : "Reply to thread...") + '"></textarea>' +
-    '<div class="foot-row">' +
-      '<div style="display:flex;gap:8px">' +
-        (state !== "completed" && state !== "canceled" ? '<button class="btn btn-danger" onclick="cancelTask(\\'' + esc(m.id) + '\\')">Cancel task</button>' : "") +
-      '</div>' +
-      '<div style="display:flex;gap:8px">' +
-        '<button class="btn" onclick="sendReply(\\'' + esc(m.id) + '\\', false)">Reply</button>' +
-        (state === "blocked" ? '<button class="btn btn-amber" onclick="sendReply(\\'' + esc(m.id) + '\\', true)">Reply &amp; unblock</button>' : "") +
-      '</div>' +
-    '</div>';
+    '<textarea class="textarea" id="drawer-reply" placeholder="Reply or answer..."></textarea>'
+    + '<div class="foot-row">'
+    + '<div style="display:flex;gap:8px">'
+    + '<button class="btn btn-amber" onclick="answerCard(\\'' + esc(card.id) + '\\')">Answer &amp; hand to ' + esc(card.mate) + '</button>'
+    + '<button class="btn" onclick="replyCard(\\'' + esc(card.id) + '\\')">Reply</button>'
+    + '</div>'
+    + '<div style="display:flex;gap:8px">'
+    + '<button class="btn btn-ghost" onclick="closeCard(\\'' + esc(card.id) + '\\')">Close</button>'
+    + '<button class="btn btn-danger" onclick="cancelCard(\\'' + esc(card.id) + '\\')">Cancel</button>'
+    + '</div>'
+    + '</div>';
 }
 
 function toggleInternal() {
   showInternal = !showInternal;
-  if (openTaskId) loadDrawer(openTaskId);
+  if (openCardId) loadDrawer(openCardId);
 }
 
-async function sendReply(id, unblock) {
-  const box = document.getElementById("reply-box");
-  const text = (box.value || "").trim();
-  if (text) {
-    await api("/messages", { method: "POST", body: JSON.stringify({ re: id, text }) });
-  }
-  if (unblock) {
-    await api("/tasks/" + encodeURIComponent(id) + "/unblock", { method: "POST", body: JSON.stringify({}) });
-  }
-  box.value = "";
+async function replyCard(id) {
+  const el = document.getElementById("drawer-reply");
+  const text = el.value.trim();
+  if (!text) return;
+  await api("/cards/" + encodeURIComponent(id) + "/entries", {
+    method: "POST",
+    body: JSON.stringify({ text, by: "captain" }),
+  });
+  el.value = "";
   await refresh();
 }
 
-async function cancelTask(id) {
-  const reason = (document.getElementById("reply-box").value || "").trim() || "Canceled from board";
-  await api("/tasks/" + encodeURIComponent(id) + "/cancel", { method: "POST", body: JSON.stringify({ reason }) });
-  closeDrawer();
+async function answerCard(id) {
+  const el = document.getElementById("drawer-reply");
+  const text = el.value.trim();
+  if (!text) return;
+  await api("/cards/" + encodeURIComponent(id) + "/answer", {
+    method: "POST",
+    body: JSON.stringify({ text, actor: "captain" }),
+  });
+  el.value = "";
   await refresh();
 }
 
-function openNewModal() { document.getElementById("new-modal").classList.add("open"); }
-function closeNewModal() { document.getElementById("new-modal").classList.remove("open"); }
+async function closeCard(id) {
+  await api("/cards/" + encodeURIComponent(id) + "/close", {
+    method: "POST",
+    body: JSON.stringify({ actor: "captain" }),
+  });
+  await refresh();
+}
 
-async function submitNewTask(e) {
+async function cancelCard(id) {
+  const reason = prompt("Cancel reason?") || "Canceled from board";
+  await api("/cards/" + encodeURIComponent(id) + "/cancel", {
+    method: "POST",
+    body: JSON.stringify({ reason, actor: "captain" }),
+  });
+  await refresh();
+}
+
+function openNewModal() {
+  document.getElementById("new-modal").classList.add("open");
+  document.getElementById("nc-title").focus();
+}
+
+function closeNewModal() {
+  document.getElementById("new-modal").classList.remove("open");
+}
+
+async function submitNewCard(e) {
   e.preventDefault();
-  const channel = document.getElementById("nt-channel").value.trim();
-  const title = document.getElementById("nt-title").value.trim();
-  const body = document.getElementById("nt-body").value.trim();
-  const host = document.getElementById("nt-host").value.trim();
-  const project = document.getElementById("nt-project").value.trim();
-  const delivery = document.getElementById("nt-delivery").value.trim();
-  const labels = {};
-  if (host) labels.host = host;
-  if (project) labels.project = project;
-  if (delivery) labels.delivery = delivery;
-  await api("/tasks", {
+  const mate = document.getElementById("nc-mate").value.trim();
+  const title = document.getElementById("nc-title").value.trim();
+  const body = document.getElementById("nc-body").value.trim();
+  const host = document.getElementById("nc-host").value.trim();
+  const project = document.getElementById("nc-project").value.trim();
+  const delivery = document.getElementById("nc-delivery").value;
+  await api("/cards", {
     method: "POST",
     body: JSON.stringify({
-      channel,
-      text: body ? title + "\\n\\n" + body : title,
-      ...(Object.keys(labels).length ? { labels } : {}),
+      mate,
+      title,
+      ...(body ? { body } : {}),
+      ...(host ? { host } : {}),
+      ...(project ? { project } : {}),
+      ...(host && project ? { delivery } : {}),
+      actor: "captain",
     }),
   });
-  document.getElementById("nt-title").value = "";
-  document.getElementById("nt-body").value = "";
+  document.getElementById("nc-title").value = "";
+  document.getElementById("nc-body").value = "";
   closeNewModal();
   await refresh();
 }
 
 function connectEvents() {
   const es = new EventSource(API + "/events");
-  es.addEventListener("board", () => refresh());
+  es.onmessage = () => { refresh(); };
+  for (const type of ["card.created","card.queued","card.claimed","card.expired","card.returned","card.escalated","card.handed_off","card.answered","card.done","card.canceled","entry.posted","host.seen"]) {
+    es.addEventListener(type, () => { refresh(); });
+  }
   es.onerror = () => {
     document.getElementById("live-dot").classList.add("offline");
-    setTimeout(() => { es.close(); connectEvents(); }, 4000);
   };
-  es.onopen = () => document.getElementById("live-dot").classList.remove("offline");
+  es.onopen = () => {
+    document.getElementById("live-dot").classList.remove("offline");
+  };
 }
 
 refresh();
 connectEvents();
-setInterval(refresh, 15000);
 </script>
 </body>
 </html>

@@ -3,9 +3,7 @@ import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-
-export const DELIVERIES = ["no-mistakes", "direct-pr", "local", "ops"] as const;
-export type Delivery = (typeof DELIVERIES)[number];
+import { DELIVERIES } from "./board/types.ts";
 
 export type SpawnMode = "local" | "docker" | "container";
 export type KeepPanePolicy = "never" | "on-failure" | "always";
@@ -24,18 +22,18 @@ const ContainerConfigSchema = z.object({
   memory: z.string().min(1).optional(),
   inheritEnv: z.array(z.string().min(1)).default([]),
   mounts: z.array(z.string().min(1)).default([]),
-  extraArgs: z.array(z.string()).default([]),
+  extraArgs: z.array(z.string().min(1)).default([]),
 });
 
 const HerdrConfigSchema = z.object({
-  workspace: z.string().min(1).default("fleet"),
+  workspace: z.string().min(1).default("workers"),
   session: z.string().min(1).optional(),
   keepPane: z.enum(["never", "on-failure", "always"]).default("on-failure"),
 });
 
 const MateItemConfigSchema = z.object({
   name: z.string().min(1),
-  channel: z.string().min(1),
+  parent: z.string().min(1).default("captain"),
   cwd: z.string().min(1).optional(),
   workspace: z.string().min(1).optional(),
   promptPath: z.string().min(1).optional(),
@@ -55,6 +53,14 @@ const MatesConfigSchema = z.object({
     .min(1)
     .default(["ypi", "-e", "{adapter}", "--append-system-prompt", "{prompt}"]),
   items: z.array(MateItemConfigSchema).default([]),
+});
+
+const ServerConfigSchema = z.object({
+  host: z.string().min(1).default("127.0.0.1"),
+  port: z.number().int().min(1).max(65_535).default(4100),
+  dataDir: z.string().min(1).default("~/.fleet-v3/board"),
+  chaseIntervalSeconds: z.number().int().min(0).default(60),
+  staleAfterSeconds: z.number().int().min(10).default(600),
 });
 
 const SpawnConfigSchema = z.object({
@@ -79,9 +85,7 @@ const RunnerConfigSchema = z
   .object({
     host: z.string().min(1),
     boardUrl: z.url().optional(),
-    from: z.array(z.string().min(1)).default([]),
-    channels: z.array(z.string().min(1)).min(1),
-    metaChannel: z.string().min(1).default("meta"),
+    matesFilter: z.array(z.string().min(1)).default([]),
     workspacesRoot: z.string().min(1).default("~/fleet-workspaces"),
     concurrency: z.number().int().min(1).max(32).default(4),
     leaseSeconds: z.number().int().min(30).max(3600).default(900),
@@ -91,6 +95,7 @@ const RunnerConfigSchema = z
     maxReviewRounds: z.number().int().min(1).default(4),
     pollWaitSeconds: z.number().int().min(1).max(60).default(15),
     workerPromptPath: z.string().min(1).optional(),
+    server: ServerConfigSchema.optional(),
     spawn: SpawnConfigSchema,
     mates: MatesConfigSchema.optional(),
     verify: VerifyConfigSchema.default({
@@ -115,6 +120,7 @@ export type ContainerConfig = z.infer<typeof ContainerConfigSchema>;
 export type HerdrConfig = z.infer<typeof HerdrConfigSchema>;
 export type MateItemConfig = z.infer<typeof MateItemConfigSchema>;
 export type MatesConfig = z.infer<typeof MatesConfigSchema>;
+type ServerConfig = z.infer<typeof ServerConfigSchema>;
 export type RunnerConfig = z.infer<typeof RunnerConfigSchema>;
 export type RepoConfig = z.infer<typeof RepoConfigSchema>;
 
@@ -140,10 +146,18 @@ export function resolveContainerConfig(spawn: RunnerConfig["spawn"]): ContainerC
 
 export function resolveHerdrConfig(spawn: RunnerConfig["spawn"]): HerdrConfig {
   return {
-    workspace: spawn.herdr?.workspace ?? "fleet",
+    workspace: spawn.herdr?.workspace ?? "workers",
     ...(spawn.herdr?.session !== undefined ? { session: spawn.herdr.session } : {}),
     keepPane: spawn.herdr?.keepPane ?? "on-failure",
   };
+}
+
+export function extractMateParents(config: RunnerConfig | undefined): Record<string, string> {
+  const parents: Record<string, string> = {};
+  for (const item of config?.mates?.items ?? []) {
+    parents[item.name] = item.parent;
+  }
+  return parents;
 }
 
 function normalizeContainerConfig(cfg: ContainerConfig | undefined): ContainerConfig | undefined {
@@ -169,6 +183,14 @@ function normalizeMatesConfig(cfg: MatesConfig | undefined): MatesConfig | undef
   };
 }
 
+function normalizeServerConfig(cfg: ServerConfig | undefined): ServerConfig | undefined {
+  if (cfg === undefined) return undefined;
+  return {
+    ...cfg,
+    dataDir: expandPath(cfg.dataDir),
+  };
+}
+
 export function loadConfig(configPath?: string): RunnerConfig {
   const resolved = expandPath(configPath ?? process.env["FLEET_CONFIG"] ?? "fleet.yaml");
   if (!existsSync(resolved)) {
@@ -185,12 +207,14 @@ export function loadConfig(configPath?: string): RunnerConfig {
   }
   const container = normalizeContainerConfig(parsed.spawn.container ?? parsed.spawn.docker);
   const mates = normalizeMatesConfig(parsed.mates);
+  const server = normalizeServerConfig(parsed.server);
   return {
     ...parsed,
     boardUrl: envUrl ?? parsed.boardUrl,
     workspacesRoot: expandPath(parsed.workspacesRoot),
     workerPromptPath:
       parsed.workerPromptPath === undefined ? undefined : expandPath(parsed.workerPromptPath),
+    ...(server !== undefined ? { server } : {}),
     spawn: {
       ...parsed.spawn,
       ...(container !== undefined ? { container } : {}),

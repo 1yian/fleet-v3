@@ -106,7 +106,7 @@ interface ExistingPane {
 
 export interface MateStatus {
   readonly name: string;
-  readonly channel: string;
+  readonly parent: string;
   readonly workspace: string;
   readonly cwd: string;
   readonly autoStart: boolean;
@@ -118,7 +118,7 @@ export interface MateStatus {
 
 export interface MateActionResult {
   readonly name: string;
-  readonly channel: string;
+  readonly parent: string;
   readonly workspace: string;
   readonly action: "started" | "restarted" | "already-running";
   readonly paneId: string;
@@ -128,7 +128,7 @@ export interface MateActionResult {
 
 export interface MateStopResult {
   readonly name: string;
-  readonly channel: string;
+  readonly parent: string;
   readonly action: "stopped" | "not-running";
   readonly paneId?: string;
 }
@@ -148,7 +148,7 @@ function resolveMate(config: RunnerConfig, mates: MatesConfig, item: MateItemCon
   const workspace = item.workspace ?? mates.workspace;
   const vars: Record<string, string> = {
     name: item.name,
-    channel: item.channel,
+    parent: item.parent,
     prompt: promptPath,
     adapter: DEFAULT_PI_ADAPTER,
     cwd,
@@ -157,9 +157,8 @@ function resolveMate(config: RunnerConfig, mates: MatesConfig, item: MateItemCon
   const commandTemplate = item.command ?? mates.command;
   const argv = commandTemplate.map((token) => interpolate(token, vars));
   const mergedEnv: Record<string, string> = {
-    BOARD_PROFILE: item.name,
-    FLEET_CHANNEL: item.channel,
     FLEET_MATE: item.name,
+    FLEET_PARENT: item.parent,
     ...(config.boardUrl !== undefined ? { BOARD_URL: config.boardUrl } : {}),
   };
   for (const [key, value] of Object.entries(mates.env)) {
@@ -315,7 +314,7 @@ async function launchMateInPane(mate: ResolvedMate, pane: ExistingPane): Promise
     "--display-agent",
     "mate",
     "--token",
-    `channel=${mate.item.channel}`,
+    `parent=${mate.item.parent}`,
   ]).catch(() => undefined);
 
   const cmd = `${shellQuoteSingle(process.execPath)} ${shellQuoteSingle(scriptPath)} ${shellQuoteSingle(specPath)}`;
@@ -330,7 +329,7 @@ function selectMates(
     const found = mates.items.find((entry) => entry.name === options.name);
     if (found === undefined) {
       const known = mates.items.map((entry) => entry.name).join(", ") || "(none)";
-      throw new Error(`Unknown domain mate "${options.name}". Configured mates: ${known}`);
+      throw new Error(`Unknown mate "${options.name}". Configured mates: ${known}`);
     }
     return [found];
   }
@@ -347,7 +346,7 @@ export async function listMates(config: RunnerConfig): Promise<MateStatus[]> {
     if (pane === undefined) {
       results.push({
         name: item.name,
-        channel: item.channel,
+        parent: item.parent,
         workspace: resolved.workspace,
         cwd: resolved.cwd,
         autoStart: item.autoStart,
@@ -358,7 +357,7 @@ export async function listMates(config: RunnerConfig): Promise<MateStatus[]> {
     const running = await isPaneRunningCommand(resolved.session, pane.paneId);
     results.push({
       name: item.name,
-      channel: item.channel,
+      parent: item.parent,
       workspace: resolved.workspace,
       cwd: resolved.cwd,
       autoStart: item.autoStart,
@@ -388,7 +387,7 @@ export async function ensureMatesUp(
       if (running) {
         results.push({
           name: item.name,
-          channel: item.channel,
+          parent: item.parent,
           workspace: resolved.workspace,
           action: "already-running",
           paneId: existing.paneId,
@@ -400,7 +399,7 @@ export async function ensureMatesUp(
       await launchMateInPane(resolved, existing);
       results.push({
         name: item.name,
-        channel: item.channel,
+        parent: item.parent,
         workspace: resolved.workspace,
         action: "restarted",
         paneId: existing.paneId,
@@ -414,7 +413,7 @@ export async function ensureMatesUp(
     await launchMateInPane(resolved, created);
     results.push({
       name: item.name,
-      channel: item.channel,
+      parent: item.parent,
       workspace: resolved.workspace,
       action: "started",
       paneId: created.paneId,
@@ -441,13 +440,13 @@ export async function stopMates(
     const resolved = resolveMate(config, mates, item);
     const existing = await findExistingMatePane(resolved.session, resolved.workspace, item.name);
     if (existing === undefined) {
-      results.push({ name: item.name, channel: item.channel, action: "not-running" });
+      results.push({ name: item.name, parent: item.parent, action: "not-running" });
       continue;
     }
     await runHerdr(resolved.session, ["pane", "close", existing.paneId]);
     results.push({
       name: item.name,
-      channel: item.channel,
+      parent: item.parent,
       action: "stopped",
       paneId: existing.paneId,
     });

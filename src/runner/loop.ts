@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
-import type { Board, ClaimedTask } from "@vercel/board";
-import { DELIVERIES, resolveHerdrConfig, type Delivery, type RunnerConfig } from "../config.ts";
+import type { BoardClient } from "../board/client.ts";
+import type { ClaimReceipt, Delivery } from "../board/types.ts";
+import { resolveHerdrConfig, type RunnerConfig } from "../config.ts";
 import {
   closeHerdrPane,
   openHerdrPane,
@@ -19,23 +20,18 @@ import { cleanupWorkspace, prepareWorkspace, type TaskWorkspace } from "./worktr
 
 const DEFAULT_WORKER_PROMPT = fileURLToPath(new URL("../../prompts/worker.md", import.meta.url));
 
-function parseDelivery(value: string | undefined, fallback: Delivery): Delivery {
-  if (value === undefined) return fallback;
-  return DELIVERIES.find((each) => each === value) ?? fallback;
-}
-
-async function advertiseHost(client: Board, config: RunnerConfig): Promise<void> {
-  const repoNames = Object.keys(config.repos).toSorted();
-  const text = `host=${config.host} mode=${config.spawn.mode} viewport=${config.spawn.viewport} repos=${repoNames.join(", ") || "none"}`;
-  await client.post(config.metaChannel, {
-    text,
-    labels: { kind: "host", host: config.host },
-    noSync: true,
+async function advertiseHost(client: BoardClient, config: RunnerConfig): Promise<void> {
+  await client.advertiseHost({
+    host: config.host,
+    mode: config.spawn.mode,
+    viewport: config.spawn.viewport,
+    repos: Object.keys(config.repos).toSorted(),
   });
 }
 
 function startLeaseRenewal(
-  claim: ClaimedTask,
+  client: BoardClient,
+  claim: ClaimReceipt,
   leaseSeconds: number,
   onLost: () => void,
 ): () => void {
@@ -43,11 +39,17 @@ function startLeaseRenewal(
   let active = true;
   const timer = setInterval(() => {
     if (!active) return;
-    void claim.renew(leaseSeconds).catch(() => {
-      if (!active) return;
-      active = false;
-      onLost();
-    });
+    void client
+      .renewClaim(claim.card.id, {
+        epoch: claim.epoch,
+        token: claim.token,
+        leaseSeconds,
+      })
+      .catch(() => {
+        if (!active) return;
+        active = false;
+        onLost();
+      });
   }, intervalMs);
   timer.unref();
   return () => {
@@ -58,14 +60,17 @@ function startLeaseRenewal(
 
 function buildWorkerEnv(params: {
   readonly config: RunnerConfig;
-  readonly taskId: string;
+  readonly cardId: string;
+  readonly mate: string;
   readonly project: string;
   readonly delivery: Delivery;
   readonly workspace: TaskWorkspace;
   readonly promptPath: string;
 }): Record<string, string> {
   return {
-    BOARD_TASK: params.taskId,
+    FLEET_CARD: params.cardId,
+    BOARD_TASK: params.cardId,
+    FLEET_MATE: params.mate,
     FLEET_HOST: params.config.host,
     FLEET_PROJECT: params.project,
     FLEET_DELIVERY: params.delivery,
@@ -80,7 +85,7 @@ function buildWorkerEnv(params: {
 function runWorkerProcess(params: {
   readonly config: RunnerConfig;
   readonly pane: HerdrPaneHandle | undefined;
-  readonly taskId: string;
+  readonly cardId: string;
   readonly epoch: number;
   readonly workspace: TaskWorkspace;
   readonly promptPath: string;
@@ -91,7 +96,7 @@ function runWorkerProcess(params: {
   const containerName =
     containerMode === undefined
       ? undefined
-      : makeContainerName(params.config.host, params.taskId, params.epoch);
+      : makeContainerName(params.config.host, params.cardId, params.epoch);
   const containerCleanup =
     containerMode !== undefined && containerName !== undefined
       ? { mode: containerMode, name: containerName }
@@ -99,7 +104,7 @@ function runWorkerProcess(params: {
 
   const argv = buildWorkerArgv({
     config: params.config,
-    taskId: params.taskId,
+    taskId: params.cardId,
     worktreePath: params.workspace.worktreePath,
     gitCommonDir: params.workspace.gitCommonDir,
     tmpDir: params.workspace.tmpDir,
@@ -134,52 +139,70 @@ function runWorkerProcess(params: {
 }
 
 async function handleRunOutcome(params: {
-  readonly client: Board;
+  readonly client: BoardClient;
   readonly config: RunnerConfig;
-  readonly claim: ClaimedTask;
-  readonly taskId: string;
+  readonly claim: ClaimReceipt;
   readonly run: SpawnResult;
   readonly leaseLost: boolean;
 }): Promise<{ readonly done: boolean; readonly failed: boolean; readonly message: string }> {
+  const cardId = params.claim.card.id;
   if (params.leaseLost) {
     return { done: true, failed: true, message: "Lease lost" };
   }
   if (params.run.aborted) {
-    await params.claim.release().catch(() => undefined);
+    await params.client
+      .releaseClaim(cardId, { epoch: params.claim.epoch, token: params.claim.token })
+      .catch(() => undefined);
     return { done: true, failed: true, message: "Aborted" };
   }
   if (params.run.timedOut !== null) {
-    await params.client.reply(params.taskId, {
-      text: `Worker hit ${params.run.timedOut} timeout on ${params.config.host}.\n\n${params.run.outputTail.slice(-1000)}`,
-      noSync: true,
+    const tail = params.run.outputTail.slice(-1000);
+    const summary = `Worker hit ${params.run.timedOut} timeout on ${params.config.host}.${tail.length > 0 ? `\n\n${tail}` : ""}`;
+    await params.client.finishClaim(cardId, {
+      epoch: params.claim.epoch,
+      token: params.claim.token,
+      outcome: "needs_mate",
+      summary,
+      actor: `runner-${params.config.host}`,
+      kind: "timeout",
     });
-    await params.claim.fail(`Worker hit ${params.run.timedOut} timeout on ${params.config.host}`);
     return { done: true, failed: true, message: `Timed out (${params.run.timedOut})` };
   }
   if (params.run.exitCode !== 0) {
-    await params.client.reply(params.taskId, {
-      text: `Worker exited ${String(params.run.exitCode)} on ${params.config.host}.\n\n${params.run.outputTail.slice(-1000)}`,
-      noSync: true,
+    const tail = params.run.outputTail.slice(-1000);
+    const summary = `Worker exited ${String(params.run.exitCode)} on ${params.config.host}.${tail.length > 0 ? `\n\n${tail}` : ""}`;
+    await params.client.finishClaim(cardId, {
+      epoch: params.claim.epoch,
+      token: params.claim.token,
+      outcome: "needs_mate",
+      summary,
+      actor: `runner-${params.config.host}`,
+      kind: "worker_error",
     });
-    await params.claim.fail(
-      `Worker exited ${String(params.run.exitCode)} on ${params.config.host}`,
-    );
     return { done: true, failed: true, message: `Exited ${String(params.run.exitCode)}` };
+  }
+  const latest = await params.client.getThread(cardId);
+  if (latest.card.state !== "running") {
+    return {
+      done: true,
+      failed: latest.card.state === "held",
+      message: `Handed to ${latest.card.holder || latest.card.state}`,
+    };
   }
   return { done: false, failed: false, message: `Completed on ${params.config.host}` };
 }
 
 async function handleVerification(params: {
-  readonly client: Board;
+  readonly client: BoardClient;
   readonly config: RunnerConfig;
-  readonly claim: ClaimedTask;
-  readonly taskId: string;
+  readonly claim: ClaimReceipt;
   readonly pane: HerdrPaneHandle | undefined;
   readonly worktreePath: string;
   readonly workerEnv: Record<string, string>;
   readonly signal: AbortSignal;
   readonly isLeaseLost: () => boolean;
 }): Promise<{ readonly ok: boolean; readonly message: string }> {
+  const cardId = params.claim.card.id;
   if (params.pane !== undefined) {
     await updateHerdrPaneStatus(params.pane, "working", "Verifying via no-mistakes");
   }
@@ -195,53 +218,67 @@ async function handleVerification(params: {
   }
 
   if (verified.status === "needs-mate") {
-    await params.client.reply(params.taskId, {
-      text: `Verification stopped at round ${String(verified.rounds)}/${String(params.config.maxReviewRounds)}: ${verified.reason}\n\n${verified.output.slice(-1500)}`,
+    await params.client.finishClaim(cardId, {
+      epoch: params.claim.epoch,
+      token: params.claim.token,
+      outcome: "needs_mate",
+      summary: `Verification stopped at round ${String(verified.rounds)}/${String(params.config.maxReviewRounds)}: ${verified.reason}\n\n${verified.output.slice(-1500)}`,
+      actor: `runner-${params.config.host}`,
+      kind: "verification",
     });
-    await params.claim.fail(verified.reason);
     return { ok: false, message: verified.reason };
   }
 
-  await params.client.reply(params.taskId, {
+  await params.client.postEntry(cardId, {
     text: `Verification passed in ${String(verified.rounds)} round(s).`,
-    noSync: true,
+    by: `runner-${params.config.host}`,
+    internal: true,
+    kind: "status",
   });
   return { ok: true, message: `Completed on ${params.config.host}` };
 }
 
 async function executeClaim(
-  client: Board,
+  client: BoardClient,
   config: RunnerConfig,
-  claim: ClaimedTask,
+  claim: ClaimReceipt,
   outerSignal?: AbortSignal,
 ): Promise<void> {
-  const taskId = claim.task.id;
-  const labels = claim.task.labels;
-  const project = labels["project"];
+  const cardId = claim.card.id;
+  const project = claim.card.project;
 
   if (claim.epoch > config.maxAttempts) {
-    await claim.block(
-      `Stopped after ${String(claim.epoch - 1)} failed or expired attempts on ${config.host}. Review the thread and reopen or cancel.`,
-      { kind: "retry_cap" },
-    );
+    await client.finishClaim(cardId, {
+      epoch: claim.epoch,
+      token: claim.token,
+      outcome: "needs_mate",
+      summary: `Stopped after ${String(claim.epoch - 1)} failed or expired attempts on ${config.host}. Review the thread and re-queue, escalate, or cancel.`,
+      actor: `runner-${config.host}`,
+      kind: "retry_cap",
+    });
     return;
   }
 
-  if (project === undefined || config.repos[project] === undefined) {
-    await claim.fail(
-      `Host ${config.host} has no registered repo for project=${project ?? "(missing)"}.`,
-    );
+  if (project === null || config.repos[project] === undefined) {
+    await client.finishClaim(cardId, {
+      epoch: claim.epoch,
+      token: claim.token,
+      outcome: "needs_mate",
+      summary: `Host ${config.host} has no registered repo for project=${project ?? "(missing)"}.`,
+      actor: `runner-${config.host}`,
+      kind: "missing_repo",
+    });
     return;
   }
 
   const repo = config.repos[project];
-  const delivery = parseDelivery(labels["delivery"], repo.delivery);
+  const delivery: Delivery = claim.card.delivery ?? repo.delivery;
   const promptPath = config.workerPromptPath ?? DEFAULT_WORKER_PROMPT;
   const workspace = await prepareWorkspace({
     workspacesRoot: config.workspacesRoot,
-    channel: claim.task.channel,
+    channel: claim.card.mate,
     project,
-    taskId,
+    taskId: cardId,
     repo,
   });
 
@@ -252,13 +289,12 @@ async function executeClaim(
   outerSignal?.addEventListener("abort", onOuterAbort, { once: true });
 
   let leaseLost = false;
-  const stopRenewal = startLeaseRenewal(claim, config.leaseSeconds, () => {
+  const stopRenewal = startLeaseRenewal(client, claim, config.leaseSeconds, () => {
     leaseLost = true;
     controller.abort();
   });
 
   const herdrConfig = resolveHerdrConfig(config.spawn);
-  const taskSummary = claim.task.text.split("\n")[0] ?? `Task #${taskId}`;
   let pane: HerdrPaneHandle | undefined;
   let failed = false;
   let finalPaneMessage = `Completed on ${config.host}`;
@@ -268,28 +304,38 @@ async function executeClaim(
       pane = await openHerdrPane({
         config: herdrConfig,
         host: config.host,
-        channel: claim.task.channel,
+        channel: claim.card.mate,
         project,
-        taskId,
+        taskId: cardId,
         branch: workspace.branch,
         delivery,
         mode: config.spawn.mode,
-        summary: taskSummary,
+        summary: claim.card.title,
         cwd: workspace.worktreePath,
       });
     }
 
     const paneSuffix = pane === undefined ? "" : `, herdr ${pane.paneId}`;
-    await client.reply(taskId, {
-      text: `Runner ${config.host} claimed task #${taskId} (attempt ${String(claim.epoch)}, branch ${workspace.branch}, worktree ${workspace.worktreePath}, delivery ${delivery}${paneSuffix}).`,
-      noSync: true,
+    await client.postEntry(cardId, {
+      text: `Runner ${config.host} claimed card #${cardId} (attempt ${String(claim.epoch)}, branch ${workspace.branch}, worktree ${workspace.worktreePath}, delivery ${delivery}${paneSuffix}).`,
+      by: `runner-${config.host}`,
+      internal: true,
+      kind: "status",
     });
 
-    const workerEnv = buildWorkerEnv({ config, taskId, project, delivery, workspace, promptPath });
+    const workerEnv = buildWorkerEnv({
+      config,
+      cardId,
+      mate: claim.card.mate,
+      project,
+      delivery,
+      workspace,
+      promptPath,
+    });
     const run = await runWorkerProcess({
       config,
       pane,
-      taskId,
+      cardId,
       epoch: claim.epoch,
       workspace,
       promptPath,
@@ -297,7 +343,7 @@ async function executeClaim(
       signal: controller.signal,
     });
 
-    const outcome = await handleRunOutcome({ client, config, claim, taskId, run, leaseLost });
+    const outcome = await handleRunOutcome({ client, config, claim, run, leaseLost });
     failed = outcome.failed;
     finalPaneMessage = outcome.message;
     if (outcome.done) return;
@@ -307,7 +353,6 @@ async function executeClaim(
         client,
         config,
         claim,
-        taskId,
         pane,
         worktreePath: workspace.worktreePath,
         workerEnv,
@@ -321,7 +366,13 @@ async function executeClaim(
       }
     }
 
-    await claim.complete(`Completed on ${config.host} (${workspace.branch})`);
+    await client.finishClaim(cardId, {
+      epoch: claim.epoch,
+      token: claim.token,
+      outcome: "done",
+      summary: `Completed on ${config.host} (${workspace.branch})`,
+      actor: `runner-${config.host}`,
+    });
   } finally {
     stopRenewal();
     outerSignal?.removeEventListener("abort", onOuterAbort);
@@ -336,32 +387,27 @@ async function executeClaim(
   }
 }
 
-async function claimNextReady(
-  client: Board,
+function claimNextReady(
+  client: BoardClient,
   config: RunnerConfig,
   waitSeconds: number,
   signal?: AbortSignal,
-): Promise<ClaimedTask | null> {
-  const perChannelWait = Math.max(0, Math.floor(waitSeconds / Math.max(1, config.channels.length)));
-  for (const channel of config.channels) {
-    if (signal?.aborted === true) return null;
-    const claimed = await client.tasks.claim(
-      {
-        channel,
-        label: { host: config.host },
-        ...(config.from.length > 0 ? { from: config.from } : {}),
-        wait: perChannelWait,
-        lease: config.leaseSeconds,
-      },
-      signal !== undefined ? { signal } : {},
-    );
-    if (claimed !== null) return claimed;
-  }
-  return null;
+): Promise<ClaimReceipt | null> {
+  if (signal?.aborted === true) return Promise.resolve(null);
+  return client.claimNext(
+    {
+      host: config.host,
+      ...(config.matesFilter.length > 0 ? { mates: config.matesFilter } : {}),
+      leaseSeconds: config.leaseSeconds,
+      claimBy: `runner-${config.host}`,
+      waitSeconds,
+    },
+    signal !== undefined ? { signal } : {},
+  );
 }
 
 export async function runLoop(
-  client: Board,
+  client: BoardClient,
   config: RunnerConfig,
   options: { readonly once?: boolean; readonly signal?: AbortSignal } = {},
 ): Promise<number> {
@@ -375,12 +421,26 @@ export async function runLoop(
     return 1;
   }
 
+  const isAborted = (): boolean => options.signal?.aborted === true;
+
   const slots = Array.from({ length: config.concurrency }, async () => {
-    while (options.signal?.aborted !== true) {
-      const claimed = await claimNextReady(client, config, config.pollWaitSeconds, options.signal);
-      if (claimed === null) continue;
-      await executeClaim(client, config, claimed, options.signal);
-      handled += 1;
+    while (!isAborted()) {
+      try {
+        const claimed = await claimNextReady(
+          client,
+          config,
+          config.pollWaitSeconds,
+          options.signal,
+        );
+        if (claimed === null) continue;
+        await executeClaim(client, config, claimed, options.signal);
+        handled += 1;
+      } catch {
+        if (isAborted()) break;
+        await new Promise((resolve) => {
+          setTimeout(resolve, 1000);
+        });
+      }
     }
   });
 

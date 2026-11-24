@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { board, type Board } from "@vercel/board";
-import { local } from "@vercel/board/backend-local";
+import { createLocalBoardClient, type BoardClient } from "../src/board/client.ts";
+import { CardStore } from "../src/board/store.ts";
 import { runFleetCli } from "../src/cli.ts";
 import { VERSION } from "../src/version.ts";
 
@@ -33,7 +33,8 @@ function makeTempDir(prefix: string): string {
 
 async function captureCli(
   argv: string[],
-  boardClient: Board,
+  boardClient: BoardClient,
+  actor = "captain",
 ): Promise<{ readonly out: string; readonly exitCode: number }> {
   let out = "";
   const prevCode = process.exitCode;
@@ -42,7 +43,8 @@ async function captureCli(
     await runFleetCli({
       argv,
       boardClient,
-      boardUrl: "https://test.board.local/api/board",
+      boardUrl: "http://127.0.0.1:4100",
+      actor,
       stdout: {
         write(chunk: string) {
           out += chunk;
@@ -71,26 +73,26 @@ void test("fast-path --version / -v / -V prints bare version and exits 0", async
   }
 });
 
-void test("home view returns TOON live counts, hosts, open tasks, and contextual help", async () => {
-  const backend = local({ memory: true });
-  const client = board({ backend });
+void test("home view returns TOON live counts, hosts, open cards, and contextual help", async () => {
+  const store = new CardStore({ memory: true, parents: { jarvis: "captain", cleo: "jarvis" } });
+  const client = createLocalBoardClient(store);
 
   try {
     const empty = await captureCli([], client);
     assert.equal(empty.exitCode, 0);
-    assert.match(empty.out, /description: Coordinate parallel multi-machine agents/u);
-    assert.match(empty.out, /counts: 0 open tasks/u);
-    assert.match(empty.out, /tasks: 0 open tasks found/u);
+    assert.match(empty.out, /counts: 0 open cards/u);
+    assert.match(empty.out, /cards: 0 open cards/u);
 
-    await client.post("meta", {
-      text: "host=p620 mode=docker repos=Cleo,fleet-v3",
-      labels: { kind: "host", host: "p620" },
-      noSync: true,
+    await client.advertiseHost({
+      host: "p620",
+      mode: "docker",
+      viewport: "headless",
+      repos: ["Cleo", "fleet-v3"],
     });
     const dispatched = await captureCli(
       [
         "dispatch",
-        "--channel",
+        "--mate",
         "cleo",
         "--title",
         "Fix webhook timeout",
@@ -106,104 +108,115 @@ void test("home view returns TOON live counts, hosts, open tasks, and contextual
 
     const home = await captureCli([], client);
     assert.equal(home.exitCode, 0);
-    assert.match(home.out, /counts: 1 ready \(1 open total\)/u);
+    assert.match(home.out, /counts: 1 queued \(1 open total\)/u);
     assert.match(home.out, /p620,docker/u);
     assert.match(home.out, /Fix webhook timeout/u);
     assert.match(home.out, /fleet view <id>/u);
   } finally {
-    await backend.close();
+    store.close();
   }
 });
 
 void test("rejects unknown flags loudly on stdout with exit code 2 and inline help", async () => {
-  const backend = local({ memory: true });
-  const client = board({ backend });
+  const store = new CardStore({ memory: true });
+  const client = createLocalBoardClient(store);
 
   try {
-    const res = await captureCli(["tasks", "--stat", "blocked"], client);
+    const res = await captureCli(["cards", "--stat", "held"], client);
     assert.equal(res.exitCode, 2);
     assert.match(res.out, /unknown flag --stat/u);
     assert.match(res.out, /--state/u);
   } finally {
-    await backend.close();
+    store.close();
   }
 });
 
 void test("truncates long bodies in view by default and reveals full text with --full", async () => {
-  const backend = local({ memory: true });
-  const client = board({ backend });
+  const store = new CardStore({ memory: true });
+  const client = createLocalBoardClient(store);
 
   try {
     const longBody = "A".repeat(900);
-    const { task } = await client.tasks.create("cleo", { text: `Long task\n\n${longBody}` });
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Long card",
+      body: longBody,
+    });
 
-    const truncated = await captureCli(["view", task.id], client);
+    const truncated = await captureCli(["view", card.id], client);
     assert.equal(truncated.exitCode, 0);
-    assert.match(truncated.out, /truncated, \d+ chars total/u);
-    assert.match(truncated.out, new RegExp(`fleet view ${task.id} --full`, "u"));
+    assert.match(truncated.out, /\.\.\./u);
+    assert.match(truncated.out, new RegExp(`fleet view ${card.id} --full`, "u"));
 
-    const full = await captureCli(["view", task.id, "--full"], client);
+    const full = await captureCli(["view", card.id, "--full"], client);
     assert.equal(full.exitCode, 0);
     assert.ok(full.out.includes(longBody));
     assert.doesNotMatch(full.out, /--full/u);
   } finally {
-    await backend.close();
+    store.close();
   }
 });
 
-void test("block, unblock, cancel, charter, prefs, and init mutations are idempotent", async () => {
-  const backend = local({ memory: true });
-  const client = board({ backend });
-  const dir = makeTempDir("fleet-v3-axi-");
+void test("escalate, answer, handoff, close, cancel, charter, prefs, and init mutations are idempotent", async () => {
+  const store = new CardStore({ memory: true, parents: { jarvis: "captain", cleo: "jarvis" } });
+  const client = createLocalBoardClient(store);
+  const dir = makeTempDir("fv3-axi-init-");
 
   try {
-    const { task } = await client.tasks.create("cleo", { text: "Check idempotency" });
+    const card = await client.createCard({ mate: "cleo", title: "Ship feature" });
 
-    const b1 = await captureCli(["block", task.id, "--reason", "Approve merge?"], client);
-    assert.equal(b1.exitCode, 0);
-    assert.match(b1.out, /state: blocked/u);
+    const esc1 = await captureCli(
+      ["escalate", card.id, "--reason", "Need Jarvis check"],
+      client,
+      "cleo",
+    );
+    assert.equal(esc1.exitCode, 0);
+    assert.match(esc1.out, /holder: jarvis/u);
 
-    const b2 = await captureCli(["block", task.id, "--reason", "Approve merge?"], client);
-    assert.equal(b2.exitCode, 0);
-    assert.match(b2.out, /already blocked \(no-op\)/u);
+    const esc2 = await captureCli(
+      ["escalate", card.id, "--reason", "Approve merge?"],
+      client,
+      "jarvis",
+    );
+    assert.equal(esc2.exitCode, 0);
+    assert.match(esc2.out, /holder: captain/u);
 
-    const u1 = await captureCli(["unblock", task.id, "--reply", "merge"], client);
-    assert.equal(u1.exitCode, 0);
-    assert.match(u1.out, /state: ready/u);
+    const ans = await captureCli(["answer", card.id, "--text", "Merge it"], client, "captain");
+    assert.equal(ans.exitCode, 0);
+    assert.match(ans.out, /holder: cleo/u);
 
-    const u2 = await captureCli(["unblock", task.id], client);
-    assert.equal(u2.exitCode, 0);
-    assert.match(u2.out, /already ready \(no-op\)/u);
+    const close1 = await captureCli(["close", card.id, "--result", "Merged"], client, "cleo");
+    const close2 = await captureCli(["close", card.id, "--result", "Merged"], client, "cleo");
+    assert.equal(close1.exitCode, 0);
+    assert.equal(close2.exitCode, 0);
 
-    const c1 = await captureCli(["cancel", task.id, "--reason", "Superseded"], client);
-    assert.equal(c1.exitCode, 0);
-    assert.match(c1.out, /state: canceled/u);
+    const card2 = await client.createCard({ mate: "cleo", title: "Obsolete item" });
+    const cancel1 = await captureCli(["cancel", card2.id, "--reason", "Duplicate"], client, "cleo");
+    const cancel2 = await captureCli(["cancel", card2.id, "--reason", "Duplicate"], client, "cleo");
+    assert.equal(cancel1.exitCode, 0);
+    assert.equal(cancel2.exitCode, 0);
 
-    const c2 = await captureCli(["cancel", task.id, "--reason", "Superseded"], client);
-    assert.equal(c2.exitCode, 0);
-    assert.match(c2.out, /already canceled \(no-op\)/u);
-
-    const setCharter = await captureCli(["charter", "cleo", "--set", "Ask before merge."], client);
+    const setCharter = await captureCli(
+      ["charter", "cleo", "--set", "Autopilot on shadow"],
+      client,
+    );
     assert.equal(setCharter.exitCode, 0);
-    const readCharter = await captureCli(["charter", "cleo"], client);
-    assert.equal(readCharter.exitCode, 0);
-    assert.match(readCharter.out, /Ask before merge\./u);
+    const getCharter = await captureCli(["charter", "cleo"], client);
+    assert.match(getCharter.out, /Autopilot on shadow/u);
 
-    const setPrefs = await captureCli(["prefs", "--set", "Minimal diffs only."], client);
+    const setPrefs = await captureCli(["prefs", "--set", "No em dashes"], client);
     assert.equal(setPrefs.exitCode, 0);
-    const readPrefs = await captureCli(["prefs"], client);
-    assert.equal(readPrefs.exitCode, 0);
-    assert.match(readPrefs.out, /Minimal diffs only\./u);
+    const getPrefs = await captureCli(["prefs"], client);
+    assert.match(getPrefs.out, /No em dashes/u);
 
     const cfgPath = join(dir, "fleet.yaml");
-    const i1 = await captureCli(["init", "--config", cfgPath], client);
-    assert.equal(i1.exitCode, 0);
-    assert.match(i1.out, /created: true/u);
-
-    const i2 = await captureCli(["init", "--config", cfgPath], client);
-    assert.equal(i2.exitCode, 0);
-    assert.match(i2.out, /already exists \(no-op\)/u);
+    const init1 = await captureCli(["init", "--config", cfgPath], client);
+    const init2 = await captureCli(["init", "--config", cfgPath], client);
+    assert.equal(init1.exitCode, 0);
+    assert.match(init1.out, /created: true/u);
+    assert.equal(init2.exitCode, 0);
+    assert.match(init2.out, /already exists/u);
   } finally {
-    await backend.close();
+    store.close();
   }
 });

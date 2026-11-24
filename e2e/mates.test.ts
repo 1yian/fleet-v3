@@ -5,17 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { board } from "@vercel/board";
-import { local } from "@vercel/board/backend-local";
 import { z } from "zod";
 import { attachFleetPiAdapter, type PiExtensionApi } from "../src/adapters/pi.ts";
+import { createLocalBoardClient } from "../src/board/client.ts";
+import { CardStore } from "../src/board/store.ts";
 import type { RunnerConfig } from "../src/config.ts";
 import { ensureMatesUp, listMates, stopMates } from "../src/mates.ts";
 
 const RecordedEnvSchema = z.object({
-  profile: z.string(),
-  channel: z.string(),
   mate: z.string(),
+  parent: z.string(),
   optchat: z.string(),
 });
 
@@ -115,58 +114,83 @@ afterEach(() => {
   }
 });
 
-void test("domain mate Pi adapter scopes ambient context and wakeups to its channel", async () => {
-  const backend = local({ memory: true });
-  const client = board({ backend });
-
-  await client.post("domains/cleo", {
-    text: "Cleo owns voice AI product work.",
-    labels: { kind: "charter" },
-    noSync: true,
+void test("unified Pi mate adapter scopes ambient context and wakes on escalations, answers, mentions, and chase", async () => {
+  let now = 1_700_000_000_000;
+  const store = new CardStore({
+    memory: true,
+    parents: { jarvis: "captain", cleo: "jarvis", other: "jarvis" },
+    now: () => now,
   });
-  await client.tasks.create("domains/cleo", {
-    text: "Check Hayward transfer rate",
-    labels: { project: "Cleo" },
-  });
-  await client.tasks.create("domains/other", {
-    text: "Unrelated domain task",
-    labels: { project: "other" },
-  });
+  const client = createLocalBoardClient(store);
 
-  const mock = createMockPi();
-  attachFleetPiAdapter(mock.api, {
-    client,
-    profile: "cleo",
-    channel: "domains/cleo",
-    metaChannel: "meta",
-  });
+  try {
+    store.setCharter("cleo", "Cleo owns voice AI product work.");
+    const cleoCard = store.createCard({
+      mate: "cleo",
+      title: "Check Hayward transfer rate",
+      project: "Cleo",
+      actor: "captain",
+    });
+    const otherCard = store.createCard({
+      mate: "other",
+      title: "Unrelated domain card",
+      project: "other",
+      actor: "captain",
+    });
 
-  await mock.emitStart();
-  const prompt1 = await mock.emitBeforeStart("BASE");
-  const prompt2 = await mock.emitBeforeStart("BASE");
-  assert.ok(prompt1 !== undefined);
-  assert.equal(prompt1.systemPrompt, prompt2?.systemPrompt, "ambient prompt stays cache-stable");
-  assert.ok(prompt1.systemPrompt.includes("Domain Mate: cleo (owns channel domains/cleo)"));
-  assert.ok(prompt1.systemPrompt.includes("Cleo owns voice AI product work."));
-  assert.ok(prompt1.systemPrompt.includes("Check Hayward transfer rate"));
-  assert.ok(!prompt1.systemPrompt.includes("Unrelated domain task"));
+    const cleoMock = createMockPi();
+    const jarvisMock = createMockPi();
+    attachFleetPiAdapter(cleoMock.api, { client, mate: "cleo" });
+    attachFleetPiAdapter(jarvisMock.api, { client, mate: "jarvis" });
 
-  await delay(50);
+    await cleoMock.emitStart();
+    await jarvisMock.emitStart();
 
-  await client.post("domains/other", { text: "Noise in another domain" });
-  await client.post("domains/cleo", { text: "Please inspect live calls" });
-  await client.post("domains/other", { text: "Hey @cleo can you cross-check this?" });
+    const prompt1 = await cleoMock.emitBeforeStart("BASE");
+    const prompt2 = await cleoMock.emitBeforeStart("BASE");
+    assert.ok(prompt1 !== undefined);
+    assert.equal(prompt1.systemPrompt, prompt2?.systemPrompt, "ambient prompt stays cache-stable");
+    assert.ok(prompt1.systemPrompt.includes("Mate: cleo (parent: jarvis)"));
+    assert.ok(prompt1.systemPrompt.includes("Cleo owns voice AI product work."));
+    assert.ok(prompt1.systemPrompt.includes("Check Hayward transfer rate"));
+    assert.ok(!prompt1.systemPrompt.includes("Unrelated domain card"));
 
-  const deadline = Date.now() + 3000;
-  while (mock.delivered.length < 2 && Date.now() < deadline) {
-    await delay(25);
+    const jarvisPrompt = await jarvisMock.emitBeforeStart("BASE");
+    assert.ok(jarvisPrompt !== undefined);
+    assert.ok(
+      jarvisPrompt.systemPrompt.includes(
+        "Mate: jarvis (parent: captain, subordinates: cleo, other)",
+      ),
+    );
+
+    await delay(40);
+
+    store.postEntry(otherCard.id, { text: "Noise in another domain", by: "other" });
+    store.escalateCard(cleoCard.id, { reason: "Need Jarvis decision", actor: "cleo" });
+    store.postEntry(otherCard.id, { text: "Hey @cleo can you cross-check?", by: "other" });
+
+    now += 650_000;
+    store.sweepStale(600_000);
+
+    const deadline = Date.now() + 3000;
+    while (
+      (jarvisMock.delivered.length < 2 || cleoMock.delivered.length === 0) &&
+      Date.now() < deadline
+    ) {
+      await delay(25);
+    }
+    await cleoMock.emitShutdown();
+    await jarvisMock.emitShutdown();
+
+    assert.ok(jarvisMock.delivered.some((text) => text.includes("Need Jarvis decision")));
+    assert.ok(jarvisMock.delivered.some((text) => text.includes("Cards waiting in your court")));
+    assert.ok(!jarvisMock.delivered.some((text) => text.includes("Noise in another domain")));
+
+    assert.ok(cleoMock.delivered.some((text) => text.includes("Hey @cleo can you cross-check?")));
+    assert.ok(!cleoMock.delivered.some((text) => text.includes("Noise in another domain")));
+  } finally {
+    store.close();
   }
-  await mock.emitShutdown();
-
-  assert.equal(mock.delivered.length, 2);
-  assert.ok(mock.delivered.some((text) => text.includes("Please inspect live calls")));
-  assert.ok(mock.delivered.some((text) => text.includes("Hey @cleo can you cross-check this?")));
-  assert.ok(!mock.delivered.some((text) => text.includes("Noise in another domain")));
 });
 
 void test("fleet mates up idempotently manages permanent interactive panes in Herdr", async (t) => {
@@ -181,18 +205,15 @@ void test("fleet mates up idempotently manages permanent interactive panes in He
   const envDump = join(root, "cleo-env.json");
   const sleeperScript = `import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(envDump)}, JSON.stringify({
-  profile: process.env.BOARD_PROFILE,
-  channel: process.env.FLEET_CHANNEL,
   mate: process.env.FLEET_MATE,
+  parent: process.env.FLEET_PARENT,
   optchat: process.env.YPI_OPTCHAT_CONFIG,
 }));
 setInterval(() => {}, 1000);`;
 
   const config: RunnerConfig = {
     host: "test-host",
-    from: [],
-    channels: ["domains/"],
-    metaChannel: "meta",
+    matesFilter: [],
     workspacesRoot: join(root, "workspaces"),
     concurrency: 1,
     leaseSeconds: 60,
@@ -222,14 +243,14 @@ setInterval(() => {}, 1000);`;
       items: [
         {
           name: "cleo",
-          channel: "domains/cleo",
+          parent: "jarvis",
           cwd: join(root, "cleo-dir"),
           autoStart: true,
           env: {},
         },
         {
           name: "quiet",
-          channel: "domains/quiet",
+          parent: "jarvis",
           cwd: join(root, "quiet-dir"),
           autoStart: false,
           env: {},
@@ -253,6 +274,7 @@ setInterval(() => {}, 1000);`;
     const first = await ensureMatesUp(config);
     assert.equal(first.length, 1);
     assert.equal(first[0]?.name, "cleo");
+    assert.equal(first[0]?.parent, "jarvis");
     assert.equal(first[0]?.action, "started");
     const cleoPaneId = first[0]?.paneId;
     assert.ok(cleoPaneId !== undefined);
@@ -269,9 +291,8 @@ setInterval(() => {}, 1000);`;
     }
     assert.ok(recordedRaw !== undefined, "permanent mate pane must launch its command with env");
     const recorded = RecordedEnvSchema.parse(JSON.parse(recordedRaw));
-    assert.equal(recorded.profile, "cleo");
-    assert.equal(recorded.channel, "domains/cleo");
     assert.equal(recorded.mate, "cleo");
+    assert.equal(recorded.parent, "jarvis");
     assert.equal(recorded.optchat, join(root, "mates-state", "cleo", "optchat.json"));
 
     const second = await ensureMatesUp(config);

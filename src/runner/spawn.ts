@@ -154,6 +154,7 @@ export function buildWorkerArgv(params: {
 }): string[] {
   const interpolated = params.config.spawn.command.map((part) =>
     part
+      .replaceAll("{card}", params.taskId)
       .replaceAll("{task}", params.taskId)
       .replaceAll("{worktree}", params.worktreePath)
       .replaceAll("{prompt}", params.promptPath),

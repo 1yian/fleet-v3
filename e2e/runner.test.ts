@@ -4,20 +4,30 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
-import { board } from "@vercel/board";
-import { local } from "@vercel/board/backend-local";
 import { z } from "zod";
+import { createHttpBoardClient, createLocalBoardClient } from "../src/board/client.ts";
+import { startBoardServer } from "../src/board/server.ts";
+import { CardStore } from "../src/board/store.ts";
 import type { RunnerConfig } from "../src/config.ts";
 import { runLoop } from "../src/runner/loop.ts";
 import { buildWorkerArgv } from "../src/runner/spawn.ts";
 
 const WorkerReceiptSchema = z.object({
-  task: z.string(),
+  card: z.string(),
   cwd: z.string(),
   worktree: z.string(),
   branch: z.string(),
   prompt: z.string(),
 });
+
+const HerdrReceiptSchema = z.object({
+  card: z.string(),
+  tty: z.boolean(),
+});
+
+const HerdrPaneEntrySchema = z.object({ pane_id: z.string() });
+const HerdrPaneListResultSchema = z.object({ panes: z.array(HerdrPaneEntrySchema) });
+const HerdrPaneListSchema = z.object({ result: HerdrPaneListResultSchema });
 
 const tempDirs: string[] = [];
 
@@ -45,9 +55,7 @@ function makeConfig(
 ): RunnerConfig {
   return {
     host: "test-host",
-    from: [],
-    channels: ["cleo"],
-    metaChannel: "meta",
+    matesFilter: [],
     workspacesRoot: join(root, "workspaces"),
     concurrency: 1,
     leaseSeconds: 60,
@@ -77,6 +85,24 @@ function makeConfig(
   };
 }
 
+function isCommandAvailable(bin: string, args: readonly string[]): boolean {
+  try {
+    execFileSync(bin, [...args], { stdio: "ignore", timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function tryExecSilent(fn: () => void): boolean {
+  try {
+    fn();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 afterEach(() => {
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
@@ -84,23 +110,26 @@ afterEach(() => {
   }
 });
 
-void test("claims ready task, runs isolated worktree worker, advertises host, completes, and cleans up", async () => {
+void test("claims queued card, runs isolated worktree worker, advertises host, completes, and cleans up", async () => {
   const root = makeTempDir("fleet-v3-e2e-");
   const repoDir = initGitRepo(root);
   const receiptPath = join(root, "worker-receipt.json");
-  const backend = local({ memory: true });
-  const client = board({ backend });
+  const store = new CardStore({ memory: true });
+  const client = createLocalBoardClient(store);
 
   try {
-    const { task } = await client.tasks.create("cleo", {
-      text: "Implement demo change",
-      labels: { host: "test-host", project: "demo", delivery: "direct-pr" },
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Implement demo change",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
     });
 
     const workerScript = `
       const fs = require("node:fs");
       fs.writeFileSync(${JSON.stringify(receiptPath)}, JSON.stringify({
-        task: process.env.BOARD_TASK,
+        card: process.env.FLEET_CARD,
         cwd: process.cwd(),
         worktree: process.env.FLEET_WORKTREE,
         branch: process.env.FLEET_BRANCH,
@@ -108,9 +137,7 @@ void test("claims ready task, runs isolated worktree worker, advertises host, co
       }));
     `;
 
-    const me = await client.me();
     const config = makeConfig(root, repoDir, {
-      from: [me.principal],
       spawn: {
         mode: "local",
         viewport: "headless",
@@ -119,38 +146,92 @@ void test("claims ready task, runs isolated worktree worker, advertises host, co
       },
     });
 
-    const handled = await runLoop(client.as("runner-test-host"), config, { once: true });
+    const handled = await runLoop(client, config, { once: true });
     assert.equal(handled, 1);
 
     const receipt = WorkerReceiptSchema.parse(JSON.parse(readFileSync(receiptPath, "utf8")));
-    assert.equal(receipt.task, task.id);
-    assert.equal(receipt.branch, `fleet/t-${task.id}`);
+    assert.equal(receipt.card, card.id);
+    assert.equal(receipt.branch, `fleet/t-${card.id}`);
     assert.notEqual(receipt.worktree, repoDir);
     assert.equal(existsSync(receipt.worktree), false);
 
-    const thread = await client.thread(task.id);
-    assert.equal(thread.message.task?.state, "completed");
+    const thread = await client.getThread(card.id);
+    assert.equal(thread.card.state, "done");
 
-    const meta = await client.channel("meta").messages();
-    const hostPost = meta.messages.find((msg) => msg.labels["kind"] === "host");
-    assert.ok(hostPost !== undefined);
-    assert.match(hostPost.text, /host=test-host.*repos=demo/u);
+    const hosts = await client.listHosts();
+    const advertised = hosts.find((each) => each.host === "test-host");
+    assert.ok(advertised !== undefined);
+    assert.deepEqual(advertised.repos, ["demo"]);
   } finally {
-    await backend.close();
+    store.close();
   }
 });
 
-void test("caps no-mistakes verification at 4 rounds and hands back without force-shipping", async () => {
+void test("preserves mate handoff when a stuck worker hands the card back before exiting 0", async () => {
+  const root = makeTempDir("fleet-v3-handoff-");
+  const repoDir = initGitRepo(root);
+  const store = new CardStore({ memory: true });
+  const started = await startBoardServer({
+    store,
+    host: "127.0.0.1",
+    port: 0,
+    chaseIntervalMs: 0,
+  });
+  const client = createHttpBoardClient(started.url);
+
+  try {
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Need missing API key",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+
+    const workerScript = `
+      fetch(process.env.BOARD_URL + "/api/cards/" + process.env.FLEET_CARD + "/handoff", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "Missing API key; returning to mate", actor: "worker" }),
+      }).then(() => process.exit(0));
+    `;
+
+    const config = makeConfig(root, repoDir, {
+      boardUrl: started.url,
+      spawn: {
+        mode: "local",
+        viewport: "headless",
+        direnv: false,
+        command: ["node", "-e", workerScript],
+      },
+    });
+
+    const handled = await runLoop(client, config, { once: true });
+    assert.equal(handled, 1);
+
+    const thread = await client.getThread(card.id);
+    assert.equal(thread.card.state, "held", "must not overwrite worker handoff with done");
+    assert.equal(thread.card.holder, "cleo");
+  } finally {
+    await started.stop();
+    store.close();
+  }
+});
+
+void test("caps no-mistakes verification at 4 rounds and hands back to mate without force-shipping", async () => {
   const root = makeTempDir("fleet-v3-e2e-");
   const repoDir = initGitRepo(root);
   const roundsLog = join(root, "rounds.log");
-  const backend = local({ memory: true });
-  const client = board({ backend });
+  const store = new CardStore({ memory: true });
+  const client = createLocalBoardClient(store);
 
   try {
-    const { task } = await client.tasks.create("cleo", {
-      text: "Change that never converges in review",
-      labels: { host: "test-host", project: "demo", delivery: "no-mistakes" },
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Change that never converges in review",
+      host: "test-host",
+      project: "demo",
+      delivery: "no-mistakes",
     });
 
     const failVerify = `
@@ -160,9 +241,7 @@ void test("caps no-mistakes verification at 4 rounds and hands back without forc
       process.exit(1);
     `;
 
-    const me = await client.me();
     const config = makeConfig(root, repoDir, {
-      from: [me.principal],
       maxReviewRounds: 4,
       verify: {
         command: ["node", "-e", failVerify],
@@ -170,44 +249,50 @@ void test("caps no-mistakes verification at 4 rounds and hands back without forc
       },
     });
 
-    const handled = await runLoop(client.as("runner-test-host"), config, { once: true });
+    const handled = await runLoop(client, config, { once: true });
     assert.equal(handled, 1);
 
     const rounds = readFileSync(roundsLog, "utf8").trim().split("\n");
     assert.deepEqual(rounds, ["1", "2", "3", "4"]);
 
-    const thread = await client.thread(task.id);
-    assert.equal(thread.message.task?.state, "failed");
+    const thread = await client.getThread(card.id);
+    assert.equal(thread.card.state, "held");
+    assert.equal(thread.card.holder, "cleo");
     assert.ok(
-      thread.replies.some((reply) => /stopped at round 4\/4/iu.test(reply.text)),
+      thread.entries.some((entry) => /stopped at round 4\/4/iu.test(entry.text)),
       "expected 4-round handback summary in thread",
     );
   } finally {
-    await backend.close();
+    store.close();
   }
 });
 
-void test("blocks task instead of crash-looping once claim epoch exceeds maxAttempts", async () => {
+void test("returns card to mate instead of crash-looping once claim epoch exceeds maxAttempts", async () => {
   const root = makeTempDir("fleet-v3-e2e-");
   const repoDir = initGitRepo(root);
   const ranMarker = join(root, "should-not-run");
-  const backend = local({ memory: true });
-  const client = board({ backend });
+  const store = new CardStore({ memory: true });
+  const client = createLocalBoardClient(store);
 
   try {
-    const { task } = await client.tasks.create("cleo", {
-      text: "Flaky task",
-      labels: { host: "test-host", project: "demo" },
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Flaky card",
+      host: "test-host",
+      project: "demo",
     });
 
     for (let i = 0; i < 3; i += 1) {
-      const prior = await client.tasks.claim(task.id, { lease: 60 });
-      await prior.release();
+      const prior = await client.claimNext({
+        host: "test-host",
+        leaseSeconds: 60,
+        claimBy: "runner-test-host",
+      });
+      assert.ok(prior !== null);
+      await client.releaseClaim(card.id, { epoch: prior.epoch, token: prior.token });
     }
 
-    const me = await client.me();
     const config = makeConfig(root, repoDir, {
-      from: [me.principal],
       maxAttempts: 3,
       spawn: {
         mode: "local",
@@ -221,13 +306,15 @@ void test("blocks task instead of crash-looping once claim epoch exceeds maxAtte
       },
     });
 
-    await runLoop(client.as("runner-test-host"), config, { once: true });
+    await runLoop(client, config, { once: true });
 
     assert.equal(existsSync(ranMarker), false);
-    const thread = await client.thread(task.id);
-    assert.equal(thread.message.task?.state, "blocked");
+    const thread = await client.getThread(card.id);
+    assert.equal(thread.card.state, "held");
+    assert.equal(thread.card.holder, "cleo");
+    assert.equal(thread.card.labels["return_kind"], "retry_cap");
   } finally {
-    await backend.close();
+    store.close();
   }
 });
 
@@ -235,13 +322,15 @@ void test("kills entire worker process group on idle timeout leaving no orphan g
   const root = makeTempDir("fleet-v3-e2e-");
   const repoDir = initGitRepo(root);
   const childPidFile = join(root, "grandchild.pid");
-  const backend = local({ memory: true });
-  const client = board({ backend });
+  const store = new CardStore({ memory: true });
+  const client = createLocalBoardClient(store);
 
   try {
-    const { task } = await client.tasks.create("cleo", {
-      text: "Hanging worker",
-      labels: { host: "test-host", project: "demo" },
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Hanging worker",
+      host: "test-host",
+      project: "demo",
     });
 
     const hangScript = `
@@ -252,9 +341,7 @@ void test("kills entire worker process group on idle timeout leaving no orphan g
       setInterval(() => {}, 10000);
     `;
 
-    const me = await client.me();
     const config = makeConfig(root, repoDir, {
-      from: [me.principal],
       idleTimeoutSeconds: 1,
       maxWallSeconds: 5,
       spawn: {
@@ -265,10 +352,11 @@ void test("kills entire worker process group on idle timeout leaving no orphan g
       },
     });
 
-    await runLoop(client.as("runner-test-host"), config, { once: true });
+    await runLoop(client, config, { once: true });
 
-    const thread = await client.thread(task.id);
-    assert.equal(thread.message.task?.state, "failed");
+    const thread = await client.getThread(card.id);
+    assert.equal(thread.card.state, "held");
+    assert.equal(thread.card.holder, "cleo");
 
     const grandchildPid = Number(readFileSync(childPidFile, "utf8").trim());
     assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0);
@@ -277,18 +365,9 @@ void test("kills entire worker process group on idle timeout leaving no orphan g
     });
     assert.throws(() => process.kill(grandchildPid, 0), { code: "ESRCH" });
   } finally {
-    await backend.close();
+    store.close();
   }
 });
-
-function isCommandAvailable(bin: string, args: readonly string[]): boolean {
-  try {
-    execFileSync(bin, [...args], { stdio: "ignore", timeout: 5000 });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 void test("builds container and docker worker argv with gitCommonDir, expanded mounts, inherited env, ssh, and tty", () => {
   const root = makeTempDir("fleet-v3-argv-");
@@ -302,7 +381,7 @@ void test("builds container and docker worker argv with gitCommonDir, expanded m
         mode: "container",
         viewport: "herdr",
         direnv: false,
-        command: ["ypi", "--print", "task {task}"],
+        command: ["ypi", "--auto-exit", "card {card}"],
         container: {
           image: "fleet-worker:latest",
           ssh: true,
@@ -322,7 +401,7 @@ void test("builds container and docker worker argv with gitCommonDir, expanded m
       gitCommonDir: "/tmp/repo/.git",
       tmpDir: "/tmp/tmp/t-42",
       promptPath: "/tmp/worker.md",
-      env: { BOARD_TASK: "42" },
+      env: { FLEET_CARD: "42" },
       tty: true,
       containerName: "fleet-mac-t-42-a1-abcd",
     });
@@ -336,15 +415,15 @@ void test("builds container and docker worker argv with gitCommonDir, expanded m
     const expectedAuthMount = `${join(homedir(), ".pi/agent/auth.json")}:/root/.pi/agent/auth.json:ro`;
     assert.ok(argv.includes(expectedAuthMount));
     assert.ok(argv.includes("FLEET_TEST_SECRET=top-secret-token"));
-    assert.ok(argv.includes("BOARD_TASK=42"));
-    assert.equal(argv.at(-1), "task 42");
+    assert.ok(argv.includes("FLEET_CARD=42"));
+    assert.equal(argv.at(-1), "card 42");
   } finally {
     if (prevSecret === undefined) delete process.env["FLEET_TEST_SECRET"];
     else process.env["FLEET_TEST_SECRET"] = prevSecret;
   }
 });
 
-void test("runs real isolated task inside Apple container micro-VM with worktree gitCommonDir and inherited env", async (t) => {
+void test("runs real isolated card inside Apple container micro-VM with worktree gitCommonDir and inherited env", async (t) => {
   if (!isCommandAvailable("container", ["system", "status"])) {
     t.skip("Apple container runtime not running on this host");
     return;
@@ -360,25 +439,26 @@ void test("runs real isolated task inside Apple container micro-VM with worktree
   const prevInherited = process.env["FLEET_E2E_INHERITED"];
   process.env["FLEET_E2E_INHERITED"] = "inherited-ok";
 
-  const backend = local({ memory: true });
-  const client = board({ backend });
+  const store = new CardStore({ memory: true });
+  const client = createLocalBoardClient(store);
 
   try {
-    const { task } = await client.tasks.create("cleo", {
-      text: "Verify container worker isolation",
-      labels: { host: "test-host", project: "demo", delivery: "direct-pr" },
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Verify container worker isolation",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
     });
 
     const script = [
       "set -eu",
       'gitdir=$(sed "s/^gitdir: //" .git)',
       'test -f "$gitdir/HEAD"',
-      'printf "%s|%s|%s|%s" "$BOARD_TASK" "$FLEET_E2E_INHERITED" "$(cat /run/secret.txt)" "$(cat "$gitdir/HEAD")" > "$FLEET_E2E_OUT"',
+      'printf "%s|%s|%s|%s" "$FLEET_CARD" "$FLEET_E2E_INHERITED" "$(cat /run/secret.txt)" "$(cat "$gitdir/HEAD")" > "$FLEET_E2E_OUT"',
     ].join("; ");
 
-    const me = await client.me();
     const config = makeConfig(root, repoDir, {
-      from: [me.principal],
       idleTimeoutSeconds: 30,
       maxWallSeconds: 60,
       spawn: {
@@ -396,40 +476,27 @@ void test("runs real isolated task inside Apple container micro-VM with worktree
       },
     });
 
-    const handled = await runLoop(client.as("runner-test-host"), config, { once: true });
+    const handled = await runLoop(client, config, { once: true });
     assert.equal(handled, 1);
 
-    const thread = await client.thread(task.id);
+    const thread = await client.getThread(card.id);
     assert.equal(
-      thread.message.task?.state,
-      "completed",
-      thread.replies.map((reply) => reply.text).join("\n---\n"),
+      thread.card.state,
+      "done",
+      thread.entries.map((entry) => entry.text).join("\n---\n"),
     );
 
     const observed = readFileSync(hostOutPath, "utf8").trim();
     assert.equal(
       observed,
-      `${task.id}|inherited-ok|cred-payload|ref: refs/heads/fleet/t-${task.id}`,
+      `${card.id}|inherited-ok|cred-payload|ref: refs/heads/fleet/t-${card.id}`,
     );
   } finally {
     if (prevInherited === undefined) delete process.env["FLEET_E2E_INHERITED"];
     else process.env["FLEET_E2E_INHERITED"] = prevInherited;
-    await backend.close();
+    store.close();
   }
 });
-
-const HerdrPaneEntrySchema = z.object({ pane_id: z.string() });
-const HerdrPaneListResultSchema = z.object({ panes: z.array(HerdrPaneEntrySchema) });
-const HerdrPaneListSchema = z.object({ result: HerdrPaneListResultSchema });
-
-function tryExecSilent(fn: () => void): boolean {
-  try {
-    fn();
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 void test("runs workers inside live herdr panes in an isolated session, closing on success and keeping on failure", async (t) => {
   if (!isCommandAvailable("herdr", ["--version"])) {
@@ -448,8 +515,8 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
       timeout: 10_000,
     });
 
-  const backend = local({ memory: true });
-  const client = board({ backend });
+  const store = new CardStore({ memory: true });
+  const client = createLocalBoardClient(store);
 
   try {
     let ready = false;
@@ -466,16 +533,18 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
     }
     assert.equal(ready, true, "isolated herdr server did not start");
 
-    const me = await client.me();
-    const okTask = await client.tasks.create("cleo", {
-      text: "Run inside herdr pane and succeed",
-      labels: { host: "test-host", project: "demo", delivery: "direct-pr" },
+    const okCard = await client.createCard({
+      mate: "cleo",
+      title: "Run inside herdr pane and succeed",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
     });
 
     const okScript = `
       const fs = require("node:fs");
       fs.writeFileSync(${JSON.stringify(receiptPath)}, JSON.stringify({
-        task: process.env.BOARD_TASK,
+        card: process.env.FLEET_CARD,
         tty: Boolean(process.stdout.isTTY),
       }));
     `;
@@ -485,31 +554,28 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
       viewport: "herdr" as const,
       direnv: false,
       herdr: {
-        workspace: "fleet",
+        workspace: "workers",
         session: sessionName,
         keepPane: "on-failure" as const,
       },
     };
 
     const okConfig = makeConfig(root, repoDir, {
-      from: [me.principal],
       spawn: { ...baseHerdrSpawn, command: ["node", "-e", okScript] },
     });
 
-    const handledOk = await runLoop(client.as("runner-test-host"), okConfig, { once: true });
+    const handledOk = await runLoop(client, okConfig, { once: true });
     assert.equal(handledOk, 1);
 
-    const okThread = await client.thread(okTask.task.id);
-    assert.equal(okThread.message.task?.state, "completed");
+    const okThread = await client.getThread(okCard.id);
+    assert.equal(okThread.card.state, "done");
     assert.ok(
-      okThread.replies.some((reply) => /herdr w\d+:p\d+/u.test(reply.text)),
-      "expected herdr pane ID in claim reply",
+      okThread.entries.some((entry) => /herdr w\d+:p\d+/u.test(entry.text)),
+      "expected herdr pane ID in claim entry",
     );
 
-    const receipt = z
-      .object({ task: z.string(), tty: z.boolean() })
-      .parse(JSON.parse(readFileSync(receiptPath, "utf8")));
-    assert.equal(receipt.task, okTask.task.id);
+    const receipt = HerdrReceiptSchema.parse(JSON.parse(readFileSync(receiptPath, "utf8")));
+    assert.equal(receipt.card, okCard.id);
     assert.equal(receipt.tty, true, "herdr pane must provide a live TTY");
 
     const panesAfterSuccess = HerdrPaneListSchema.parse(JSON.parse(herdrExec("pane", "list")));
@@ -519,24 +585,27 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
       "keepPane: on-failure must close pane after success",
     );
 
-    const failTask = await client.tasks.create("cleo", {
-      text: "Run inside herdr pane and fail",
-      labels: { host: "test-host", project: "demo", delivery: "direct-pr" },
+    const failCard = await client.createCard({
+      mate: "cleo",
+      title: "Run inside herdr pane and fail",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
     });
 
     const failConfig = makeConfig(root, repoDir, {
-      from: [me.principal],
       spawn: {
         ...baseHerdrSpawn,
         command: ["node", "-e", "console.error('boom'); process.exit(2);"],
       },
     });
 
-    const handledFail = await runLoop(client.as("runner-test-host"), failConfig, { once: true });
+    const handledFail = await runLoop(client, failConfig, { once: true });
     assert.equal(handledFail, 1);
 
-    const failThread = await client.thread(failTask.task.id);
-    assert.equal(failThread.message.task?.state, "failed");
+    const failThread = await client.getThread(failCard.id);
+    assert.equal(failThread.card.state, "held");
+    assert.equal(failThread.card.holder, "cleo");
 
     const panesAfterFail = HerdrPaneListSchema.parse(JSON.parse(herdrExec("pane", "list")));
     assert.equal(
@@ -555,6 +624,6 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
     tryExecSilent(() => {
       execFileSync("herdr", ["session", "delete", sessionName], { stdio: "ignore", timeout: 5000 });
     });
-    await backend.close();
+    store.close();
   }
 });

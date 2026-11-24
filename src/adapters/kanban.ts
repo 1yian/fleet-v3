@@ -1,12 +1,10 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { Board } from "@vercel/board";
 import { KANBAN_HTML } from "./kanban-html.ts";
 
 export interface KanbanServerOptions {
-  readonly boardClient: Board;
+  readonly boardUrl: string;
   readonly host: string;
   readonly port: number;
-  readonly inspectOrigin?: string;
 }
 
 async function readBody(req: IncomingMessage): Promise<Uint8Array<ArrayBuffer> | undefined> {
@@ -34,15 +32,15 @@ function forwardHeaders(source: Headers): Record<string, string> {
   return out;
 }
 
-async function proxyBoardApi(
-  boardClient: Board,
+async function proxyUpstream(
+  baseUrl: string,
   req: IncomingMessage,
   res: ServerResponse,
-  apiPath: string,
+  rawPath: string,
 ): Promise<void> {
   const controller = new AbortController();
-  req.on("close", () => {
-    controller.abort();
+  res.on("close", () => {
+    if (!res.writableEnded) controller.abort();
   });
 
   const body = await readBody(req);
@@ -51,8 +49,11 @@ async function proxyBoardApi(
   if (typeof contentType === "string") headers["content-type"] = contentType;
   const accept = req.headers["accept"];
   if (typeof accept === "string") headers["accept"] = accept;
+  const lastEventId = req.headers["last-event-id"];
+  if (typeof lastEventId === "string") headers["last-event-id"] = lastEventId;
 
-  const upstream = await boardClient.request(apiPath, {
+  const cleanBase = baseUrl.replace(/\/+$/u, "");
+  const upstream = await fetch(`${cleanBase}${rawPath}`, {
     method: req.method ?? "GET",
     headers,
     ...(body !== undefined ? { body } : {}),
@@ -60,7 +61,6 @@ async function proxyBoardApi(
   });
 
   res.writeHead(upstream.status, forwardHeaders(upstream.headers));
-
   if (upstream.body === null) {
     res.end();
     return;
@@ -81,22 +81,6 @@ async function proxyBoardApi(
   }
 }
 
-async function proxyInspect(
-  inspectOrigin: string,
-  req: IncomingMessage,
-  res: ServerResponse,
-  pathname: string,
-): Promise<void> {
-  const targetPath = pathname === "/inspect" ? "/" : pathname.replace(/^\/inspect/u, "");
-  const upstream = await fetch(`${inspectOrigin}${targetPath}`, {
-    method: req.method ?? "GET",
-    headers: { accept: typeof req.headers["accept"] === "string" ? req.headers["accept"] : "*/*" },
-  });
-  res.writeHead(upstream.status, forwardHeaders(upstream.headers));
-  const buf = Buffer.from(await upstream.arrayBuffer());
-  res.end(buf);
-}
-
 export async function startKanbanServer(
   options: KanbanServerOptions,
 ): Promise<{ readonly server: Server; readonly url: string }> {
@@ -109,13 +93,8 @@ export async function startKanbanServer(
           res.end(KANBAN_HTML);
           return;
         }
-        if (rawUrl.startsWith("/api/board")) {
-          const suffix = rawUrl.slice("/api/board".length) || "/";
-          await proxyBoardApi(options.boardClient, req, res, suffix);
-          return;
-        }
-        if (options.inspectOrigin !== undefined && rawUrl.startsWith("/inspect")) {
-          await proxyInspect(options.inspectOrigin, req, res, rawUrl);
+        if (rawUrl.startsWith("/api/")) {
+          await proxyUpstream(options.boardUrl, req, res, rawUrl);
           return;
         }
         res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
