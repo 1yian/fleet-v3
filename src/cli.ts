@@ -1,80 +1,113 @@
-#!/usr/bin/env node
-import { copyFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { parseArgs } from "node:util";
-import { board } from "@vercel/board";
+import { board, type Board } from "@vercel/board";
+import { runAxiCli } from "axi-sdk-js";
+import {
+  blockCommand,
+  cancelCommand,
+  charterCommand,
+  COMMAND_HELP,
+  dispatchCommand,
+  homeCommand,
+  hostsCommand,
+  initCommand,
+  prefsCommand,
+  replyCommand,
+  runCommand,
+  setupCommand,
+  tasksCommand,
+  unblockCommand,
+  viewCommand,
+  type FleetAxiContext,
+} from "./axi/commands.ts";
 import { loadConfig } from "./config.ts";
-import { runLoop } from "./runner/loop.ts";
+import { VERSION } from "./version.ts";
 
-const EXAMPLE_CONFIG = fileURLToPath(new URL("../fleet.example.yaml", import.meta.url));
+const DESCRIPTION = "Coordinate parallel multi-machine agents on @vercel/board";
 
-const HELP = `fleet - thin multi-machine execution runner on @vercel/board
+const TOP_LEVEL_HELP = `fleet - ${DESCRIPTION}
 
 Usage:
-  fleet init                   Copy fleet.example.yaml to ./fleet.yaml
-  fleet run [options]          Claim and run ready tasks labeled host=<config.host>
+  fleet                        Live overview of open tasks, counts, and advertised hosts
+  fleet tasks [flags]          List tasks across channels
+  fleet view <id> [--full]     Inspect a task and its thread
+  fleet dispatch [flags]       Create a task on the board
+  fleet reply <id> [flags]     Post a reply to a task thread
+  fleet block <id> [flags]     Hold a task for human judgment
+  fleet unblock <id> [flags]   Unblock a task (optionally posting an answer)
+  fleet cancel <id> [flags]    Cancel an open or obsolete task
+  fleet hosts                  List runner hosts advertised in meta
+  fleet charter <ch> [flags]   Read or update a domain charter
+  fleet prefs [flags]          Read or update operator-wide preferences
+  fleet run [flags]            Run fleet-runner for this host
+  fleet init [flags]           Create fleet.yaml from fleet.example.yaml
+  fleet setup hooks [flags]    Install or check session-start hooks
 
-Options:
-  --config <path>              Path to fleet.yaml (default: $FLEET_CONFIG or ./fleet.yaml)
-  --once                       Claim and run at most one ready task, then exit
-  -h, --help                   Show this help
-`;
+Run \`fleet <command> --help\` for per-command flags and examples.`;
 
-async function main(): Promise<void> {
-  const parsed = parseArgs({
-    allowPositionals: true,
-    options: {
-      config: { type: "string" },
-      once: { type: "boolean", default: false },
-      help: { type: "boolean", short: "h", default: false },
-    },
-  });
-
-  const [command] = parsed.positionals;
-  if (parsed.values.help || command === undefined) {
-    process.stdout.write(HELP);
-    return;
-  }
-
-  if (command === "init") {
-    const target = resolve(process.cwd(), "fleet.yaml");
-    if (existsSync(target)) {
-      throw new Error(`${target} already exists`);
-    }
-    copyFileSync(EXAMPLE_CONFIG, target);
-    process.stdout.write(`Created ${target}\n`);
-    return;
-  }
-
-  if (command !== "run") {
-    throw new Error(`Unknown command: ${command}\n\n${HELP}`);
-  }
-
-  const config = loadConfig(parsed.values.config);
-  const client = board(config.boardUrl !== undefined ? { url: config.boardUrl } : {}).as(
-    `runner-${config.host}`,
-  );
-
-  const controller = new AbortController();
-  const stop = (): void => {
-    controller.abort();
-  };
-  process.on("SIGINT", stop);
-  process.on("SIGTERM", stop);
-
-  try {
-    await runLoop(client, config, { once: parsed.values.once, signal: controller.signal });
-  } finally {
-    process.off("SIGINT", stop);
-    process.off("SIGTERM", stop);
-  }
+export interface RunFleetCliOptions {
+  readonly argv?: string[];
+  readonly boardClient?: Board;
+  readonly boardUrl?: string;
+  readonly metaChannel?: string;
+  readonly stdout?: { write: (chunk: string) => unknown };
 }
 
-try {
-  await main();
-} catch (error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`error: ${message}\n`);
-  process.exitCode = 1;
+function defaultBoardContext(): FleetAxiContext {
+  const envUrl = process.env["BOARD_URL"];
+  let boardUrl = envUrl;
+  let metaChannel = "meta";
+  const defaultConfigPath = process.env["FLEET_CONFIG"] ?? resolve(process.cwd(), "fleet.yaml");
+  if (boardUrl === undefined && existsSync(defaultConfigPath)) {
+    const cfg = loadConfig(defaultConfigPath);
+    boardUrl = cfg.boardUrl;
+    metaChannel = cfg.metaChannel;
+  }
+  return {
+    board: () => board(boardUrl !== undefined ? { url: boardUrl } : {}),
+    boardUrl,
+    metaChannel,
+  };
+}
+
+export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<void> {
+  const provided = options.boardClient;
+  const ctx: FleetAxiContext =
+    provided !== undefined
+      ? {
+          board: () => provided,
+          boardUrl: options.boardUrl,
+          metaChannel: options.metaChannel ?? "meta",
+        }
+      : defaultBoardContext();
+
+  await runAxiCli<FleetAxiContext>({
+    description: DESCRIPTION,
+    version: VERSION,
+    ...(options.argv !== undefined ? { argv: options.argv } : {}),
+    ...(options.stdout !== undefined ? { stdout: options.stdout } : {}),
+    topLevelHelp: TOP_LEVEL_HELP,
+    getCommandHelp: (cmd) => COMMAND_HELP[cmd],
+    resolveContext: () => ctx,
+    home: homeCommand,
+    commands: {
+      tasks: tasksCommand,
+      view: viewCommand,
+      dispatch: dispatchCommand,
+      reply: replyCommand,
+      block: blockCommand,
+      unblock: unblockCommand,
+      cancel: cancelCommand,
+      hosts: hostsCommand,
+      charter: charterCommand,
+      prefs: prefsCommand,
+      init: initCommand,
+      setup: setupCommand,
+      run: runCommand,
+    },
+  });
+}
+
+export async function main(): Promise<void> {
+  await runFleetCli();
 }
