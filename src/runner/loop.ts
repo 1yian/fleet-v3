@@ -14,7 +14,7 @@ function parseDelivery(value: string | undefined, fallback: Delivery): Delivery 
 
 async function advertiseHost(client: Board, config: RunnerConfig): Promise<void> {
   const repoNames = Object.keys(config.repos).toSorted();
-  const text = `host=${config.host} mode=${config.spawn.mode} repos=${repoNames.join(",") || "none"}`;
+  const text = `host=${config.host} mode=${config.spawn.mode} repos=${repoNames.join(", ") || "none"}`;
   await client.post(config.metaChannel, {
     text,
     labels: { kind: "host", host: config.host },

@@ -85,6 +85,12 @@
       "rules": {
         "fleet/no-kill-by-name": "error"
       }
+    },
+    {
+      "files": ["src/adapters/pi.ts"],
+      "rules": {
+        "import/no-default-export": "off"
+      }
     }
   ]
 }

@@ -14,10 +14,10 @@ Peace of mind comes from a zero-inbox decision feed where every item genuinely n
 
 ## The board is the conversation
 
-`@vercel/board` owns the durable record of channels, threads, tasks, dependencies, claim leases, and visual inspection through `vb inspect`.
-`fleet-v3` stays backend-agnostic across self-hosted tailnet SQLite and hosted Vercel boards, and writes no custom task state machine, custom web board UI, custom delivery queue, persistent scheduler daemon, or incident-recovery subsystem on top of it.
-Every human interface is a replaceable viewport onto the same board threads: a `herdr` TUI at the desk, `vb inspect` for visual overview, and optional chat adapters such as Discord, Slack, or iMessage.
-`fleet-v3` may ship Discord as an optional adapter package while keeping the core completely chat-agnostic so Slack, web, iMessage, or any future client works equally well.
+`@vercel/board` owns the durable record of channels, threads, tasks, dependencies, and claim leases.
+`fleet-v3` stays backend-agnostic across self-hosted tailnet SQLite and hosted Vercel boards, and writes no custom task state machine, custom delivery queue, persistent scheduler daemon, or incident-recovery subsystem on top of it.
+Every human interface is a replaceable viewport onto the same board threads: a `herdr` TUI at the desk, an optional thin Kanban web adapter or `vb inspect` for visual overview, and optional chat adapters such as Discord, Slack, or iMessage.
+`fleet-v3` may ship optional viewport adapters (such as a thin Kanban web view and Discord) while keeping the core completely independent of any specific UI or chat client, with no separate database or workshop features.
 Formatting belongs to each modality adapter, never to global agent prompts.
 The board is the agent's communication channel, not a terminal scraper: if the operator intervenes directly in a live pane, the agent reports the pivot on the thread and `fleet-v3` trusts it.
 A restart, session reset, or agent swap is a non-event because durable work state lives on the board, not in any agent's conversation history.
@@ -41,10 +41,10 @@ An agent's judgment mistake is addressed by tightening judgment or simplifying t
 
 ## Scope
 
-`fleet-v3` is not a custom database or task server, not a custom web Kanban app, not a persistent cron daemon, not a spend proxy, not a browser viewer, not a file explorer, not a CI system, and not a life-integration platform.
+`fleet-v3` is not a custom database or task server, not a persistent cron daemon, not a spend proxy, not a browser viewer, not a file explorer, not a CI system, and not a life-integration platform; any optional web Kanban adapter stays a thin viewport over `@vercel/board` with no state of its own.
 Recurring schedules belong to host schedulers (`launchd`, `systemd`, `cron`) or the board backend itself; personal life connectors belong to whatever external harness or skills the operator brings.
 `fleet-v3` stays generic and public while personal domain charters, projects, and credentials stay private to each operator's setup.
 Changes to `fleet-v3` itself are validated against this `VISION.md` through `no-mistakes`: operator-initiated PRs that pass may auto-merge, while external contributors' PRs remain gated under operator authority.
 
 A change aligns when it increases parallel shipped throughput per unit of human attention, preserves `@vercel/board` as the single modality-agnostic source of truth, makes another harness or host plug in cleanly, or deletes code and prompt weight without losing durability.
-A change should be resisted when it adds a custom state machine, scheduler, web UI, or approval lock on top of `@vercel/board`, couples the system to one operator's setup, harness, or chat client, scrapes live terminal panes, grows always-loaded prompts to patch agent judgment, turns mechanical liveness into LLM polling turns, or pulls external life integrations or workshop tools into the core.
+A change should be resisted when it adds a custom state machine, scheduler, second database, or approval lock on top of `@vercel/board`, couples the system to one operator's setup, harness, UI, or chat client, scrapes live terminal panes, grows always-loaded prompts to patch agent judgment, turns mechanical liveness into LLM polling turns, or pulls external life integrations or workshop tools into the core.

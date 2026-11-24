@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { resolve as resolvePath } from "node:path";
 import { board, type Board } from "@vercel/board";
-import { runAxiCli } from "axi-sdk-js";
+import { AxiError, runAxiCli } from "axi-sdk-js";
 import {
   blockCommand,
   cancelCommand,
@@ -21,6 +21,7 @@ import {
   viewCommand,
   type FleetAxiContext,
 } from "./axi/commands.ts";
+import { parseStrictFlags, stringFlag } from "./axi/parse.ts";
 import { loadConfig } from "./config.ts";
 import { VERSION } from "./version.ts";
 
@@ -41,6 +42,7 @@ Usage:
   fleet charter <ch> [flags]   Read or update a domain charter
   fleet prefs [flags]          Read or update operator-wide preferences
   fleet run [flags]            Run fleet-runner for this host
+  fleet web [flags]            Serve the visual Kanban board over @vercel/board
   fleet init [flags]           Create fleet.yaml from fleet.example.yaml
   fleet setup hooks [flags]    Install or check session-start hooks
 
@@ -57,9 +59,9 @@ export interface RunFleetCliOptions {
 function findDefaultConfig(): string | undefined {
   const candidates = [
     process.env["FLEET_CONFIG"],
-    resolve(process.cwd(), "fleet.yaml"),
-    resolve(homedir(), ".config", "fleet", "fleet.yaml"),
-    resolve(homedir(), ".fleet-v3", "fleet.yaml"),
+    resolvePath(process.cwd(), "fleet.yaml"),
+    resolvePath(homedir(), ".config", "fleet", "fleet.yaml"),
+    resolvePath(homedir(), ".fleet-v3", "fleet.yaml"),
   ];
   return candidates.find((path): path is string => path !== undefined && existsSync(path));
 }
@@ -82,6 +84,55 @@ function defaultBoardContext(): FleetAxiContext {
     boardUrl,
     metaChannel,
   };
+}
+
+async function webCommand(
+  args: string[],
+  ctx: FleetAxiContext | undefined,
+): Promise<Record<string, unknown>> {
+  const helpBlock = COMMAND_HELP["web"] ?? "";
+  const parsed = parseStrictFlags(
+    "web",
+    args,
+    {
+      host: { type: "string" },
+      port: { type: "string" },
+      "inspect-origin": { type: "string" },
+    },
+    helpBlock,
+  );
+  if (ctx === undefined) {
+    throw new AxiError("No board context configured", "config", [
+      "Set BOARD_URL or create fleet.yaml with `fleet init`",
+    ]);
+  }
+  const host = stringFlag(parsed.values, "host") ?? "127.0.0.1";
+  const portRaw = stringFlag(parsed.values, "port") ?? "4101";
+  const port = Number(portRaw);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new AxiError("--port must be an integer between 1 and 65535", "VALIDATION_ERROR", [
+      helpBlock,
+    ]);
+  }
+  const inspectOrigin = stringFlag(parsed.values, "inspect-origin");
+  const { startKanbanServer } = await import("./adapters/kanban.ts");
+  const { server, url } = await startKanbanServer({
+    boardClient: ctx.board(),
+    host,
+    port,
+    ...(inspectOrigin !== undefined ? { inspectOrigin } : {}),
+  });
+  process.stderr.write(`fleet kanban listening at ${url}\n`);
+  await new Promise<void>((resolve) => {
+    const shutdown = (): void => {
+      server.close(() => {
+        resolve();
+      });
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+  });
+  return { web: { url, stopped: true } };
 }
 
 export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<void> {
@@ -118,6 +169,7 @@ export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<voi
       init: initCommand,
       setup: setupCommand,
       run: runCommand,
+      web: webCommand,
     },
   });
 }

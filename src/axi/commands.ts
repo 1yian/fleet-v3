@@ -179,6 +179,15 @@ Flags:
 Examples:
   fleet run
   fleet run --config ./fleet.yaml --once`,
+  web: `fleet web - serve the optional visual Kanban viewport over @vercel/board
+Usage:
+  fleet web [--host <addr>] [--port <n>] [--inspect-origin <url>]
+Flags:
+  --host <addr>            Bind address (default: 127.0.0.1)
+  --port <n>               Port to listen on (default: 4101)
+  --inspect-origin <url>   Optional vb inspect origin to proxy under /inspect
+Examples:
+  fleet web --host 100.107.213.95 --port 4100`,
 };
 
 function firstLine(text: string): string {
@@ -210,11 +219,11 @@ function parseHosts(messages: readonly MessageView[]): Record<string, string>[] 
     const host = msg.labels["host"] ?? "";
     if (host === "") continue;
     const modeMatch = /\bmode=(\S+)/u.exec(msg.text);
-    const reposMatch = /\brepos=(\S+)/u.exec(msg.text);
+    const reposMatch = /\brepos=(.+)$/u.exec(msg.text);
     byHost.set(host, {
       host,
       mode: modeMatch?.[1] ?? "unknown",
-      repos: reposMatch?.[1] ?? "none",
+      repos: reposMatch?.[1]?.trim() ?? "none",
     });
   }
   return [...byHost.values()].toSorted((a, b) => (a["host"] ?? "").localeCompare(b["host"] ?? ""));
