@@ -1,9 +1,21 @@
 import { fileURLToPath } from "node:url";
 import type { Board, ClaimedTask } from "@vercel/board";
-import { DELIVERIES, type Delivery, type RunnerConfig } from "../config.ts";
-import { buildWorkerArgv, runIsolatedCommand } from "./spawn.ts";
+import { DELIVERIES, resolveHerdrConfig, type Delivery, type RunnerConfig } from "../config.ts";
+import {
+  closeHerdrPane,
+  openHerdrPane,
+  runCommandInHerdrPane,
+  updateHerdrPaneStatus,
+  type HerdrPaneHandle,
+} from "./herdr.ts";
+import {
+  buildWorkerArgv,
+  makeContainerName,
+  runIsolatedCommand,
+  type SpawnResult,
+} from "./spawn.ts";
 import { runBoundedVerification } from "./verify.ts";
-import { cleanupWorkspace, prepareWorkspace } from "./worktree.ts";
+import { cleanupWorkspace, prepareWorkspace, type TaskWorkspace } from "./worktree.ts";
 
 const DEFAULT_WORKER_PROMPT = fileURLToPath(new URL("../../prompts/worker.md", import.meta.url));
 
@@ -14,7 +26,7 @@ function parseDelivery(value: string | undefined, fallback: Delivery): Delivery 
 
 async function advertiseHost(client: Board, config: RunnerConfig): Promise<void> {
   const repoNames = Object.keys(config.repos).toSorted();
-  const text = `host=${config.host} mode=${config.spawn.mode} repos=${repoNames.join(", ") || "none"}`;
+  const text = `host=${config.host} mode=${config.spawn.mode} viewport=${config.spawn.viewport} repos=${repoNames.join(", ") || "none"}`;
   await client.post(config.metaChannel, {
     text,
     labels: { kind: "host", host: config.host },
@@ -42,6 +54,159 @@ function startLeaseRenewal(
     active = false;
     clearInterval(timer);
   };
+}
+
+function buildWorkerEnv(params: {
+  readonly config: RunnerConfig;
+  readonly taskId: string;
+  readonly project: string;
+  readonly delivery: Delivery;
+  readonly workspace: TaskWorkspace;
+  readonly promptPath: string;
+}): Record<string, string> {
+  return {
+    BOARD_TASK: params.taskId,
+    FLEET_HOST: params.config.host,
+    FLEET_PROJECT: params.project,
+    FLEET_DELIVERY: params.delivery,
+    FLEET_WORKTREE: params.workspace.worktreePath,
+    FLEET_BRANCH: params.workspace.branch,
+    FLEET_PROMPT: params.promptPath,
+    TMPDIR: params.workspace.tmpDir,
+    ...(params.config.boardUrl !== undefined ? { BOARD_URL: params.config.boardUrl } : {}),
+  };
+}
+
+function runWorkerProcess(params: {
+  readonly config: RunnerConfig;
+  readonly pane: HerdrPaneHandle | undefined;
+  readonly taskId: string;
+  readonly epoch: number;
+  readonly workspace: TaskWorkspace;
+  readonly promptPath: string;
+  readonly workerEnv: Record<string, string>;
+  readonly signal: AbortSignal;
+}): Promise<SpawnResult> {
+  const containerMode = params.config.spawn.mode === "local" ? undefined : params.config.spawn.mode;
+  const containerName =
+    containerMode === undefined
+      ? undefined
+      : makeContainerName(params.config.host, params.taskId, params.epoch);
+  const containerCleanup =
+    containerMode !== undefined && containerName !== undefined
+      ? { mode: containerMode, name: containerName }
+      : undefined;
+
+  const argv = buildWorkerArgv({
+    config: params.config,
+    taskId: params.taskId,
+    worktreePath: params.workspace.worktreePath,
+    gitCommonDir: params.workspace.gitCommonDir,
+    tmpDir: params.workspace.tmpDir,
+    promptPath: params.promptPath,
+    env: params.workerEnv,
+    tty: params.pane !== undefined,
+    ...(containerName !== undefined ? { containerName } : {}),
+  });
+
+  if (params.pane !== undefined) {
+    return runCommandInHerdrPane(params.pane, {
+      argv,
+      cwd: params.workspace.worktreePath,
+      tmpDir: params.workspace.tmpDir,
+      env: params.workerEnv,
+      idleTimeoutMs: params.config.idleTimeoutSeconds * 1000,
+      maxWallMs: params.config.maxWallSeconds * 1000,
+      signal: params.signal,
+      ...(containerCleanup !== undefined ? { containerCleanup } : {}),
+    });
+  }
+
+  return runIsolatedCommand({
+    argv,
+    cwd: params.workspace.worktreePath,
+    env: params.workerEnv,
+    idleTimeoutMs: params.config.idleTimeoutSeconds * 1000,
+    maxWallMs: params.config.maxWallSeconds * 1000,
+    signal: params.signal,
+    ...(containerCleanup !== undefined ? { containerCleanup } : {}),
+  });
+}
+
+async function handleRunOutcome(params: {
+  readonly client: Board;
+  readonly config: RunnerConfig;
+  readonly claim: ClaimedTask;
+  readonly taskId: string;
+  readonly run: SpawnResult;
+  readonly leaseLost: boolean;
+}): Promise<{ readonly done: boolean; readonly failed: boolean; readonly message: string }> {
+  if (params.leaseLost) {
+    return { done: true, failed: true, message: "Lease lost" };
+  }
+  if (params.run.aborted) {
+    await params.claim.release().catch(() => undefined);
+    return { done: true, failed: true, message: "Aborted" };
+  }
+  if (params.run.timedOut !== null) {
+    await params.client.reply(params.taskId, {
+      text: `Worker hit ${params.run.timedOut} timeout on ${params.config.host}.\n\n${params.run.outputTail.slice(-1000)}`,
+      noSync: true,
+    });
+    await params.claim.fail(`Worker hit ${params.run.timedOut} timeout on ${params.config.host}`);
+    return { done: true, failed: true, message: `Timed out (${params.run.timedOut})` };
+  }
+  if (params.run.exitCode !== 0) {
+    await params.client.reply(params.taskId, {
+      text: `Worker exited ${String(params.run.exitCode)} on ${params.config.host}.\n\n${params.run.outputTail.slice(-1000)}`,
+      noSync: true,
+    });
+    await params.claim.fail(
+      `Worker exited ${String(params.run.exitCode)} on ${params.config.host}`,
+    );
+    return { done: true, failed: true, message: `Exited ${String(params.run.exitCode)}` };
+  }
+  return { done: false, failed: false, message: `Completed on ${params.config.host}` };
+}
+
+async function handleVerification(params: {
+  readonly client: Board;
+  readonly config: RunnerConfig;
+  readonly claim: ClaimedTask;
+  readonly taskId: string;
+  readonly pane: HerdrPaneHandle | undefined;
+  readonly worktreePath: string;
+  readonly workerEnv: Record<string, string>;
+  readonly signal: AbortSignal;
+  readonly isLeaseLost: () => boolean;
+}): Promise<{ readonly ok: boolean; readonly message: string }> {
+  if (params.pane !== undefined) {
+    await updateHerdrPaneStatus(params.pane, "working", "Verifying via no-mistakes");
+  }
+  const verified = await runBoundedVerification({
+    config: params.config,
+    cwd: params.worktreePath,
+    env: params.workerEnv,
+    signal: params.signal,
+  });
+
+  if (params.isLeaseLost()) {
+    return { ok: false, message: "Lease lost during verification" };
+  }
+
+  if (verified.status === "needs-mate") {
+    await params.client.reply(params.taskId, {
+      text: `Verification stopped at round ${String(verified.rounds)}/${String(params.config.maxReviewRounds)}: ${verified.reason}\n\n${verified.output.slice(-1500)}`,
+    });
+    await params.claim.fail(verified.reason);
+    return { ok: false, message: verified.reason };
+  }
+
+  await params.client.reply(params.taskId, {
+    text: `Verification passed in ${String(verified.rounds)} round(s).`,
+    noSync: true,
+  });
+  return { ok: true, message: `Completed on ${params.config.host}` };
 }
 
 async function executeClaim(
@@ -92,95 +257,81 @@ async function executeClaim(
     controller.abort();
   });
 
+  const herdrConfig = resolveHerdrConfig(config.spawn);
+  const taskSummary = claim.task.text.split("\n")[0] ?? `Task #${taskId}`;
+  let pane: HerdrPaneHandle | undefined;
+  let failed = false;
+  let finalPaneMessage = `Completed on ${config.host}`;
+
   try {
+    if (config.spawn.viewport === "herdr") {
+      pane = await openHerdrPane({
+        config: herdrConfig,
+        host: config.host,
+        channel: claim.task.channel,
+        project,
+        taskId,
+        branch: workspace.branch,
+        delivery,
+        mode: config.spawn.mode,
+        summary: taskSummary,
+        cwd: workspace.worktreePath,
+      });
+    }
+
+    const paneSuffix = pane === undefined ? "" : `, herdr ${pane.paneId}`;
     await client.reply(taskId, {
-      text: `Runner ${config.host} claimed task #${taskId} (attempt ${String(claim.epoch)}, branch ${workspace.branch}, worktree ${workspace.worktreePath}, delivery ${delivery}).`,
+      text: `Runner ${config.host} claimed task #${taskId} (attempt ${String(claim.epoch)}, branch ${workspace.branch}, worktree ${workspace.worktreePath}, delivery ${delivery}${paneSuffix}).`,
       noSync: true,
     });
 
-    const workerEnv: Record<string, string> = {
-      BOARD_TASK: taskId,
-      FLEET_HOST: config.host,
-      FLEET_PROJECT: project,
-      FLEET_DELIVERY: delivery,
-      FLEET_WORKTREE: workspace.worktreePath,
-      FLEET_BRANCH: workspace.branch,
-      FLEET_PROMPT: promptPath,
-      TMPDIR: workspace.tmpDir,
-      ...(config.boardUrl !== undefined ? { BOARD_URL: config.boardUrl } : {}),
-    };
-
-    const argv = buildWorkerArgv({
+    const workerEnv = buildWorkerEnv({ config, taskId, project, delivery, workspace, promptPath });
+    const run = await runWorkerProcess({
       config,
+      pane,
       taskId,
-      worktreePath: workspace.worktreePath,
-      tmpDir: workspace.tmpDir,
+      epoch: claim.epoch,
+      workspace,
       promptPath,
-      env: workerEnv,
-    });
-
-    const run = await runIsolatedCommand({
-      argv,
-      cwd: workspace.worktreePath,
-      env: workerEnv,
-      idleTimeoutMs: config.idleTimeoutSeconds * 1000,
-      maxWallMs: config.maxWallSeconds * 1000,
+      workerEnv,
       signal: controller.signal,
     });
 
-    if (leaseLost) return;
-
-    if (run.aborted) {
-      await claim.release().catch(() => undefined);
-      return;
-    }
-
-    if (run.timedOut !== null) {
-      await client.reply(taskId, {
-        text: `Worker hit ${run.timedOut} timeout on ${config.host}.\n\n${run.outputTail.slice(-1000)}`,
-        noSync: true,
-      });
-      await claim.fail(`Worker hit ${run.timedOut} timeout on ${config.host}`);
-      return;
-    }
-
-    if (run.exitCode !== 0) {
-      await client.reply(taskId, {
-        text: `Worker exited ${String(run.exitCode)} on ${config.host}.\n\n${run.outputTail.slice(-1000)}`,
-        noSync: true,
-      });
-      await claim.fail(`Worker exited ${String(run.exitCode)} on ${config.host}`);
-      return;
-    }
+    const outcome = await handleRunOutcome({ client, config, claim, taskId, run, leaseLost });
+    failed = outcome.failed;
+    finalPaneMessage = outcome.message;
+    if (outcome.done) return;
 
     if (delivery === "no-mistakes") {
-      const verified = await runBoundedVerification({
+      const verification = await handleVerification({
+        client,
         config,
-        cwd: workspace.worktreePath,
-        env: workerEnv,
+        claim,
+        taskId,
+        pane,
+        worktreePath: workspace.worktreePath,
+        workerEnv,
         signal: controller.signal,
+        isLeaseLost: () => leaseLost,
       });
-
-      if (leaseLost) return;
-
-      if (verified.status === "needs-mate") {
-        await client.reply(taskId, {
-          text: `Verification stopped at round ${String(verified.rounds)}/${String(config.maxReviewRounds)}: ${verified.reason}\n\n${verified.output.slice(-1500)}`,
-        });
-        await claim.fail(verified.reason);
+      finalPaneMessage = verification.message;
+      if (!verification.ok) {
+        failed = true;
         return;
       }
-
-      await client.reply(taskId, {
-        text: `Verification passed in ${String(verified.rounds)} round(s).`,
-        noSync: true,
-      });
     }
 
     await claim.complete(`Completed on ${config.host} (${workspace.branch})`);
   } finally {
     stopRenewal();
     outerSignal?.removeEventListener("abort", onOuterAbort);
+    if (pane !== undefined) {
+      await closeHerdrPane(pane, {
+        failed,
+        keepPane: herdrConfig.keepPane,
+        message: finalPaneMessage,
+      });
+    }
     await cleanupWorkspace(workspace);
   }
 }

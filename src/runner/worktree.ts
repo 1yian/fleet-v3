@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { dirname, join, resolve as resolvePath } from "node:path";
 import type { RepoConfig } from "../config.ts";
 
 export interface TaskWorkspace {
@@ -8,6 +8,7 @@ export interface TaskWorkspace {
   readonly tmpDir: string;
   readonly branch: string;
   readonly repoPath: string;
+  readonly gitCommonDir: string;
 }
 
 function sanitizeSegment(value: string): string {
@@ -71,7 +72,16 @@ export async function prepareWorkspace(params: {
     params.repo.baseBranch,
   ]);
 
-  return { worktreePath, tmpDir, branch, repoPath: params.repo.path };
+  const rawCommonDir = await runGit(params.repo.path, ["rev-parse", "--git-common-dir"]);
+  const gitCommonDir = realpathSync(resolvePath(params.repo.path, rawCommonDir));
+
+  return {
+    worktreePath: realpathSync(worktreePath),
+    tmpDir: realpathSync(tmpDir),
+    branch,
+    repoPath: realpathSync(params.repo.path),
+    gitCommonDir,
+  };
 }
 
 export async function cleanupWorkspace(workspace: TaskWorkspace): Promise<void> {

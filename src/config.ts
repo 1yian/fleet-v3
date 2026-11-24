@@ -7,24 +7,40 @@ import { z } from "zod";
 export const DELIVERIES = ["no-mistakes", "direct-pr", "local", "ops"] as const;
 export type Delivery = (typeof DELIVERIES)[number];
 
+export type SpawnMode = "local" | "docker" | "container";
+export type KeepPanePolicy = "never" | "on-failure" | "always";
+
 const RepoConfigSchema = z.object({
   path: z.string().min(1),
   baseBranch: z.string().min(1).default("main"),
   delivery: z.enum(DELIVERIES).default("no-mistakes"),
 });
 
-const DockerConfigSchema = z.object({
+const ContainerConfigSchema = z.object({
   image: z.string().min(1),
   runtime: z.string().min(1).optional(),
+  ssh: z.boolean().default(false),
+  cpus: z.number().int().positive().optional(),
+  memory: z.string().min(1).optional(),
+  inheritEnv: z.array(z.string().min(1)).default([]),
   mounts: z.array(z.string().min(1)).default([]),
   extraArgs: z.array(z.string()).default([]),
 });
 
+const HerdrConfigSchema = z.object({
+  workspace: z.string().min(1).default("fleet"),
+  session: z.string().min(1).optional(),
+  keepPane: z.enum(["never", "on-failure", "always"]).default("on-failure"),
+});
+
 const SpawnConfigSchema = z.object({
-  mode: z.enum(["local", "docker"]).default("local"),
+  mode: z.enum(["local", "docker", "container"]).default("local"),
+  viewport: z.enum(["headless", "herdr"]).default("headless"),
   direnv: z.boolean().default(true),
   command: z.array(z.string().min(1)).min(1),
-  docker: DockerConfigSchema.optional(),
+  container: ContainerConfigSchema.optional(),
+  docker: ContainerConfigSchema.optional(),
+  herdr: HerdrConfigSchema.optional(),
 });
 
 const VerifyConfigSchema = z.object({
@@ -58,11 +74,20 @@ const RunnerConfigSchema = z
     }),
     repos: z.record(z.string().min(1), RepoConfigSchema),
   })
-  .refine((cfg) => cfg.spawn.mode !== "docker" || cfg.spawn.docker !== undefined, {
-    message: "spawn.docker is required when spawn.mode is docker",
-    path: ["spawn", "docker"],
-  });
+  .refine(
+    (cfg) =>
+      cfg.spawn.mode === "local" ||
+      cfg.spawn.container !== undefined ||
+      cfg.spawn.docker !== undefined,
+    {
+      message:
+        "spawn.container (or spawn.docker) is required when spawn.mode is docker or container",
+      path: ["spawn", "container"],
+    },
+  );
 
+export type ContainerConfig = z.infer<typeof ContainerConfigSchema>;
+export type HerdrConfig = z.infer<typeof HerdrConfigSchema>;
 export type RunnerConfig = z.infer<typeof RunnerConfigSchema>;
 export type RepoConfig = z.infer<typeof RepoConfigSchema>;
 
@@ -70,6 +95,36 @@ function expandPath(input: string, baseDir: string = process.cwd()): string {
   const expanded =
     input === "~" ? homedir() : input.startsWith("~/") ? resolve(homedir(), input.slice(2)) : input;
   return isAbsolute(expanded) ? expanded : resolve(baseDir, expanded);
+}
+
+export function expandMountSpec(mount: string): string {
+  const firstColon = mount.indexOf(":");
+  if (firstColon <= 0) return mount;
+  const source = mount.slice(0, firstColon);
+  const rest = mount.slice(firstColon);
+  if (source === "~") return `${homedir()}${rest}`;
+  if (source.startsWith("~/")) return `${resolve(homedir(), source.slice(2))}${rest}`;
+  return mount;
+}
+
+export function resolveContainerConfig(spawn: RunnerConfig["spawn"]): ContainerConfig | undefined {
+  return spawn.container ?? spawn.docker;
+}
+
+export function resolveHerdrConfig(spawn: RunnerConfig["spawn"]): HerdrConfig {
+  return {
+    workspace: spawn.herdr?.workspace ?? "fleet",
+    ...(spawn.herdr?.session !== undefined ? { session: spawn.herdr.session } : {}),
+    keepPane: spawn.herdr?.keepPane ?? "on-failure",
+  };
+}
+
+function normalizeContainerConfig(cfg: ContainerConfig | undefined): ContainerConfig | undefined {
+  if (cfg === undefined) return undefined;
+  return {
+    ...cfg,
+    mounts: cfg.mounts.map(expandMountSpec),
+  };
 }
 
 export function loadConfig(configPath?: string): RunnerConfig {
@@ -86,12 +141,17 @@ export function loadConfig(configPath?: string): RunnerConfig {
   for (const [name, repo] of Object.entries(parsed.repos)) {
     repos[name] = { ...repo, path: expandPath(repo.path) };
   }
+  const container = normalizeContainerConfig(parsed.spawn.container ?? parsed.spawn.docker);
   return {
     ...parsed,
     boardUrl: envUrl ?? parsed.boardUrl,
     workspacesRoot: expandPath(parsed.workspacesRoot),
     workerPromptPath:
       parsed.workerPromptPath === undefined ? undefined : expandPath(parsed.workerPromptPath),
+    spawn: {
+      ...parsed.spawn,
+      ...(container !== undefined ? { container } : {}),
+    },
     repos,
   };
 }

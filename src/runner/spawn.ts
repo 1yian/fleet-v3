@@ -1,5 +1,10 @@
-import { spawn } from "node:child_process";
-import type { RunnerConfig } from "../config.ts";
+import { execFile, spawn } from "node:child_process";
+import {
+  expandMountSpec,
+  resolveContainerConfig,
+  type RunnerConfig,
+  type SpawnMode,
+} from "../config.ts";
 import { hasEnvrcInAncestry } from "./worktree.ts";
 
 export interface SpawnResult {
@@ -17,6 +22,10 @@ export interface RunCommandOptions {
   readonly idleTimeoutMs: number;
   readonly maxWallMs: number;
   readonly signal?: AbortSignal;
+  readonly containerCleanup?: {
+    readonly mode: Exclude<SpawnMode, "local">;
+    readonly name: string;
+  };
 }
 
 const TAIL_LIMIT = 8192;
@@ -35,18 +44,113 @@ function tryKill(target: number, sig: NodeJS.Signals): boolean {
   }
 }
 
-function killProcessGroup(pid: number | undefined, sig: NodeJS.Signals): void {
+export function killProcessGroup(pid: number | undefined, sig: NodeJS.Signals): void {
   if (pid === undefined) return;
   if (!tryKill(-pid, sig)) tryKill(pid, sig);
+}
+
+function execSilent(bin: string, args: readonly string[]): Promise<void> {
+  return new Promise((resolve) => {
+    execFile(bin, [...args], { timeout: 10_000 }, () => {
+      resolve();
+    });
+  });
+}
+
+export async function stopContainer(
+  mode: Exclude<SpawnMode, "local">,
+  containerName: string,
+): Promise<void> {
+  if (mode === "container") {
+    await execSilent("container", ["stop", containerName]);
+    await execSilent("container", ["delete", "--force", containerName]);
+    return;
+  }
+  await execSilent("docker", ["rm", "-f", containerName]);
+}
+
+export function makeContainerName(host: string, taskId: string, attempt: number): string {
+  const cleanHost = host.toLowerCase().replaceAll(/[^a-z0-9-]/gu, "-");
+  const cleanTask = taskId.toLowerCase().replaceAll(/[^a-z0-9-]/gu, "-");
+  const suffix = Math.random().toString(36).slice(2, 6);
+  return `fleet-${cleanHost}-t-${cleanTask}-a${String(attempt)}-${suffix}`.slice(0, 63);
+}
+
+function appendSshArgs(args: string[], mode: Exclude<SpawnMode, "local">): void {
+  if (mode === "container") {
+    args.push("--ssh");
+    return;
+  }
+  const sshSock = process.env["SSH_AUTH_SOCK"];
+  if (sshSock !== undefined && sshSock.length > 0) {
+    args.push("-v", `${sshSock}:${sshSock}`, "-e", `SSH_AUTH_SOCK=${sshSock}`);
+  }
+}
+
+function buildContainerArgv(params: {
+  readonly mode: Exclude<SpawnMode, "local">;
+  readonly config: RunnerConfig;
+  readonly worktreePath: string;
+  readonly gitCommonDir?: string;
+  readonly tmpDir: string;
+  readonly promptPath: string;
+  readonly env: Record<string, string>;
+  readonly tty?: boolean;
+  readonly containerName?: string;
+  readonly command: readonly string[];
+}): string[] {
+  const container = resolveContainerConfig(params.config.spawn);
+  if (container === undefined) {
+    throw new Error(`spawn.container is required when spawn.mode is ${params.mode}`);
+  }
+  const bin = params.mode === "container" ? "container" : "docker";
+  const args: string[] = [bin, "run", "--rm", "--init"];
+  if (params.tty === true) args.push("-i", "-t");
+  if (params.containerName !== undefined) args.push("--name", params.containerName);
+
+  args.push(
+    "-w",
+    params.worktreePath,
+    "-v",
+    `${params.worktreePath}:${params.worktreePath}`,
+    "-v",
+    `${params.tmpDir}:${params.tmpDir}`,
+    "-v",
+    `${params.promptPath}:${params.promptPath}:ro`,
+  );
+  if (params.gitCommonDir !== undefined) {
+    args.push("-v", `${params.gitCommonDir}:${params.gitCommonDir}`);
+  }
+  if (container.runtime !== undefined) args.push("--runtime", container.runtime);
+  if (container.cpus !== undefined) args.push("--cpus", String(container.cpus));
+  if (container.memory !== undefined) args.push("--memory", container.memory);
+  if (container.ssh) appendSshArgs(args, params.mode);
+
+  for (const mount of container.mounts) {
+    args.push("-v", expandMountSpec(mount));
+  }
+  for (const envName of container.inheritEnv) {
+    if (params.env[envName] !== undefined) continue;
+    const hostValue = process.env[envName];
+    if (hostValue !== undefined) args.push("-e", `${envName}=${hostValue}`);
+  }
+  for (const [key, value] of Object.entries(params.env)) {
+    args.push("-e", `${key}=${value}`);
+  }
+  args.push(...container.extraArgs, container.image, ...params.command);
+  return args;
 }
 
 export function buildWorkerArgv(params: {
   readonly config: RunnerConfig;
   readonly taskId: string;
   readonly worktreePath: string;
+  readonly gitCommonDir?: string;
   readonly tmpDir: string;
   readonly promptPath: string;
   readonly env: Record<string, string>;
+  readonly tty?: boolean;
+  readonly containerName?: string;
 }): string[] {
   const interpolated = params.config.spawn.command.map((part) =>
     part
@@ -55,36 +159,20 @@ export function buildWorkerArgv(params: {
       .replaceAll("{prompt}", params.promptPath),
   );
 
-  if (params.config.spawn.mode === "docker") {
-    const docker = params.config.spawn.docker;
-    if (docker === undefined) {
-      throw new Error("spawn.docker is required when spawn.mode is docker");
-    }
-    const args: string[] = [
-      "docker",
-      "run",
-      "--rm",
-      "--init",
-      "-w",
-      params.worktreePath,
-      "-v",
-      `${params.worktreePath}:${params.worktreePath}`,
-      "-v",
-      `${params.tmpDir}:${params.tmpDir}`,
-      "-v",
-      `${params.promptPath}:${params.promptPath}:ro`,
-    ];
-    if (docker.runtime !== undefined) {
-      args.push("--runtime", docker.runtime);
-    }
-    for (const mount of docker.mounts) {
-      args.push("-v", mount);
-    }
-    for (const [key, value] of Object.entries(params.env)) {
-      args.push("-e", `${key}=${value}`);
-    }
-    args.push(...docker.extraArgs, docker.image, ...interpolated);
-    return args;
+  const mode = params.config.spawn.mode;
+  if (mode === "docker" || mode === "container") {
+    return buildContainerArgv({
+      mode,
+      config: params.config,
+      worktreePath: params.worktreePath,
+      tmpDir: params.tmpDir,
+      promptPath: params.promptPath,
+      env: params.env,
+      command: interpolated,
+      ...(params.gitCommonDir !== undefined ? { gitCommonDir: params.gitCommonDir } : {}),
+      ...(params.tty !== undefined ? { tty: params.tty } : {}),
+      ...(params.containerName !== undefined ? { containerName: params.containerName } : {}),
+    });
   }
 
   if (params.config.spawn.direnv && hasEnvrcInAncestry(params.worktreePath)) {
@@ -119,6 +207,9 @@ export function runIsolatedCommand(options: RunCommandOptions): Promise<SpawnRes
       if (reason === "abort") aborted = true;
       else timedOut ??= reason;
       killProcessGroup(child.pid, "SIGTERM");
+      if (options.containerCleanup !== undefined) {
+        void stopContainer(options.containerCleanup.mode, options.containerCleanup.name);
+      }
       killTimer = setTimeout(() => {
         killProcessGroup(child.pid, "SIGKILL");
       }, 2000);

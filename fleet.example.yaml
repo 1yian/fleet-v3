@@ -1,4 +1,4 @@
-host: p620
+host: macbook
 boardUrl: https://maverick.tailnet.ts.net/api/board
 from: []
 channels:
@@ -17,17 +17,31 @@ maxAttempts: 3
 maxReviewRounds: 4
 
 spawn:
-  mode: local
+  mode: container
+  viewport: herdr
   direnv: true
   command:
-    - pi
+    - ypi
     - --append-system-prompt
     - "{prompt}"
     - --print
-    - "Read task {task} on the board with `vb read {task}` and execute it."
-  docker:
+    - "Read task {task} on the board with `fleet view {task} --full` and execute it."
+  herdr:
+    workspace: fleet
+    keepPane: on-failure
+  container:
     image: fleet-worker:latest
-    runtime: youki
+    ssh: true
+    cpus: 4
+    memory: 8G
+    inheritEnv:
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+      - GH_TOKEN
+    mounts:
+      - ~/.pi/agent/auth.json:/root/.pi/agent/auth.json:ro
+      - ~/.pi/agent/tiers.json:/root/.pi/agent/tiers.json:ro
+      - ~/.gitconfig:/root/.gitconfig:ro
     extraArgs: []
 
 repos:
