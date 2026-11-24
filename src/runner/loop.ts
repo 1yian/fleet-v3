@@ -297,12 +297,12 @@ async function runClaim(
   const cardId = claim.card.id;
   const project = claim.card.project;
 
-  if (claim.epoch > config.maxAttempts) {
+  if (claim.card.attempts > config.maxAttempts) {
     await client.finishClaim(cardId, {
       epoch: claim.epoch,
       token: claim.token,
       outcome: "needs_mate",
-      summary: `Stopped after ${String(claim.epoch - 1)} failed or expired attempts on ${config.host}. Re-queueing cannot start another worker on this card; review the thread, then escalate, replace it with a new card, or cancel.`,
+      summary: `Stopped after ${String(claim.card.attempts - 1)} failed or expired attempts on ${config.host}. Re-queueing cannot start another worker on this card; review the thread, then escalate, replace it with a new card, or cancel.`,
       actor: runnerActor(config.host),
     });
     return;
@@ -353,22 +353,21 @@ async function runClaim(
     preparedWorkspace = workspace;
 
     pane = await openWorkerPane(config, claim, project, workspace, delivery, controller.signal);
+    const paneSuffix = pane === undefined ? "" : `, herdr ${pane.paneId}`;
+    await client.postEntry(cardId, {
+      epoch: claim.epoch,
+      token: claim.workerToken,
+      text: `Runner ${config.host} claimed card #${cardId} (attempt ${String(claim.card.attempts)}, branch ${workspace.branch}, worktree ${workspace.worktreePath}, delivery ${delivery}${paneSuffix}).`,
+      by: runnerActor(config.host),
+      internal: true,
+      kind: "status",
+    });
     if (controller.signal.aborted) {
       const unlaunched = pane;
       pane = undefined;
       await abandonLaunch(client, claim, unlaunched);
       return;
     }
-
-    const paneSuffix = pane === undefined ? "" : `, herdr ${pane.paneId}`;
-    await client.postEntry(cardId, {
-      epoch: claim.epoch,
-      token: claim.workerToken,
-      text: `Runner ${config.host} claimed card #${cardId} (attempt ${String(claim.epoch)}, branch ${workspace.branch}, worktree ${workspace.worktreePath}, delivery ${delivery}${paneSuffix}).`,
-      by: runnerActor(config.host),
-      internal: true,
-      kind: "status",
-    });
 
     const workerEnv = buildWorkerEnv({
       config,

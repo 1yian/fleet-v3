@@ -582,13 +582,9 @@ void test("stopping the card server ends open SSE streams instead of hanging shu
 });
 
 void test("recent done follows completion time, escalation needs a held card, and foreign browser writes are refused", async () => {
-  let now = 1_700_000_000_000;
   const server = await startTestServer({
     parents: { cleo: "captain" },
-    now: () => {
-      now += 1000;
-      return now;
-    },
+    now: () => 1_700_000_000_000,
   });
   const { client } = server;
 
@@ -606,6 +602,36 @@ void test("recent done follows completion time, escalation needs a held card, an
       oldest.id,
       "the most recently completed card leads the done column even with an old id",
     );
+
+    const handed = await client.createCard({
+      mate: "cleo",
+      title: "Worker target",
+      host: "h1",
+      project: "Cleo",
+    });
+    const handoffClaim = await client.claimNext({
+      host: "h1",
+      leaseSeconds: 60,
+      claimBy: "runner-h1",
+    });
+    assert.ok(handoffClaim !== null);
+    assert.equal(handoffClaim.card.id, handed.id);
+    await assert.rejects(
+      () =>
+        client.handoffCard(handed.id, {
+          epoch: handoffClaim.epoch,
+          token: handoffClaim.workerToken,
+          to: "captain",
+        }),
+      rejectsWith(400, "invalid_target"),
+      "a worker can only hand back to the home mate",
+    );
+    const back = await client.handoffCard(handed.id, {
+      epoch: handoffClaim.epoch,
+      token: handoffClaim.workerToken,
+      to: "cleo",
+    });
+    assert.equal(back.holder, "cleo");
 
     const queued = await client.createCard({
       mate: "cleo",

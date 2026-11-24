@@ -185,6 +185,23 @@ async function buildAmbientBlock(client: BoardClient, mate: string): Promise<str
   return parts.join("\n\n");
 }
 
+async function buildReconciliationNotice(
+  client: BoardClient,
+  mate: string,
+): Promise<string | undefined> {
+  const [held, overview] = await Promise.all([
+    client.listCards({ holder: mate, state: "open" }),
+    client.getOverview(),
+  ]);
+  const completed = overview.recentDone.filter((card) => card.mate === mate).slice(0, 5);
+  if (held.cards.length === 0 && completed.length === 0) return undefined;
+  const lines = [
+    ...held.cards.map((card) => `- #${card.id} [${card.state}] in your court: ${card.title}`),
+    ...completed.map((card) => `- #${card.id} completed: ${card.title}`),
+  ];
+  return `[fleet] The Card Server is reachable again after an outage. Current state for ${mate}:\n${lines.join("\n")}`;
+}
+
 function waitAbortable(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve();
   return new Promise((resolve) => {
@@ -211,12 +228,26 @@ export function attachFleetPiAdapter(
   let controller: AbortController | undefined;
   let ambientBlock = "";
 
+  const wake = (content: string): void => {
+    pi.sendMessage(
+      { customType: "fleet", content, display: true },
+      { triggerTurn: true, deliverAs: "followUp" },
+    );
+  };
+
   const watchEvents = async (signal: AbortSignal, cursor: number | undefined): Promise<void> => {
     let lastEventId = cursor;
     let attempt = 0;
 
     while (!signal.aborted) {
       try {
+        if (lastEventId === undefined) {
+          const recovered = await client.latestEventId();
+          const reconciliation = await buildReconciliationNotice(client, mate);
+          ambientBlock = await buildAmbientBlock(client, mate);
+          lastEventId = recovered;
+          if (reconciliation !== undefined) wake(reconciliation);
+        }
         for await (const event of client.events({
           ...(lastEventId !== undefined ? { after: lastEventId } : {}),
           holder: mate,
@@ -226,10 +257,7 @@ export function attachFleetPiAdapter(
           lastEventId = Math.max(lastEventId ?? 0, event.id);
           const notice = formatMateEvent(event, mate);
           if (notice === undefined) continue;
-          pi.sendMessage(
-            { customType: "fleet", content: notice, display: true },
-            { triggerTurn: true, deliverAs: "followUp" },
-          );
+          wake(notice);
         }
       } catch {
         if (signal.aborted) break;

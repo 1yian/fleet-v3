@@ -13,6 +13,7 @@ export interface TestServer {
 export async function startTestServer(
   options: {
     readonly dataDir?: string;
+    readonly port?: number;
     readonly parents?: Readonly<Record<string, string>>;
     readonly now?: () => number;
     readonly chaseIntervalMs?: number;
@@ -27,7 +28,7 @@ export async function startTestServer(
   const started = await startBoardServer({
     store,
     host: "127.0.0.1",
-    port: 0,
+    port: options.port ?? 0,
     chaseIntervalMs: options.chaseIntervalMs ?? 3_600_000,
     staleAfterMs: options.staleAfterMs ?? 600_000,
   });

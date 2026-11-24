@@ -132,6 +132,8 @@ export const KANBAN_HTML = `<!doctype html>
   }
   .chip.waiting { color: var(--amber); border-color: rgba(245, 158, 11, 0.35); background: var(--amber-bg); }
   .card.waiting { border-left: 3px dashed var(--dim); }
+  .notice { position: fixed; top: 12px; right: 12px; z-index: 60; max-width: min(420px, calc(100vw - 24px)); background: var(--rose-bg); color: var(--rose); border: 1px solid rgba(244, 63, 94, 0.45); border-radius: 10px; padding: 10px 14px; font-size: 13px; overflow-wrap: anywhere; backdrop-filter: blur(12px); }
+  .notice[hidden] { display: none; }
   .chip.holder { color: var(--violet); border-color: rgba(167, 139, 250, 0.3); }
 
   .backdrop {
@@ -191,6 +193,7 @@ export const KANBAN_HTML = `<!doctype html>
 </style>
 </head>
 <body>
+<div class="notice" id="notice" role="alert" hidden></div>
 <div class="app">
   <header class="topbar">
     <div class="brand-row">
@@ -313,7 +316,12 @@ async function api(path, init = {}) {
     ...init,
     headers: { "content-type": "application/json", ...(init.headers || {}) },
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const text = await res.text();
+    let message = text;
+    try { message = JSON.parse(text).message || text; } catch {}
+    throw new Error(message || "Request failed (" + res.status + ")");
+  }
   return res.json();
 }
 
@@ -536,16 +544,39 @@ const ACTIONS = {
   },
 };
 
-document.addEventListener("click", e => {
+function showNotice(error) {
+  const el = $("notice");
+  el.textContent = "Not saved: " + (error && error.message ? error.message : String(error));
+  el.hidden = false;
+}
+
+function hideNotice() {
+  $("notice").hidden = true;
+}
+
+document.addEventListener("click", async e => {
   const el = e.target.closest("[data-action]");
   const action = el && ACTIONS[el.dataset.action];
-  if (action) action(el.dataset);
+  if (!action) return;
+  hideNotice();
+  try {
+    await action(el.dataset);
+  } catch (error) {
+    showNotice(error);
+  }
 });
 $("drawer-backdrop").addEventListener("click", e => { if (e.target === e.currentTarget) closeDrawer(); });
 $("new-modal").addEventListener("click", e => { if (e.target === e.currentTarget) closeNewModal(); });
 $("search").addEventListener("input", renderBoard);
 $("open-new").addEventListener("click", openNewModal);
-$("new-form").addEventListener("submit", submitNewCard);
+$("new-form").addEventListener("submit", async e => {
+  hideNotice();
+  try {
+    await submitNewCard(e);
+  } catch (error) {
+    showNotice(error);
+  }
+});
 
 function connectEvents() {
   const es = new EventSource(API + "/events");

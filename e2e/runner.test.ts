@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -186,7 +187,7 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
     assert.equal(receipt.epoch, "1");
     assert.equal(receipt.boardUrl, server.url, "workers always target the claiming board");
     assert.ok(receipt.tokenLength >= 32, "worker receives its claim fencing token");
-    assert.equal(receipt.branch, `fleet/t-${card.id}-e1`);
+    assert.match(receipt.branch, new RegExp(`^fleet/t-${card.id}-e1-[0-9a-f]{8}$`, "u"));
     assert.notEqual(receipt.worktree, repoDir);
     assert.equal(existsSync(receipt.worktree), false);
 
@@ -435,21 +436,34 @@ void test("caps no-mistakes verification at 4 rounds and hands back to mate with
   }
 });
 
-void test("returns card to mate instead of crash-looping once claim epoch exceeds maxAttempts", async () => {
+void test("returns card to mate once crashed or expired attempts exceed maxAttempts, while clean releases are free", async () => {
   const root = makeTempDir("fleet-v3-e2e-");
   const repoDir = initGitRepo(root);
   const ranMarker = join(root, "should-not-run");
-  const server = await startTestServer();
+  let now = 1_700_000_000_000;
+  const server = await startTestServer({ now: () => now });
   const { client } = server;
+  const workerConfig = makeConfig(root, repoDir, {
+    maxAttempts: 3,
+    spawn: {
+      mode: "local",
+      viewport: "headless",
+      direnv: false,
+      command: [
+        "node",
+        "-e",
+        `require("node:fs").writeFileSync(${JSON.stringify(ranMarker)}, "1")`,
+      ],
+    },
+  });
 
   try {
-    const card = await client.createCard({
+    const released = await client.createCard({
       mate: "cleo",
-      title: "Flaky card",
+      title: "Cleanly interrupted card",
       host: "test-host",
       project: "demo",
     });
-
     for (let i = 0; i < 3; i += 1) {
       const prior = await client.claimNext({
         host: "test-host",
@@ -457,27 +471,33 @@ void test("returns card to mate instead of crash-looping once claim epoch exceed
         claimBy: "runner-test-host",
       });
       assert.ok(prior !== null);
-      await client.releaseClaim(card.id, { epoch: prior.epoch, token: prior.token });
+      await client.releaseClaim(released.id, { epoch: prior.epoch, token: prior.token });
+    }
+    await runLoop(client, workerConfig, { once: true });
+    assert.equal(existsSync(ranMarker), true, "clean releases do not spend the retry budget");
+    assert.equal(await cardField(client, released.id, "state"), "done");
+    rmSync(ranMarker);
+
+    const flaky = await client.createCard({
+      mate: "cleo",
+      title: "Flaky card",
+      host: "test-host",
+      project: "demo",
+    });
+    for (let i = 0; i < 3; i += 1) {
+      const crashed = await client.claimNext({
+        host: "test-host",
+        leaseSeconds: 5,
+        claimBy: "runner-test-host",
+      });
+      assert.ok(crashed !== null);
+      now += 10_000;
     }
 
-    const config = makeConfig(root, repoDir, {
-      maxAttempts: 3,
-      spawn: {
-        mode: "local",
-        viewport: "headless",
-        direnv: false,
-        command: [
-          "node",
-          "-e",
-          `require("node:fs").writeFileSync(${JSON.stringify(ranMarker)}, "1")`,
-        ],
-      },
-    });
-
-    await runLoop(client, config, { once: true });
+    await runLoop(client, workerConfig, { once: true });
 
     assert.equal(existsSync(ranMarker), false);
-    const thread = await client.getThread(card.id);
+    const thread = await client.getThread(flaky.id);
     assert.equal(thread.card.state, "held");
     assert.equal(thread.card.holder, "cleo");
     assert.ok(
@@ -604,9 +624,12 @@ void test("runs real isolated card inside Apple container micro-VM with worktree
     );
 
     const observed = readFileSync(hostOutPath, "utf8").trim();
-    assert.equal(
+    assert.match(
       observed,
-      `${card.id}|inherited-ok|cred-payload|ref: refs/heads/fleet/t-${card.id}-e1`,
+      new RegExp(
+        `^${card.id}\\|inherited-ok\\|cred-payload\\|ref: refs/heads/fleet/t-${card.id}-e1-[0-9a-f]{8}$`,
+        "u",
+      ),
     );
   } finally {
     if (prevInherited === undefined) delete process.env["FLEET_E2E_INHERITED"];
@@ -929,8 +952,12 @@ void test("a failed worktree setup leaves no scratch directory or branch behind"
     await runLoop(client, config, { once: true });
 
     assert.equal(await cardField(client, card.id, "state"), "held");
-    const scratch = join(root, "workspaces", "cleo", "demo", "tmp", `t-${card.id}-e1`);
-    assert.equal(existsSync(scratch), false, "the failed attempt's scratch directory is removed");
+    const scratchRoot = join(root, "workspaces", "cleo", "demo", "tmp");
+    assert.deepEqual(
+      existsSync(scratchRoot) ? readdirSync(scratchRoot) : [],
+      [],
+      "the failed attempt's scratch directory is removed",
+    );
     const branches = execFileSync("git", ["-C", repoDir, "branch", "--list", "fleet/*"], {
       encoding: "utf8",
     });
@@ -1011,4 +1038,75 @@ void test("a branch left from an earlier board is never overwritten or deleted b
     encoding: "utf8",
   }).trim();
   assert.equal(afterSuccess, retainedSha, "the earlier branch keeps its commit");
+});
+
+void test("runners on one host serving different boards never share a checkout, scratch directory, or branch", async () => {
+  const root = makeTempDir("fleet-v3-shared-host-");
+  const repoDir = initGitRepo(root);
+  const receiptDir = join(root, "receipts");
+  mkdirSync(receiptDir);
+  const boardA = await startTestServer();
+  const boardB = await startTestServer();
+
+  try {
+    for (const board of [boardA, boardB]) {
+      const card = await board.client.createCard({
+        mate: "cleo",
+        title: "Card one on its own board",
+        host: "test-host",
+        project: "demo",
+        delivery: "direct-pr",
+      });
+      assert.equal(card.id, "1");
+    }
+    const workerScript = `
+      const fs = require("node:fs");
+      const marker = ${JSON.stringify(receiptDir)} + "/" + process.env.BOARD_URL.split(":").pop();
+      fs.writeFileSync(marker + ".start", JSON.stringify({
+        worktree: process.env.FLEET_WORKTREE,
+        branch: process.env.FLEET_BRANCH,
+        tmp: process.env.TMPDIR,
+      }));
+      setTimeout(() => {
+        fs.writeFileSync(marker + ".end", JSON.stringify({
+          worktree: fs.existsSync(process.env.FLEET_WORKTREE),
+          tmp: fs.existsSync(process.env.TMPDIR),
+        }));
+      }, 1200);
+    `;
+    const configFor = (board: typeof boardA): RunnerConfig =>
+      makeConfig(root, repoDir, {
+        boardUrl: board.url,
+        spawn: {
+          mode: "local",
+          viewport: "headless",
+          direnv: false,
+          command: ["node", "-e", workerScript],
+        },
+      });
+
+    await Promise.all([
+      runLoop(boardA.client, configFor(boardA), { once: true }),
+      runLoop(boardB.client, configFor(boardB), { once: true }),
+    ]);
+
+    const read = (name: string): unknown =>
+      JSON.parse(readFileSync(join(receiptDir, name), "utf8"));
+    const Start = z.object({ worktree: z.string(), branch: z.string(), tmp: z.string() });
+    const End = z.object({ worktree: z.boolean(), tmp: z.boolean() });
+    const portA = new URL(boardA.url).port;
+    const portB = new URL(boardB.url).port;
+    const startA = Start.parse(read(`${portA}.start`));
+    const startB = Start.parse(read(`${portB}.start`));
+    assert.notEqual(startA.worktree, startB.worktree);
+    assert.notEqual(startA.branch, startB.branch);
+    assert.notEqual(startA.tmp, startB.tmp);
+    assert.deepEqual(End.parse(read(`${portA}.end`)), { worktree: true, tmp: true });
+    assert.deepEqual(End.parse(read(`${portB}.end`)), { worktree: true, tmp: true });
+    assert.equal(await cardField(boardA.client, "1", "state"), "done");
+    assert.equal(await cardField(boardB.client, "1", "state"), "done");
+  } finally {
+    await boardA.stop();
+    await boardB.stop();
+  }
 });

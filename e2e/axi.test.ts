@@ -195,6 +195,16 @@ void test("escalation, answer, and handoff flows work end to end, and close, can
     assert.equal(esc1.exitCode, 0);
     assert.match(esc1.out, /holder: jarvis/u);
 
+    const replay = await captureCli(
+      ["escalate", card.id, "--reason", "Need Jarvis check"],
+      url,
+      "cleo",
+    );
+    assert.notEqual(replay.exitCode, 0, "a retried escalation cannot take the next hop");
+    assert.match(replay.out, /held by jarvis/u);
+    const stillWithParent = await captureCli(["view", card.id], url);
+    assert.match(stillWithParent.out, /holder: jarvis/u);
+
     const esc2 = await captureCli(
       ["escalate", card.id, "--reason", "Approve merge?"],
       url,

@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS cards (
   needs_json TEXT NOT NULL DEFAULT '[]',
   result TEXT NOT NULL DEFAULT '',
   epoch INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0,
   claim_token_hash TEXT,
   worker_token_hash TEXT,
   claim_by TEXT,
@@ -107,6 +108,7 @@ const CardRowSchema = z.object({
   needs_json: z.string(),
   result: z.string(),
   epoch: z.number().int(),
+  attempts: z.number().int(),
   claim_token_hash: z.string().nullable(),
   worker_token_hash: z.string().nullable(),
   claim_by: z.string().nullable(),
@@ -192,6 +194,7 @@ function rowToCard(row: CardRow): Card {
     needs: StringArraySchema.parse(JSON.parse(row.needs_json)),
     result: row.result,
     epoch: row.epoch,
+    attempts: row.attempts,
     claimBy: row.claim_by,
     leaseUntil: row.lease_until,
     createdBy: row.created_by,
@@ -789,7 +792,8 @@ export class CardStore {
       this.db
         .prepare(
           `UPDATE cards
-           SET state = 'running', holder = 'worker', epoch = ?, claim_token_hash = ?, worker_token_hash = ?,
+           SET state = 'running', holder = 'worker', epoch = ?, attempts = attempts + 1,
+               claim_token_hash = ?, worker_token_hash = ?,
                claim_by = ?, lease_until = ?, updated_at = ?
            WHERE id = ?`,
         )
@@ -849,7 +853,8 @@ export class CardStore {
       this.db
         .prepare(
           `UPDATE cards
-           SET state = 'queued', holder = 'runner', claim_token_hash = NULL, worker_token_hash = NULL,
+           SET state = 'queued', holder = 'runner', attempts = MAX(attempts - 1, 0),
+               claim_token_hash = NULL, worker_token_hash = NULL,
                claim_by = NULL, lease_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
@@ -995,6 +1000,13 @@ export class CardStore {
         );
       }
       const actor = input.actor ?? row.holder;
+      if (actor !== "captain" && actor !== row.holder) {
+        throw new BoardError(
+          409,
+          "holder_changed",
+          `Card #${String(id)} is held by ${row.holder}, not ${actor}`,
+        );
+      }
       const fromHolder = row.holder;
       const targetHolder = this.parentOf(fromHolder);
       if (row.state === "held" && row.holder === targetHolder && row.result === reason) {
@@ -1041,6 +1053,13 @@ export class CardStore {
         throw new BoardError(409, "card_terminal", `Card #${String(id)} is ${row.state}`);
       }
       const trimmedTo = input.to?.trim() ?? "";
+      if (input.epoch !== undefined && trimmedTo.length > 0 && trimmedTo !== row.mate) {
+        throw new BoardError(
+          400,
+          "invalid_target",
+          `Workers hand cards back to their home mate (${row.mate})`,
+        );
+      }
       const target = trimmedTo.length > 0 ? trimmedTo : row.mate;
       const actor = input.actor ?? row.holder;
       const text = input.text?.trim() ?? "";
@@ -1380,7 +1399,10 @@ export class CardStore {
       cards: this.listCards({ state: "open" }).cards,
       recentDone: this.db
         .prepare(
-          `${CARD_SELECT} WHERE c.state = 'done' ORDER BY c.updated_at DESC, c.id DESC LIMIT ?`,
+          `${CARD_SELECT} WHERE c.state = 'done'
+           ORDER BY COALESCE(
+             (SELECT MAX(e.id) FROM events e WHERE e.card_id = c.id AND e.type = 'card.done'), 0
+           ) DESC, c.id DESC LIMIT ?`,
         )
         .all(RECENT_DONE_LIMIT)
         .map((raw) => rowToCard(CardRowSchema.parse(raw))),

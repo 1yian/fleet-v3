@@ -38,15 +38,6 @@ export function hasEnvrcInAncestry(startDir: string): boolean {
   }
 }
 
-async function branchExists(repoPath: string, branch: string): Promise<boolean> {
-  try {
-    await runGit(repoPath, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export async function prepareWorkspace(params: {
   readonly workspacesRoot: string;
   readonly channel: string;
@@ -57,28 +48,17 @@ export async function prepareWorkspace(params: {
 }): Promise<TaskWorkspace> {
   const safeChannel = sanitizeSegment(params.channel);
   const safeProject = sanitizeSegment(params.project);
-  const safeTask = `${sanitizeSegment(params.taskId)}-e${String(params.epoch)}`;
+  const launchId = randomBytes(4).toString("hex");
+  const safeTask = `${sanitizeSegment(params.taskId)}-e${String(params.epoch)}-${launchId}`;
   const baseDir = join(params.workspacesRoot, safeChannel, safeProject);
   const worktreePath = join(baseDir, "worktrees", `t-${safeTask}`);
   const tmpDir = join(baseDir, "tmp", `t-${safeTask}`);
-  const preferredBranch = `fleet/t-${safeTask}`;
-  const branch = (await branchExists(params.repo.path, preferredBranch))
-    ? `${preferredBranch}-${randomBytes(3).toString("hex")}`
-    : preferredBranch;
+  const branch = `fleet/t-${safeTask}`;
 
   mkdirSync(dirname(worktreePath), { recursive: true });
-  const createdTmpDir = !existsSync(tmpDir);
   mkdirSync(tmpDir, { recursive: true });
 
   try {
-    if (existsSync(worktreePath)) {
-      await runGit(params.repo.path, ["worktree", "remove", "--force", worktreePath]).catch(
-        () => undefined,
-      );
-      rmSync(worktreePath, { recursive: true, force: true });
-    }
-
-    await runGit(params.repo.path, ["worktree", "prune"]).catch(() => undefined);
     await runGit(params.repo.path, [
       "worktree",
       "add",
@@ -105,7 +85,7 @@ export async function prepareWorkspace(params: {
     await runGit(params.repo.path, ["worktree", "prune"]).catch(() => undefined);
     await runGit(params.repo.path, ["branch", "-D", branch]).catch(() => undefined);
     rmSync(worktreePath, { recursive: true, force: true });
-    if (createdTmpDir) rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(tmpDir, { recursive: true, force: true });
     throw error;
   }
 }

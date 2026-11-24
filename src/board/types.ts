@@ -57,6 +57,7 @@ export const CardSchema = z.object({
   needs: z.array(z.string()),
   result: z.string(),
   epoch: z.number().int(),
+  attempts: z.number().int(),
   claimBy: z.string().nullable(),
   leaseUntil: z.number().int().nullable(),
   createdBy: z.string(),

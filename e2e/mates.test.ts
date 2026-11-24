@@ -150,6 +150,46 @@ void test("unified Pi mate adapter scopes ambient context and wakes on escalatio
   }
 });
 
+void test("a mate pane started during a board outage is reconciled once the board returns", async () => {
+  const dataDir = makeTempDir("fv3-outage-");
+  const parents = { cleo: "jarvis", jarvis: "captain" };
+  const seed = await startTestServer({ dataDir, parents });
+  const port = Number(new URL(seed.url).port);
+  const waiting = await seed.client.createCard({ mate: "cleo", title: "Waiting on Jarvis" });
+  await seed.client.escalateCard(waiting.id, { reason: "Decide?", actor: "cleo" });
+  const finished = await seed.client.createCard({
+    mate: "jarvis",
+    title: "Finished during outage",
+  });
+  await seed.client.closeCard(finished.id, { result: "ok" });
+  await seed.stop();
+
+  const pane = createMockPi();
+  attachFleetPiAdapter(pane.api, { boardUrl: seed.url, mate: "jarvis", reconnectDelayMs: 50 });
+  await pane.emitStart();
+  const revived = await startTestServer({ dataDir, port, parents });
+
+  try {
+    assert.ok(
+      await waitFor(
+        () =>
+          pane.delivered.some(
+            (text) =>
+              text.includes("reachable again") &&
+              text.includes("Waiting on Jarvis") &&
+              text.includes("Finished during outage"),
+          ),
+        8000,
+      ),
+      "the mate learns what it missed instead of tailing from the new head",
+    );
+    assert.ok(pane.woke.every(Boolean), "reconciliation wakes a turn");
+  } finally {
+    await pane.emitShutdown();
+    await revived.stop();
+  }
+});
+
 void test("Pi mate adapter refuses to start without a configured mate identity", () => {
   const previous = process.env["FLEET_MATE"];
   delete process.env["FLEET_MATE"];
