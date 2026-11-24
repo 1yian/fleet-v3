@@ -21,8 +21,9 @@ import {
   viewCommand,
   type FleetAxiContext,
 } from "./axi/commands.ts";
-import { parseStrictFlags, stringFlag } from "./axi/parse.ts";
+import { boolFlag, parseStrictFlags, stringFlag } from "./axi/parse.ts";
 import { loadConfig } from "./config.ts";
+import { ensureMatesUp, listMates, stopMates } from "./mates.ts";
 import { VERSION } from "./version.ts";
 
 const DESCRIPTION = "Coordinate parallel multi-machine agents on @vercel/board";
@@ -42,6 +43,7 @@ Usage:
   fleet charter <ch> [flags]   Read or update a domain charter
   fleet prefs [flags]          Read or update operator-wide preferences
   fleet run [flags]            Run fleet-runner for this host
+  fleet mates [subcommand]     Manage permanent interactive domain mate panes in Herdr
   fleet web [flags]            Serve the visual Kanban board over @vercel/board
   fleet init [flags]           Create fleet.yaml from fleet.example.yaml
   fleet setup hooks [flags]    Install or check session-start hooks
@@ -135,6 +137,59 @@ async function webCommand(
   return { web: { url, stopped: true } };
 }
 
+const MATES_HELP = `fleet mates - Manage permanent interactive domain mate panes in Herdr
+
+Usage:
+  fleet mates [status] [--config <path>]           Show status of configured domain mates
+  fleet mates up [name] [--all] [--config <path>]  Idempotently start permanent domain mate panes
+  fleet mates stop <name|--all> [--config <path>]  Close domain mate pane(s) in Herdr`;
+
+async function matesCommand(args: string[]): Promise<Record<string, unknown>> {
+  const parsed = parseStrictFlags(
+    "mates",
+    args,
+    {
+      config: { type: "string" },
+      all: { type: "boolean" },
+    },
+    MATES_HELP,
+  );
+  const sub = parsed.positionals[0] ?? "status";
+  const target = parsed.positionals[1];
+  const all = boolFlag(parsed.values, "all");
+  const configPath = stringFlag(parsed.values, "config") ?? findDefaultConfig();
+  if (configPath === undefined) {
+    throw new AxiError("No fleet.yaml found", "config", [
+      "Pass --config <path> or run `fleet init`",
+    ]);
+  }
+  const config = loadConfig(configPath);
+
+  if (sub === "status" || sub === "list") {
+    return { mates: await listMates(config) };
+  }
+  if (sub === "up" || sub === "start") {
+    return {
+      mates: await ensureMatesUp(config, {
+        ...(target !== undefined ? { name: target } : {}),
+        all,
+      }),
+    };
+  }
+  if (sub === "stop") {
+    if (target === undefined && !all) {
+      throw new AxiError("Specify a mate name or pass --all", "VALIDATION_ERROR", [MATES_HELP]);
+    }
+    return {
+      mates: await stopMates(config, {
+        ...(target !== undefined ? { name: target } : {}),
+        all,
+      }),
+    };
+  }
+  throw new AxiError(`Unknown mates subcommand "${sub}"`, "VALIDATION_ERROR", [MATES_HELP]);
+}
+
 export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<void> {
   const provided = options.boardClient;
   const ctx: FleetAxiContext =
@@ -152,7 +207,7 @@ export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<voi
     ...(options.argv !== undefined ? { argv: options.argv } : {}),
     ...(options.stdout !== undefined ? { stdout: options.stdout } : {}),
     topLevelHelp: TOP_LEVEL_HELP,
-    getCommandHelp: (cmd) => COMMAND_HELP[cmd],
+    getCommandHelp: (cmd) => (cmd === "mates" ? MATES_HELP : COMMAND_HELP[cmd]),
     resolveContext: () => ctx,
     home: homeCommand,
     commands: {
@@ -169,6 +224,7 @@ export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<voi
       init: initCommand,
       setup: setupCommand,
       run: runCommand,
+      mates: matesCommand,
       web: webCommand,
     },
   });

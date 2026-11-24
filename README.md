@@ -7,7 +7,8 @@ Read [VISION.md](VISION.md) for the design principles and [AGENTS.md](AGENTS.md)
 ## Layout
 
 - `src/bin.ts` + `src/cli.ts` + `src/axi/` - the `fleet` AXI CLI (TOON output, content-first home view, `--version` fast path, strict flag validation, idempotent mutations, and opt-in session-start hooks via `axi-sdk-js`).
-- `src/runner/` - `fleet-runner` claiming ready tasks for a host, managing git worktrees, `direnv`, container isolation (`docker` on Linux or Apple `container` on macOS), live `herdr` command-center panes, process-group timeouts, and 4-round capped `no-mistakes` verification.
+- `src/runner/` - `fleet-runner` claiming ready tasks for a host, managing git worktrees, `direnv`, container isolation (`docker` on Linux or Apple `container` on macOS), live `herdr` command-center panes (ephemeral interactive workers), process-group timeouts, and 4-round capped `no-mistakes` verification.
+- `src/mates.ts` - `fleet mates` idempotently manages permanent interactive domain mate panes in `herdr` (one tab per domain, scoped via `FLEET_CHANNEL` + `BOARD_PROFILE`).
 - `prompts/` - always-loaded role prompts for Jarvis, domain mates, and workers (under 1,000 words total).
 - `fleet.example.yaml` - per-host runner configuration template. Copy to `fleet.yaml` (gitignored) via `fleet init`.
 - `e2e/` - fast core-journey tests against `@vercel/board`'s in-memory backend and real git worktrees.
@@ -18,4 +19,4 @@ Read [VISION.md](VISION.md) for the design principles and [AGENTS.md](AGENTS.md)
 2. Run `bun install && bun run check`.
 3. Run `fleet` (no args) for a live TOON overview of counts, advertised hosts, and open tasks, or `fleet setup hooks` to inject ambient context at session start in Claude Code, Codex, and OpenCode.
 4. On each execution host, run `fleet init`, edit `fleet.yaml`, and start the runner with `fleet run`.
-5. Attach any harness (Pi, Claude Code, Codex, Grok Bot, Dots) as Jarvis or a domain mate using `prompts/jarvis.md` or `prompts/mate.md`.
+5. Attach any harness (Pi, Claude Code, Codex, Grok Bot, Dots) as Jarvis or a domain mate using `prompts/jarvis.md` or `prompts/mate.md`, or run `fleet mates up` to bring up permanent interactive domain mate panes in `herdr`.

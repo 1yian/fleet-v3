@@ -22,12 +22,13 @@ spawn:
   direnv: true
   command:
     - ypi
+    - --auto-exit
+    - --no-session
     - --append-system-prompt
     - "{prompt}"
-    - --print
     - "Read task {task} on the board with `fleet view {task} --full` and execute it."
   herdr:
-    workspace: fleet
+    workspace: workers
     keepPane: on-failure
   container:
     image: fleet-worker:latest
@@ -43,6 +44,25 @@ spawn:
       - ~/.pi/agent/tiers.json:/root/.pi/agent/tiers.json:ro
       - ~/.gitconfig:/root/.gitconfig:ro
     extraArgs: []
+
+mates:
+  workspace: mates
+  stateDir: ~/.fleet-v3/mates
+  command:
+    - ypi
+    - --model
+    - tier/orchestrator
+    - -e
+    - "{adapter}"
+    - --append-system-prompt
+    - "{prompt}"
+  env:
+    YPI_OPTCHAT_CONFIG: "{stateDir}/optchat.json"
+  items:
+    - name: example
+      channel: domains/example
+      cwd: ~/fleet-workspaces/personal/example-app/main
+      autoStart: true
 
 repos:
   example-app:

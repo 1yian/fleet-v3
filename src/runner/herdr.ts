@@ -88,7 +88,7 @@ child.on("exit", (code, signal) => {
 });
 `;
 
-function runHerdr(
+export function runHerdr(
   session: string | undefined,
   args: readonly string[],
   timeoutMs = 10_000,
@@ -306,7 +306,7 @@ async function readPaneTail(handle: HerdrPaneHandle): Promise<string> {
   }
 }
 
-function shellQuoteSingle(value: string): string {
+export function shellQuoteSingle(value: string): string {
   return `'${value.replaceAll("'", String.raw`'\''`)}'`;
 }
 

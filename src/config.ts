@@ -33,6 +33,30 @@ const HerdrConfigSchema = z.object({
   keepPane: z.enum(["never", "on-failure", "always"]).default("on-failure"),
 });
 
+const MateItemConfigSchema = z.object({
+  name: z.string().min(1),
+  channel: z.string().min(1),
+  cwd: z.string().min(1).optional(),
+  workspace: z.string().min(1).optional(),
+  promptPath: z.string().min(1).optional(),
+  autoStart: z.boolean().default(true),
+  env: z.record(z.string().min(1), z.string()).default({}),
+  command: z.array(z.string().min(1)).min(1).optional(),
+});
+
+const MatesConfigSchema = z.object({
+  workspace: z.string().min(1).default("mates"),
+  session: z.string().min(1).optional(),
+  stateDir: z.string().min(1).default("~/.fleet-v3/mates"),
+  promptPath: z.string().min(1).optional(),
+  env: z.record(z.string().min(1), z.string()).default({}),
+  command: z
+    .array(z.string().min(1))
+    .min(1)
+    .default(["ypi", "-e", "{adapter}", "--append-system-prompt", "{prompt}"]),
+  items: z.array(MateItemConfigSchema).default([]),
+});
+
 const SpawnConfigSchema = z.object({
   mode: z.enum(["local", "docker", "container"]).default("local"),
   viewport: z.enum(["headless", "herdr"]).default("headless"),
@@ -68,6 +92,7 @@ const RunnerConfigSchema = z
     pollWaitSeconds: z.number().int().min(1).max(60).default(15),
     workerPromptPath: z.string().min(1).optional(),
     spawn: SpawnConfigSchema,
+    mates: MatesConfigSchema.optional(),
     verify: VerifyConfigSchema.default({
       command: ["no-mistakes", "axi", "run", "--wait", "5m"],
       respondCommand: ["no-mistakes", "axi", "respond", "--wait", "5m", "--action", "fix"],
@@ -88,6 +113,8 @@ const RunnerConfigSchema = z
 
 export type ContainerConfig = z.infer<typeof ContainerConfigSchema>;
 export type HerdrConfig = z.infer<typeof HerdrConfigSchema>;
+export type MateItemConfig = z.infer<typeof MateItemConfigSchema>;
+export type MatesConfig = z.infer<typeof MatesConfigSchema>;
 export type RunnerConfig = z.infer<typeof RunnerConfigSchema>;
 export type RepoConfig = z.infer<typeof RepoConfigSchema>;
 
@@ -127,6 +154,21 @@ function normalizeContainerConfig(cfg: ContainerConfig | undefined): ContainerCo
   };
 }
 
+function normalizeMatesConfig(cfg: MatesConfig | undefined): MatesConfig | undefined {
+  if (cfg === undefined) return undefined;
+  const stateDir = expandPath(cfg.stateDir);
+  return {
+    ...cfg,
+    stateDir,
+    ...(cfg.promptPath !== undefined ? { promptPath: expandPath(cfg.promptPath) } : {}),
+    items: cfg.items.map((item) => ({
+      ...item,
+      ...(item.cwd !== undefined ? { cwd: expandPath(item.cwd) } : {}),
+      ...(item.promptPath !== undefined ? { promptPath: expandPath(item.promptPath) } : {}),
+    })),
+  };
+}
+
 export function loadConfig(configPath?: string): RunnerConfig {
   const resolved = expandPath(configPath ?? process.env["FLEET_CONFIG"] ?? "fleet.yaml");
   if (!existsSync(resolved)) {
@@ -142,6 +184,7 @@ export function loadConfig(configPath?: string): RunnerConfig {
     repos[name] = { ...repo, path: expandPath(repo.path) };
   }
   const container = normalizeContainerConfig(parsed.spawn.container ?? parsed.spawn.docker);
+  const mates = normalizeMatesConfig(parsed.mates);
   return {
     ...parsed,
     boardUrl: envUrl ?? parsed.boardUrl,
@@ -152,6 +195,7 @@ export function loadConfig(configPath?: string): RunnerConfig {
       ...parsed.spawn,
       ...(container !== undefined ? { container } : {}),
     },
+    ...(mates !== undefined ? { mates } : {}),
     repos,
   };
 }
