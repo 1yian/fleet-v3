@@ -12,8 +12,8 @@ function parseDelivery(value: string | undefined, fallback: Delivery): Delivery 
   return DELIVERIES.find((each) => each === value) ?? fallback;
 }
 
-export async function advertiseHost(client: Board, config: RunnerConfig): Promise<void> {
-  const repoNames = Object.keys(config.repos).sort();
+async function advertiseHost(client: Board, config: RunnerConfig): Promise<void> {
+  const repoNames = Object.keys(config.repos).toSorted();
   const text = `host=${config.host} mode=${config.spawn.mode} repos=${repoNames.join(",") || "none"}`;
   await client.post(config.metaChannel, {
     text,
@@ -44,7 +44,7 @@ function startLeaseRenewal(
   };
 }
 
-export async function executeClaim(
+async function executeClaim(
   client: Board,
   config: RunnerConfig,
   claim: ClaimedTask,
@@ -81,7 +81,9 @@ export async function executeClaim(
   });
 
   const controller = new AbortController();
-  const onOuterAbort = (): void => controller.abort();
+  const onOuterAbort = (): void => {
+    controller.abort();
+  };
   outerSignal?.addEventListener("abort", onOuterAbort, { once: true });
 
   let leaseLost = false;
@@ -183,7 +185,7 @@ export async function executeClaim(
   }
 }
 
-export async function claimNextReady(
+async function claimNextReady(
   client: Board,
   config: RunnerConfig,
   waitSeconds: number,
@@ -191,7 +193,7 @@ export async function claimNextReady(
 ): Promise<ClaimedTask | null> {
   const perChannelWait = Math.max(0, Math.floor(waitSeconds / Math.max(1, config.channels.length)));
   for (const channel of config.channels) {
-    if (signal?.aborted) return null;
+    if (signal?.aborted === true) return null;
     const claimed = await client.tasks.claim(
       {
         channel,
@@ -223,7 +225,7 @@ export async function runLoop(
   }
 
   const slots = Array.from({ length: config.concurrency }, async () => {
-    while (!options.signal?.aborted) {
+    while (options.signal?.aborted !== true) {
       const claimed = await claimNextReady(client, config, config.pollWaitSeconds, options.signal);
       if (claimed === null) continue;
       await executeClaim(client, config, claimed, options.signal);

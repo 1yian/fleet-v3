@@ -57,7 +57,9 @@ async function main(): Promise<void> {
   );
 
   const controller = new AbortController();
-  const stop = (): void => controller.abort();
+  const stop = (): void => {
+    controller.abort();
+  };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 
@@ -69,8 +71,10 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
+try {
+  await main();
+} catch (error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`error: ${message}\n`);
   process.exitCode = 1;
-});
+}

@@ -35,10 +35,10 @@ const VerifyConfigSchema = z.object({
     .default(["no-mistakes", "axi", "respond", "--wait", "5m", "--action", "fix"]),
 });
 
-export const RunnerConfigSchema = z
+const RunnerConfigSchema = z
   .object({
     host: z.string().min(1),
-    boardUrl: z.string().url().optional(),
+    boardUrl: z.url().optional(),
     from: z.array(z.string().min(1)).default([]),
     channels: z.array(z.string().min(1)).min(1),
     metaChannel: z.string().min(1).default("meta"),
@@ -66,13 +66,9 @@ export const RunnerConfigSchema = z
 export type RunnerConfig = z.infer<typeof RunnerConfigSchema>;
 export type RepoConfig = z.infer<typeof RepoConfigSchema>;
 
-export function expandPath(input: string, baseDir: string = process.cwd()): string {
+function expandPath(input: string, baseDir: string = process.cwd()): string {
   const expanded =
-    input === "~"
-      ? homedir()
-      : input.startsWith("~/")
-        ? resolve(homedir(), input.slice(2))
-        : input;
+    input === "~" ? homedir() : input.startsWith("~/") ? resolve(homedir(), input.slice(2)) : input;
   return isAbsolute(expanded) ? expanded : resolve(baseDir, expanded);
 }
 
@@ -94,7 +90,8 @@ export function loadConfig(configPath?: string): RunnerConfig {
     ...parsed,
     boardUrl: envUrl ?? parsed.boardUrl,
     workspacesRoot: expandPath(parsed.workspacesRoot),
-    workerPromptPath: parsed.workerPromptPath ? expandPath(parsed.workerPromptPath) : undefined,
+    workerPromptPath:
+      parsed.workerPromptPath === undefined ? undefined : expandPath(parsed.workerPromptPath),
     repos,
   };
 }

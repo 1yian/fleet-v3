@@ -1,0 +1,5 @@
+{
+  "printWidth": 100,
+  "sortPackageJson": false,
+  "ignorePatterns": ["bun.lock", "prompts/", "VISION.md", "AGENTS.md"]
+}

@@ -26,15 +26,18 @@ function appendTail(current: string, chunk: string): string {
   return combined.length <= TAIL_LIMIT ? combined : combined.slice(combined.length - TAIL_LIMIT);
 }
 
+function tryKill(target: number, sig: NodeJS.Signals): boolean {
+  try {
+    process.kill(target, sig);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function killProcessGroup(pid: number | undefined, sig: NodeJS.Signals): void {
   if (pid === undefined) return;
-  try {
-    process.kill(-pid, sig);
-  } catch {
-    try {
-      process.kill(pid, sig);
-    } catch {}
-  }
+  if (!tryKill(-pid, sig)) tryKill(pid, sig);
 }
 
 export function buildWorkerArgv(params: {
@@ -91,10 +94,10 @@ export function buildWorkerArgv(params: {
 }
 
 export function runIsolatedCommand(options: RunCommandOptions): Promise<SpawnResult> {
-  return new Promise((resolvePromise, rejectPromise) => {
+  return new Promise((resolve, reject) => {
     const [bin, ...args] = options.argv;
     if (bin === undefined) {
-      rejectPromise(new Error("Command argv must not be empty"));
+      reject(new Error("Command argv must not be empty"));
       return;
     }
 
@@ -114,7 +117,7 @@ export function runIsolatedCommand(options: RunCommandOptions): Promise<SpawnRes
     const terminate = (reason: "idle" | "wall" | "abort"): void => {
       if (settled) return;
       if (reason === "abort") aborted = true;
-      else if (timedOut === null) timedOut = reason;
+      else timedOut ??= reason;
       killProcessGroup(child.pid, "SIGTERM");
       killTimer = setTimeout(() => {
         killProcessGroup(child.pid, "SIGKILL");
@@ -122,19 +125,27 @@ export function runIsolatedCommand(options: RunCommandOptions): Promise<SpawnRes
       killTimer.unref();
     };
 
-    let idleTimer = setTimeout(() => terminate("idle"), options.idleTimeoutMs);
+    let idleTimer = setTimeout(() => {
+      terminate("idle");
+    }, options.idleTimeoutMs);
     idleTimer.unref();
 
     const resetIdle = (): void => {
       clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => terminate("idle"), options.idleTimeoutMs);
+      idleTimer = setTimeout(() => {
+        terminate("idle");
+      }, options.idleTimeoutMs);
       idleTimer.unref();
     };
 
-    const wallTimer = setTimeout(() => terminate("wall"), options.maxWallMs);
+    const wallTimer = setTimeout(() => {
+      terminate("wall");
+    }, options.maxWallMs);
     wallTimer.unref();
 
-    const onAbort = (): void => terminate("abort");
+    const onAbort = (): void => {
+      terminate("abort");
+    };
     if (options.signal !== undefined) {
       if (options.signal.aborted) {
         onAbort();
@@ -162,7 +173,7 @@ export function runIsolatedCommand(options: RunCommandOptions): Promise<SpawnRes
       if (settled) return;
       settled = true;
       cleanupTimers();
-      rejectPromise(err);
+      reject(err);
     });
 
     child.on("close", (exitCode, signal) => {
@@ -170,7 +181,7 @@ export function runIsolatedCommand(options: RunCommandOptions): Promise<SpawnRes
       settled = true;
       cleanupTimers();
       killProcessGroup(child.pid, "SIGKILL");
-      resolvePromise({ exitCode, signal, timedOut, aborted, outputTail });
+      resolve({ exitCode, signal, timedOut, aborted, outputTail });
     });
   });
 }

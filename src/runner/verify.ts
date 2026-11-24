@@ -3,9 +3,14 @@ import { runIsolatedCommand } from "./spawn.ts";
 
 export type VerifyOutcome =
   | { readonly status: "passed"; readonly rounds: number; readonly output: string }
-  | { readonly status: "needs-mate"; readonly rounds: number; readonly reason: string; readonly output: string };
+  | {
+      readonly status: "needs-mate";
+      readonly rounds: number;
+      readonly reason: string;
+      readonly output: string;
+    };
 
-const FINDINGS_PATTERN = /\b(findings|ask-user|auto-fix|review-failed|gate)\b/i;
+const FINDINGS_PATTERN = /\b(?:findings|ask-user|auto-fix|review-failed|gate)\b/iu;
 
 export async function runBoundedVerification(params: {
   readonly config: RunnerConfig;
@@ -52,7 +57,9 @@ export async function runBoundedVerification(params: {
     }
 
     if (round === maxRounds) {
-      const kind = FINDINGS_PATTERN.test(lastOutput) ? "open review findings" : `exit ${String(result.exitCode)}`;
+      const kind = FINDINGS_PATTERN.test(lastOutput)
+        ? "open review findings"
+        : `exit ${String(result.exitCode)}`;
       return {
         status: "needs-mate",
         rounds: round,

@@ -1,10 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
 import type { RepoConfig } from "../config.ts";
-
-const execFileAsync = promisify(execFile);
 
 export interface TaskWorkspace {
   readonly worktreePath: string;
@@ -14,12 +11,19 @@ export interface TaskWorkspace {
 }
 
 function sanitizeSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]/g, "-");
+  return value.replaceAll(/[^a-zA-Z0-9._-]/gu, "-");
 }
 
-async function runGit(cwd: string, args: readonly string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", [...args], { cwd, encoding: "utf8" });
-  return stdout.trim();
+function runGit(cwd: string, args: readonly string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("git", [...args], { cwd, encoding: "utf8" }, (error, stdout) => {
+      if (error !== null) {
+        reject(new Error(error.message, { cause: error }));
+        return;
+      }
+      resolve(stdout.trim());
+    });
+  });
 }
 
 export function hasEnvrcInAncestry(startDir: string): boolean {

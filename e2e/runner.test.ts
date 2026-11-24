@@ -6,8 +6,17 @@ import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { board } from "@vercel/board";
 import { local } from "@vercel/board/backend-local";
+import { z } from "zod";
 import type { RunnerConfig } from "../src/config.ts";
 import { runLoop } from "../src/runner/loop.ts";
+
+const WorkerReceiptSchema = z.object({
+  task: z.string(),
+  cwd: z.string(),
+  worktree: z.string(),
+  branch: z.string(),
+  prompt: z.string(),
+});
 
 const tempDirs: string[] = [];
 
@@ -73,7 +82,7 @@ afterEach(() => {
   }
 });
 
-test("claims ready task, runs isolated worktree worker, advertises host, completes, and cleans up", async () => {
+void test("claims ready task, runs isolated worktree worker, advertises host, completes, and cleans up", async () => {
   const root = makeTempDir("fleet-v3-e2e-");
   const repoDir = initGitRepo(root);
   const receiptPath = join(root, "worker-receipt.json");
@@ -106,11 +115,11 @@ test("claims ready task, runs isolated worktree worker, advertises host, complet
     const handled = await runLoop(client.as("runner-test-host"), config, { once: true });
     assert.equal(handled, 1);
 
-    const receipt = JSON.parse(readFileSync(receiptPath, "utf8")) as Record<string, string>;
-    assert.equal(receipt["task"], task.id);
-    assert.equal(receipt["branch"], `fleet/t-${task.id}`);
-    assert.ok(receipt["worktree"] !== undefined && receipt["worktree"] !== repoDir);
-    assert.equal(existsSync(receipt["worktree"]), false);
+    const receipt = WorkerReceiptSchema.parse(JSON.parse(readFileSync(receiptPath, "utf8")));
+    assert.equal(receipt.task, task.id);
+    assert.equal(receipt.branch, `fleet/t-${task.id}`);
+    assert.notEqual(receipt.worktree, repoDir);
+    assert.equal(existsSync(receipt.worktree), false);
 
     const thread = await client.thread(task.id);
     assert.equal(thread.message.task?.state, "completed");
@@ -118,13 +127,13 @@ test("claims ready task, runs isolated worktree worker, advertises host, complet
     const meta = await client.channel("meta").messages();
     const hostPost = meta.messages.find((msg) => msg.labels["kind"] === "host");
     assert.ok(hostPost !== undefined);
-    assert.match(hostPost.text, /host=test-host.*repos=demo/);
+    assert.match(hostPost.text, /host=test-host.*repos=demo/u);
   } finally {
     await backend.close();
   }
 });
 
-test("caps no-mistakes verification at 4 rounds and hands back without force-shipping", async () => {
+void test("caps no-mistakes verification at 4 rounds and hands back without force-shipping", async () => {
   const root = makeTempDir("fleet-v3-e2e-");
   const repoDir = initGitRepo(root);
   const roundsLog = join(root, "rounds.log");
@@ -163,7 +172,7 @@ test("caps no-mistakes verification at 4 rounds and hands back without force-shi
     const thread = await client.thread(task.id);
     assert.equal(thread.message.task?.state, "failed");
     assert.ok(
-      thread.replies.some((reply) => /stopped at round 4\/4/i.test(reply.text)),
+      thread.replies.some((reply) => /stopped at round 4\/4/iu.test(reply.text)),
       "expected 4-round handback summary in thread",
     );
   } finally {
@@ -171,7 +180,7 @@ test("caps no-mistakes verification at 4 rounds and hands back without force-shi
   }
 });
 
-test("blocks task instead of crash-looping once claim epoch exceeds maxAttempts", async () => {
+void test("blocks task instead of crash-looping once claim epoch exceeds maxAttempts", async () => {
   const root = makeTempDir("fleet-v3-e2e-");
   const repoDir = initGitRepo(root);
   const ranMarker = join(root, "should-not-run");
@@ -196,7 +205,11 @@ test("blocks task instead of crash-looping once claim epoch exceeds maxAttempts"
       spawn: {
         mode: "local",
         direnv: false,
-        command: ["node", "-e", `require("node:fs").writeFileSync(${JSON.stringify(ranMarker)}, "1")`],
+        command: [
+          "node",
+          "-e",
+          `require("node:fs").writeFileSync(${JSON.stringify(ranMarker)}, "1")`,
+        ],
       },
     });
 
@@ -210,7 +223,7 @@ test("blocks task instead of crash-looping once claim epoch exceeds maxAttempts"
   }
 });
 
-test("kills entire worker process group on idle timeout leaving no orphan grandchild", async () => {
+void test("kills entire worker process group on idle timeout leaving no orphan grandchild", async () => {
   const root = makeTempDir("fleet-v3-e2e-");
   const repoDir = initGitRepo(root);
   const childPidFile = join(root, "grandchild.pid");
@@ -246,7 +259,9 @@ test("kills entire worker process group on idle timeout leaving no orphan grandc
 
     const grandchildPid = Number(readFileSync(childPidFile, "utf8").trim());
     assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0);
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 150);
+    });
     assert.throws(() => process.kill(grandchildPid, 0), { code: "ESRCH" });
   } finally {
     await backend.close();
