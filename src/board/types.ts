@@ -26,6 +26,16 @@ export const EVENT_TYPES = [
 ] as const;
 export type BoardEventType = (typeof EVENT_TYPES)[number];
 
+const MATE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
+export const MateNameSchema = z.string().regex(MATE_NAME_PATTERN, {
+  message:
+    "mate names use letters, digits, underscores, and hyphens (max 64, starting alphanumeric)",
+});
+
+export function mentionsMate(text: string, mate: string): boolean {
+  return new RegExp(`@${mate}(?![A-Za-z0-9_-])`, "iu").test(text);
+}
+
 export const CardSchema = z.object({
   id: z.string(),
   mate: z.string(),
@@ -65,6 +75,12 @@ export const CardThreadSchema = z.object({
   entries: z.array(EntrySchema),
 });
 export type CardThread = z.infer<typeof CardThreadSchema>;
+
+export const CardPageSchema = z.object({
+  cards: z.array(CardSchema),
+  total: z.number().int(),
+});
+export type CardPage = z.infer<typeof CardPageSchema>;
 
 export const HostInfoSchema = z.object({
   host: z.string(),
@@ -165,6 +181,11 @@ export interface ClaimFenceInput {
   readonly token: string;
 }
 
+export interface OptionalFenceInput {
+  readonly epoch?: number;
+  readonly token?: string;
+}
+
 export interface FinishClaimInput extends ClaimFenceInput {
   readonly outcome: "done" | "needs_mate";
   readonly summary: string;
@@ -172,39 +193,37 @@ export interface FinishClaimInput extends ClaimFenceInput {
   readonly kind?: string;
 }
 
-export interface PostEntryInput {
+export interface PostEntryInput extends OptionalFenceInput {
   readonly text: string;
   readonly by?: string;
   readonly internal?: boolean;
   readonly kind?: EntryKind;
 }
 
-export interface EscalateCardInput {
+export interface EscalateCardInput extends OptionalFenceInput {
   readonly reason: string;
-  readonly to?: string;
   readonly actor?: string;
   readonly kind?: string;
 }
 
-export interface HandoffCardInput {
+export interface HandoffCardInput extends OptionalFenceInput {
   readonly to?: string;
   readonly text?: string;
   readonly actor?: string;
   readonly internal?: boolean;
 }
 
-export interface AnswerCardInput {
+export interface AnswerCardInput extends OptionalFenceInput {
   readonly text: string;
-  readonly to?: string;
   readonly actor?: string;
 }
 
-export interface CloseCardInput {
+export interface CloseCardInput extends OptionalFenceInput {
   readonly result?: string;
   readonly actor?: string;
 }
 
-export interface CancelCardInput {
+export interface CancelCardInput extends OptionalFenceInput {
   readonly reason: string;
   readonly actor?: string;
 }

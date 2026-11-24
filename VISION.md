@@ -42,10 +42,11 @@ waiting ──► queued (runner) ──► running (worker, leased + fenced)
                                       └─────── answer / handoff ───────┘
 ```
 
-- **Leases + monotonic epoch + fencing tokens** protect `running` cards: a crashed or sleeping runner loses its lease automatically, the next claim bumps `epoch` with a fresh fencing token, and stale writes are rejected with `409 claim_lost`.
+- **Leases + monotonic epoch + fencing tokens** protect `running` cards: a crashed or sleeping runner loses its lease automatically, the next claim bumps `epoch` with a fresh fencing token, and stale writes are rejected with `409 claim_lost`. Workers receive `FLEET_CLAIM_EPOCH` and `FLEET_CLAIM_TOKEN`, and the `fleet` CLI forwards them on every write, so a superseded worker can never hand off, reply to, close, or cancel a newer attempt. Writes without a fence are captain or mate interventions.
 - **Worker failures never vanish and never page the captain:** a stuck, failed, timed-out, or 4-round verification handback always lands in `held` with `holder = card.mate`.
-- **Escalation climbs the `parent` chain:** `fleet escalate` moves `holder -> parent(holder)` (e.g. `cleo -> jarvis -> captain`), so the captain's zero-inbox **Needs You** feed is strictly `state = 'held' AND holder = 'captain'`.
-- **Answering hands back, never blindly launches:** `fleet answer` drops the card cleanly back to `held` for its mate (or specified holder), letting the mate decide whether to merge, close, or `fleet queue` a worker.
+- **Escalation climbs the `parent` chain:** `fleet escalate` moves `holder -> parent(holder)` (e.g. `cleo -> jarvis -> captain`), so the captain's zero-inbox **Needs You** feed is strictly `state = 'held' AND holder = 'captain'`. Escalation has no target override: `fleet handoff --to <mate>` is the only way to pass a card to a specific mate.
+- **Answering hands back, never blindly launches:** `fleet answer` always drops the card back to `held` for its home mate (`card.mate`), letting the mate decide whether to merge, close, or `fleet queue` a worker.
+- **Dependencies are enforced at every queue transition:** a card with open `needs` cannot be queued, and when a prerequisite is canceled its waiting dependents return to `held (holder = card.mate)` with a status entry instead of waiting forever.
 - **Stale-ball chase replaces delivery state machines:** SSE pushes instant updates with zero LLM polling, and one stateless periodic SQL query groups stale `held` (non-captain) and unclaimed `queued` cards by holder and emits a single `chase.due` SSE event - so restarts or missed events can never silently drop work.
 
 ## Minimal Card Server (hard red line)

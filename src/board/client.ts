@@ -1,8 +1,8 @@
 import { z } from "zod";
-import type { CardStore } from "./store.ts";
 import {
   BoardError,
   BoardEventSchema,
+  CardPageSchema,
   CardSchema,
   CardThreadSchema,
   ClaimReceiptSchema,
@@ -15,6 +15,7 @@ import {
   type BoardOverview,
   type CancelCardInput,
   type Card,
+  type CardPage,
   type CardThread,
   type ClaimFenceInput,
   type ClaimNextInput,
@@ -33,7 +34,7 @@ import {
 
 export interface BoardClient {
   readonly getOverview: () => Promise<BoardOverview>;
-  readonly listCards: (query?: ListCardsQuery) => Promise<Card[]>;
+  readonly listCards: (query?: ListCardsQuery) => Promise<CardPage>;
   readonly createCard: (input: CreateCardInput) => Promise<Card>;
   readonly getThread: (id: string) => Promise<CardThread>;
   readonly postEntry: (id: string, input: PostEntryInput) => Promise<Entry>;
@@ -60,6 +61,7 @@ export interface BoardClient {
   readonly getPrefs: () => Promise<string>;
   readonly setPrefs: (text: string) => Promise<string>;
   readonly getParents: () => Promise<Record<string, string>>;
+  readonly latestEventId: () => Promise<number>;
   readonly events: (options?: {
     readonly after?: number;
     readonly holder?: string;
@@ -73,7 +75,7 @@ const ErrorBodySchema = z.object({
   message: z.string().optional(),
 });
 const CardWrapSchema = z.object({ card: CardSchema });
-const CardsWrapSchema = z.object({ cards: z.array(CardSchema) });
+const HealthSchema = z.object({ latestEventId: z.number().int() });
 const EntryWrapSchema = z.object({ entry: EntrySchema });
 const ClaimWrapSchema = z.object({ claim: ClaimReceiptSchema.nullable() });
 const RenewWrapSchema = z.object({ leaseUntil: z.number().int() });
@@ -154,23 +156,18 @@ async function* parseSseStream(
 }
 
 export function createHttpBoardClient(baseUrl: string): BoardClient {
-  const cleanBase = baseUrl.replace(/\/+$/u, "").replace(/\/api\/board$/u, "");
+  const cleanBase = baseUrl.replace(/\/+$/u, "");
 
   return {
     getOverview: () => requestJson(cleanBase, "/api/overview", OverviewSchema),
-    listCards: async (query = {}) => {
+    listCards: (query = {}) => {
       const params = new URLSearchParams();
       if (query.mate !== undefined) params.set("mate", query.mate);
       if (query.holder !== undefined) params.set("holder", query.holder);
       if (query.state !== undefined) params.set("state", query.state);
       if (query.limit !== undefined) params.set("limit", String(query.limit));
       const qs = params.toString();
-      const res = await requestJson(
-        cleanBase,
-        `/api/cards${qs.length > 0 ? `?${qs}` : ""}`,
-        CardsWrapSchema,
-      );
-      return res.cards;
+      return requestJson(cleanBase, `/api/cards${qs.length > 0 ? `?${qs}` : ""}`, CardPageSchema);
     },
     createCard: async (input) => {
       const res = await requestJson(cleanBase, "/api/cards", CardWrapSchema, {
@@ -314,6 +311,10 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
       });
       return res.text;
     },
+    latestEventId: async () => {
+      const res = await requestJson(cleanBase, "/api/health", HealthSchema);
+      return res.latestEventId;
+    },
     getParents: async () => {
       const res = await requestJson(cleanBase, "/api/mates", ParentsWrapSchema);
       return res.parents;
@@ -337,147 +338,5 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
         },
       };
     },
-  };
-}
-
-function matchesLocalFilter(
-  event: BoardEvent,
-  holder: string | undefined,
-  mate: string | undefined,
-): boolean {
-  if (mate !== undefined && event.mate !== mate) return false;
-  if (holder === undefined) return true;
-  if (event.holder === holder || event.mate === holder) return true;
-  if (event.type === "entry.posted" && typeof event.payload["text"] === "string") {
-    return new RegExp(`@${holder}\\b`, "iu").test(event.payload["text"]);
-  }
-  return false;
-}
-
-function createLocalClaimPromise(
-  store: CardStore,
-  input: ClaimNextInput,
-  signal: AbortSignal | undefined,
-): Promise<ClaimReceipt | null> {
-  if (signal?.aborted === true) return Promise.resolve(null);
-  return new Promise((resolve) => {
-    const state: {
-      settled: boolean;
-      timer?: ReturnType<typeof setTimeout>;
-      unsubscribe?: () => void;
-      onAbort?: () => void;
-    } = { settled: false };
-    const finish = (receipt: ClaimReceipt | null): void => {
-      if (state.settled) return;
-      state.settled = true;
-      if (state.timer !== undefined) clearTimeout(state.timer);
-      state.unsubscribe?.();
-      if (state.onAbort !== undefined) signal?.removeEventListener("abort", state.onAbort);
-      resolve(receipt);
-    };
-    state.onAbort = () => {
-      finish(null);
-    };
-    signal?.addEventListener("abort", state.onAbort, { once: true });
-    state.unsubscribe = store.subscribe((event) => {
-      if (event.type !== "card.queued" && event.type !== "card.expired") return;
-      const next = store.claimNext(input);
-      if (next !== null) finish(next);
-    });
-    state.timer = setTimeout(
-      () => {
-        finish(store.claimNext(input));
-      },
-      (input.waitSeconds ?? 0) * 1000,
-    );
-    state.timer.unref();
-  });
-}
-
-async function* iterateLocalEvents(
-  store: CardStore,
-  options: {
-    readonly after?: number;
-    readonly holder?: string;
-    readonly mate?: string;
-    readonly signal?: AbortSignal;
-  },
-): AsyncGenerator<BoardEvent, void, undefined> {
-  if (options.signal?.aborted === true) return;
-  const queue: BoardEvent[] = [];
-  const state: { closed: boolean; wake?: (() => void) | undefined } = { closed: false };
-  const afterId = options.after ?? store.latestEventId();
-  for (const ev of store.listEventsSince(afterId)) {
-    queue.push(ev);
-  }
-  let lastId = queue.at(-1)?.id ?? afterId;
-  const wakeUp = (): void => {
-    const fn = state.wake;
-    state.wake = undefined;
-    fn?.();
-  };
-  const unsubscribe = store.subscribe((ev) => {
-    if (ev.id <= lastId) return;
-    lastId = ev.id;
-    queue.push(ev);
-    wakeUp();
-  });
-  const onAbort = (): void => {
-    state.closed = true;
-    wakeUp();
-  };
-  const waitNext = (): Promise<void> =>
-    new Promise((resolve) => {
-      state.wake = resolve;
-    });
-  options.signal?.addEventListener("abort", onAbort, { once: true });
-  try {
-    while (!state.closed) {
-      while (queue.length > 0) {
-        const next = queue.shift();
-        if (next !== undefined && matchesLocalFilter(next, options.holder, options.mate)) {
-          yield next;
-        }
-      }
-      if (state.closed) break;
-      await waitNext();
-    }
-  } finally {
-    unsubscribe();
-    options.signal?.removeEventListener("abort", onAbort);
-  }
-}
-
-export function createLocalBoardClient(store: CardStore): BoardClient {
-  return {
-    getOverview: () => Promise.resolve(store.getOverview()),
-    listCards: (query) => Promise.resolve(store.listCards(query)),
-    createCard: (input) => Promise.resolve(store.createCard(input)),
-    getThread: (id) => Promise.resolve(store.getThread(id)),
-    postEntry: (id, input) => Promise.resolve(store.postEntry(id, input)),
-    queueCard: (id, input) => Promise.resolve(store.queueCard(id, input)),
-    escalateCard: (id, input) => Promise.resolve(store.escalateCard(id, input)),
-    handoffCard: (id, input) => Promise.resolve(store.handoffCard(id, input)),
-    answerCard: (id, input) => Promise.resolve(store.answerCard(id, input)),
-    closeCard: (id, input) => Promise.resolve(store.closeCard(id, input)),
-    cancelCard: (id, input) => Promise.resolve(store.cancelCard(id, input)),
-    claimNext: (input, options = {}) => {
-      const immediate = store.claimNext(input);
-      if (immediate !== null || (input.waitSeconds ?? 0) <= 0) {
-        return Promise.resolve(immediate);
-      }
-      return createLocalClaimPromise(store, input, options.signal);
-    },
-    renewClaim: (id, input) => Promise.resolve(store.renewClaim(id, input)),
-    releaseClaim: (id, input) => Promise.resolve(store.releaseClaim(id, input)),
-    finishClaim: (id, input) => Promise.resolve(store.finishClaim(id, input)),
-    advertiseHost: (input) => Promise.resolve(store.advertiseHost(input)),
-    listHosts: () => Promise.resolve(store.listHosts()),
-    getCharter: (mate) => Promise.resolve(store.getCharter(mate)),
-    setCharter: (mate, text) => Promise.resolve(store.setCharter(mate, text)),
-    getPrefs: () => Promise.resolve(store.getPrefs()),
-    setPrefs: (text) => Promise.resolve(store.setPrefs(text)),
-    getParents: () => Promise.resolve(store.getParents()),
-    events: (options = {}) => iterateLocalEvents(store, options),
   };
 }

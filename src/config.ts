@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { DELIVERIES } from "./board/types.ts";
+import { DELIVERIES, MateNameSchema } from "./board/types.ts";
 
 export type SpawnMode = "local" | "docker" | "container";
 export type KeepPanePolicy = "never" | "on-failure" | "always";
@@ -32,8 +32,8 @@ const HerdrConfigSchema = z.object({
 });
 
 const MateItemConfigSchema = z.object({
-  name: z.string().min(1),
-  parent: z.string().min(1).default("captain"),
+  name: MateNameSchema,
+  parent: MateNameSchema.default("captain"),
   cwd: z.string().min(1).optional(),
   workspace: z.string().min(1).optional(),
   promptPath: z.string().min(1).optional(),
@@ -59,7 +59,7 @@ const ServerConfigSchema = z.object({
   host: z.string().min(1).default("127.0.0.1"),
   port: z.number().int().min(1).max(65_535).default(4100),
   dataDir: z.string().min(1).default("~/.fleet-v3/board"),
-  chaseIntervalSeconds: z.number().int().min(0).default(60),
+  chaseIntervalSeconds: z.number().int().min(1).default(60),
   staleAfterSeconds: z.number().int().min(10).default(600),
 });
 
@@ -92,7 +92,7 @@ const RunnerConfigSchema = z
     idleTimeoutSeconds: z.number().int().min(1).default(1800),
     maxWallSeconds: z.number().int().min(1).default(7200),
     maxAttempts: z.number().int().min(1).default(3),
-    maxReviewRounds: z.number().int().min(1).default(4),
+    maxReviewRounds: z.number().int().min(1).max(4).default(4),
     pollWaitSeconds: z.number().int().min(1).max(60).default(15),
     workerPromptPath: z.string().min(1).optional(),
     server: ServerConfigSchema.optional(),
@@ -103,6 +103,38 @@ const RunnerConfigSchema = z
       respondCommand: ["no-mistakes", "axi", "respond", "--wait", "5m", "--action", "fix"],
     }),
     repos: z.record(z.string().min(1), RepoConfigSchema),
+  })
+  .superRefine((cfg, ctx) => {
+    const items = cfg.mates?.items ?? [];
+    const parentOf = new Map<string, string>();
+    for (const [index, item] of items.entries()) {
+      if (item.name === "captain" || parentOf.has(item.name)) {
+        ctx.addIssue({
+          code: "custom",
+          message: `mate name "${item.name}" is reserved or duplicated`,
+          path: ["mates", "items", index, "name"],
+        });
+        continue;
+      }
+      parentOf.set(item.name, item.parent);
+    }
+    for (const [index, item] of items.entries()) {
+      const seen = new Set<string>([item.name]);
+      let cursor = item.parent;
+      while (cursor !== "captain") {
+        const next = parentOf.get(cursor);
+        if (next === undefined || seen.has(cursor)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `mate "${item.name}" does not reach captain through its parent chain`,
+            path: ["mates", "items", index, "parent"],
+          });
+          break;
+        }
+        seen.add(cursor);
+        cursor = next;
+      }
+    }
   })
   .refine(
     (cfg) =>

@@ -83,7 +83,7 @@ async function proxyUpstream(
 
 export async function startKanbanServer(
   options: KanbanServerOptions,
-): Promise<{ readonly server: Server; readonly url: string }> {
+): Promise<{ readonly server: Server; readonly url: string; readonly stop: () => Promise<void> }> {
   const server = createServer((req, res) => {
     void (async () => {
       try {
@@ -121,5 +121,17 @@ export async function startKanbanServer(
 
   const addr = server.address();
   const actualPort = typeof addr === "object" && addr !== null ? addr.port : options.port;
-  return { server, url: `http://${options.host}:${String(actualPort)}` };
+  return {
+    server,
+    url: `http://${options.host}:${String(actualPort)}`,
+    stop: async () => {
+      const closed = new Promise<void>((resolve) => {
+        server.close(() => {
+          resolve();
+        });
+      });
+      server.closeAllConnections();
+      await closed;
+    },
+  };
 }

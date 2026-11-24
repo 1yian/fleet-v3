@@ -9,6 +9,7 @@ import {
   DELIVERIES,
   ENTRY_KINDS,
   EVENT_TYPES,
+  MateNameSchema,
   type AdvertiseHostInput,
   type AnswerCardInput,
   type BoardEvent,
@@ -17,6 +18,7 @@ import {
   type CancelCardInput,
   type Card,
   type CardState,
+  type CardPage,
   type CardThread,
   type ClaimFenceInput,
   type ClaimNextInput,
@@ -31,6 +33,7 @@ import {
   type HandoffCardInput,
   type HostInfo,
   type ListCardsQuery,
+  type OptionalFenceInput,
   type PostEntryInput,
   type QueueCardInput,
 } from "./types.ts";
@@ -55,8 +58,7 @@ CREATE TABLE IF NOT EXISTS cards (
   lease_until INTEGER,
   created_by TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  chased_at INTEGER
+  updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_cards_state_holder ON cards (state, holder, updated_at);
 CREATE INDEX IF NOT EXISTS idx_cards_mate_state ON cards (mate, state, id);
@@ -86,6 +88,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_type_id ON events (type, id);
 `;
 
+const CardStateSchema = z.enum(CARD_STATES);
 const StringArraySchema = z.array(z.string());
 const StringRecordSchema = z.record(z.string(), z.string());
 const UnknownRecordSchema = z.record(z.string(), z.unknown());
@@ -110,7 +113,6 @@ const CardRowSchema = z.object({
   created_by: z.string(),
   created_at: z.number().int(),
   updated_at: z.number().int(),
-  chased_at: z.number().int().nullable(),
   entry_count: z.number().int().optional(),
 });
 
@@ -167,12 +169,12 @@ function parseCardId(raw: string): number {
   return num;
 }
 
-function sanitizeMateFile(mate: string): string {
-  const cleaned = mate.trim().replaceAll(/[^a-zA-Z0-9._-]/gu, "");
-  if (cleaned.length === 0 || cleaned === "." || cleaned === "..") {
+function parseMateName(mate: string): string {
+  const parsed = MateNameSchema.safeParse(mate);
+  if (!parsed.success) {
     throw new BoardError(400, "invalid_mate", `Invalid mate name: "${mate}"`);
   }
-  return cleaned;
+  return parsed.data;
 }
 
 function rowToCard(row: CardRow): Card {
@@ -248,6 +250,8 @@ export class CardStore {
   private readonly memoryCharters = new Map<string, string>();
   private memoryPrefs = "";
   private readonly listeners = new Set<(event: BoardEvent) => void>();
+  private readonly pendingEvents: BoardEvent[] = [];
+  private publishing = false;
 
   public constructor(options: CardStoreOptions = {}) {
     this.nowFn = options.now ?? (() => Date.now());
@@ -290,25 +294,39 @@ export class CardStore {
     return this.parents[holder] ?? this.defaultParent;
   }
 
-  private emitEvents(events: readonly BoardEvent[]): void {
-    for (const event of events) {
-      for (const listener of this.listeners) {
-        listener(event);
+  private publish(events: readonly BoardEvent[]): void {
+    this.pendingEvents.push(...events);
+    if (this.publishing) return;
+    this.publishing = true;
+    try {
+      let event = this.pendingEvents.shift();
+      while (event !== undefined) {
+        for (const listener of this.listeners) {
+          try {
+            listener(event);
+          } catch {
+            continue;
+          }
+        }
+        event = this.pendingEvents.shift();
       }
+    } finally {
+      this.publishing = false;
     }
   }
 
   private runTransaction<T>(fn: () => { readonly result: T; readonly events: BoardEvent[] }): T {
     this.db.exec("BEGIN IMMEDIATE");
+    let outcome: { readonly result: T; readonly events: BoardEvent[] };
     try {
-      const outcome = fn();
+      outcome = fn();
       this.db.exec("COMMIT");
-      this.emitEvents(outcome.events);
-      return outcome.result;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    this.publish(outcome.events);
+    return outcome.result;
   }
 
   private appendEvent(params: {
@@ -402,6 +420,14 @@ export class CardStore {
     }
   }
 
+  private static guardFence(row: CardRow, input: OptionalFenceInput, now: number): void {
+    if (input.epoch === undefined && input.token === undefined) return;
+    if (input.epoch === undefined || input.token === undefined) {
+      throw new BoardError(400, "invalid_fence", "epoch and token must be provided together");
+    }
+    CardStore.assertFence(row, { epoch: input.epoch, token: input.token }, now);
+  }
+
   private expireLeasesInternal(now: number): BoardEvent[] {
     const rows = this.db
       .prepare(
@@ -415,7 +441,7 @@ export class CardStore {
         .prepare(
           `UPDATE cards
            SET state = 'queued', holder = 'runner', claim_token_hash = NULL, claim_by = NULL,
-               lease_until = NULL, updated_at = ?, chased_at = NULL
+               lease_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
         .run(now, row.id);
@@ -434,27 +460,34 @@ export class CardStore {
     return events;
   }
 
+  private unmetNeeds(needs: readonly string[]): string[] {
+    return needs.filter((needId) => {
+      const prereq = this.db
+        .prepare("SELECT state FROM cards WHERE id = ?")
+        .get(parseCardId(needId));
+      return prereq === undefined || Reflect.get(prereq, "state") !== "done";
+    });
+  }
+
+  private waitingDependentsOf(prerequisiteId: string): CardRow[] {
+    return this.db
+      .prepare(`${CARD_SELECT} WHERE c.state = 'waiting'`)
+      .all()
+      .map((raw) => CardRowSchema.parse(raw))
+      .filter((row) =>
+        StringArraySchema.parse(JSON.parse(row.needs_json)).includes(prerequisiteId),
+      );
+  }
+
   private unblockDependentsInternal(completedId: string, now: number): BoardEvent[] {
-    const rows = this.db.prepare(`${CARD_SELECT} WHERE c.state = 'waiting'`).all();
     const events: BoardEvent[] = [];
-    for (const raw of rows) {
-      const row = CardRowSchema.parse(raw);
-      const needs = StringArraySchema.parse(JSON.parse(row.needs_json));
-      if (!needs.includes(completedId)) continue;
-      const allDone = needs.every((needId) => {
-        const prereq = this.db
-          .prepare("SELECT state FROM cards WHERE id = ?")
-          .get(parseCardId(needId));
-        return prereq !== undefined && Reflect.get(prereq, "state") === "done";
-      });
-      if (!allDone) continue;
+    for (const row of this.waitingDependentsOf(completedId)) {
+      if (this.unmetNeeds(StringArraySchema.parse(JSON.parse(row.needs_json))).length > 0) continue;
       const readyForRunner = row.host !== null && row.project !== null;
       const nextState: CardState = readyForRunner ? "queued" : "held";
       const nextHolder = readyForRunner ? "runner" : row.mate;
       this.db
-        .prepare(
-          `UPDATE cards SET state = ?, holder = ?, updated_at = ?, chased_at = NULL WHERE id = ?`,
-        )
+        .prepare(`UPDATE cards SET state = ?, holder = ?, updated_at = ? WHERE id = ?`)
         .run(nextState, nextHolder, now, row.id);
       events.push(
         this.appendEvent({
@@ -468,6 +501,38 @@ export class CardStore {
             title: row.title,
             unblockedBy: completedId,
           },
+          createdAt: now,
+        }),
+      );
+    }
+    return events;
+  }
+
+  private holdDependentsOfCanceled(canceledId: string, now: number): BoardEvent[] {
+    const events: BoardEvent[] = [];
+    for (const row of this.waitingDependentsOf(canceledId)) {
+      const text = `Prerequisite #${canceledId} was canceled, so this card can never unblock. Decide whether to cancel it or replace the prerequisite.`;
+      this.db
+        .prepare(
+          `UPDATE cards SET state = 'held', holder = ?, result = ?, updated_at = ? WHERE id = ?`,
+        )
+        .run(row.mate, text, now, row.id);
+      this.insertEntry({
+        cardId: row.id,
+        by: "server",
+        kind: "status",
+        text,
+        internal: false,
+        createdAt: now,
+      });
+      events.push(
+        this.appendEvent({
+          type: "card.handed_off",
+          cardId: row.id,
+          mate: row.mate,
+          holder: row.mate,
+          actor: "server",
+          payload: { id: String(row.id), title: row.title, to: row.mate, text },
           createdAt: now,
         }),
       );
@@ -573,7 +638,7 @@ export class CardStore {
     return { card, entries };
   }
 
-  public listCards(query: ListCardsQuery = {}): Card[] {
+  public listCards(query: ListCardsQuery = {}): CardPage {
     const conditions: string[] = [];
     const params: (string | number)[] = [];
 
@@ -594,11 +659,18 @@ export class CardStore {
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const limit = query.limit !== undefined && query.limit > 0 ? query.limit : 200;
+    const limitClause = query.limit === undefined ? "" : "LIMIT ?";
     const rows = this.db
-      .prepare(`${CARD_SELECT} ${where} ORDER BY c.id DESC LIMIT ?`)
-      .all(...params, limit);
-    return rows.map((raw) => rowToCard(CardRowSchema.parse(raw)));
+      .prepare(`${CARD_SELECT} ${where} ORDER BY c.id DESC ${limitClause}`)
+      .all(...params, ...(query.limit === undefined ? [] : [query.limit]));
+    const totalRow = this.db
+      .prepare(`SELECT COUNT(*) AS total FROM cards c ${where}`)
+      .get(...params);
+    const total: unknown = totalRow === undefined ? 0 : Reflect.get(totalRow, "total");
+    return {
+      cards: rows.map((raw) => rowToCard(CardRowSchema.parse(raw))),
+      total: typeof total === "number" ? total : 0,
+    };
   }
 
   public queueCard(rawId: string, input: QueueCardInput): Card {
@@ -611,6 +683,14 @@ export class CardStore {
       }
       if (row.state === "running") {
         throw new BoardError(409, "card_running", `Card #${String(id)} is already running`);
+      }
+      const open = this.unmetNeeds(StringArraySchema.parse(JSON.parse(row.needs_json)));
+      if (open.length > 0) {
+        throw new BoardError(
+          409,
+          "unmet_needs",
+          `Card #${String(id)} still needs ${open.map((needId) => `#${needId}`).join(", ")}`,
+        );
       }
       const host = input.host ?? row.host;
       const project = input.project ?? row.project;
@@ -627,7 +707,7 @@ export class CardStore {
         .prepare(
           `UPDATE cards
            SET state = 'queued', holder = 'runner', host = ?, project = ?, delivery = ?,
-               updated_at = ?, chased_at = NULL
+               updated_at = ?
            WHERE id = ?`,
         )
         .run(host, project, delivery, now, id);
@@ -680,7 +760,7 @@ export class CardStore {
         .prepare(
           `UPDATE cards
            SET state = 'running', holder = 'worker', epoch = ?, claim_token_hash = ?,
-               claim_by = ?, lease_until = ?, updated_at = ?, chased_at = NULL
+               claim_by = ?, lease_until = ?, updated_at = ?
            WHERE id = ?`,
         )
         .run(nextEpoch, hashToken(token), input.claimBy, leaseUntil, now, row.id);
@@ -732,7 +812,7 @@ export class CardStore {
         .prepare(
           `UPDATE cards
            SET state = 'queued', holder = 'runner', claim_token_hash = NULL,
-               claim_by = NULL, lease_until = NULL, updated_at = ?, chased_at = NULL
+               claim_by = NULL, lease_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
         .run(now, id);
@@ -764,7 +844,7 @@ export class CardStore {
           .prepare(
             `UPDATE cards
              SET state = 'done', holder = '', result = ?, claim_token_hash = NULL,
-                 claim_by = NULL, lease_until = NULL, updated_at = ?, chased_at = NULL
+                 claim_by = NULL, lease_until = NULL, updated_at = ?
              WHERE id = ?`,
           )
           .run(input.summary, now, id);
@@ -790,7 +870,7 @@ export class CardStore {
         .prepare(
           `UPDATE cards
            SET state = 'held', holder = ?, result = ?, labels_json = ?, claim_token_hash = NULL,
-               claim_by = NULL, lease_until = NULL, updated_at = ?, chased_at = NULL
+               claim_by = NULL, lease_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
         .run(row.mate, input.summary, JSON.stringify(labels), now, id);
@@ -828,6 +908,7 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
+      CardStore.guardFence(row, input, now);
       const by = input.by ?? "captain";
       const internal = input.internal === true;
       const entry = this.insertEntry({
@@ -867,12 +948,13 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
+      CardStore.guardFence(row, input, now);
       if (row.state === "done" || row.state === "canceled") {
         throw new BoardError(409, "card_terminal", `Card #${String(id)} is ${row.state}`);
       }
       const actor = input.actor ?? (row.holder === "worker" ? row.mate : row.holder);
       const fromHolder = row.holder === "worker" || row.holder === "runner" ? row.mate : row.holder;
-      const targetHolder = input.to ?? this.parentOf(fromHolder);
+      const targetHolder = this.parentOf(fromHolder);
       if (row.state === "held" && row.holder === targetHolder && row.result === reason) {
         return { result: rowToCard(row), events: [] };
       }
@@ -883,7 +965,7 @@ export class CardStore {
           `UPDATE cards
            SET state = 'held', holder = ?, result = ?, labels_json = ?,
                claim_token_hash = NULL, claim_by = NULL, lease_until = NULL,
-               updated_at = ?, chased_at = NULL
+               updated_at = ?
            WHERE id = ?`,
         )
         .run(targetHolder, reason, JSON.stringify(labels), now, id);
@@ -914,6 +996,7 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
+      CardStore.guardFence(row, input, now);
       if (row.state === "done" || row.state === "canceled") {
         throw new BoardError(409, "card_terminal", `Card #${String(id)} is ${row.state}`);
       }
@@ -926,7 +1009,7 @@ export class CardStore {
           `UPDATE cards
            SET state = 'held', holder = ?, result = ?,
                claim_token_hash = NULL, claim_by = NULL, lease_until = NULL,
-               updated_at = ?, chased_at = NULL
+               updated_at = ?
            WHERE id = ?`,
         )
         .run(target, text.length > 0 ? text : row.result, now, id);
@@ -962,18 +1045,18 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
+      CardStore.guardFence(row, input, now);
       if (row.state === "done" || row.state === "canceled") {
         throw new BoardError(409, "card_terminal", `Card #${String(id)} is ${row.state}`);
       }
       const actor = input.actor ?? "captain";
-      const trimmedTo = input.to?.trim() ?? "";
-      const target = trimmedTo.length > 0 ? trimmedTo : row.mate;
+      const target = row.mate;
       this.db
         .prepare(
           `UPDATE cards
            SET state = 'held', holder = ?, result = ?,
                claim_token_hash = NULL, claim_by = NULL, lease_until = NULL,
-               updated_at = ?, chased_at = NULL
+               updated_at = ?
            WHERE id = ?`,
         )
         .run(target, text, now, id);
@@ -1004,6 +1087,7 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
+      CardStore.guardFence(row, input, now);
       if (row.state === "done") return { result: rowToCard(row), events: [] };
       if (row.state === "canceled") {
         throw new BoardError(409, "card_canceled", `Card #${String(id)} is canceled`);
@@ -1015,7 +1099,7 @@ export class CardStore {
           `UPDATE cards
            SET state = 'done', holder = '', result = ?,
                claim_token_hash = NULL, claim_by = NULL, lease_until = NULL,
-               updated_at = ?, chased_at = NULL
+               updated_at = ?
            WHERE id = ?`,
         )
         .run(result.length > 0 ? result : row.result, now, id);
@@ -1054,6 +1138,7 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
+      CardStore.guardFence(row, input, now);
       if (row.state === "canceled") return { result: rowToCard(row), events: [] };
       if (row.state === "done") {
         throw new BoardError(409, "card_done", `Card #${String(id)} is already done`);
@@ -1064,7 +1149,7 @@ export class CardStore {
           `UPDATE cards
            SET state = 'canceled', holder = '', result = ?,
                claim_token_hash = NULL, claim_by = NULL, lease_until = NULL,
-               updated_at = ?, chased_at = NULL
+               updated_at = ?
            WHERE id = ?`,
         )
         .run(reason, now, id);
@@ -1077,16 +1162,19 @@ export class CardStore {
         createdAt: now,
       });
       const card = rowToCard(this.getCardRow(id));
-      const event = this.appendEvent({
-        type: "card.canceled",
-        cardId: id,
-        mate: card.mate,
-        holder: card.mate,
-        actor,
-        payload: { id: card.id, title: card.title, reason },
-        createdAt: now,
-      });
-      return { result: card, events: [event] };
+      const events: BoardEvent[] = [
+        this.appendEvent({
+          type: "card.canceled",
+          cardId: id,
+          mate: card.mate,
+          holder: card.mate,
+          actor,
+          payload: { id: card.id, title: card.title, reason },
+          createdAt: now,
+        }),
+        ...this.holdDependentsOfCanceled(card.id, now),
+      ];
+      return { result: card, events };
     });
   }
 
@@ -1162,11 +1250,8 @@ export class CardStore {
       const staleRows = this.db
         .prepare(
           `${CARD_SELECT}
-           WHERE (
-             (c.state = 'held' AND c.holder != 'captain')
-             OR c.state = 'queued'
-           )
-           AND COALESCE(c.chased_at, c.updated_at) <= ?
+           WHERE ((c.state = 'held' AND c.holder != 'captain') OR c.state = 'queued')
+           AND c.updated_at <= ?
            ORDER BY c.updated_at ASC`,
         )
         .all(cutoff);
@@ -1180,7 +1265,6 @@ export class CardStore {
           readonly ageMs: number;
         }[]
       >();
-      const chasedIds: number[] = [];
 
       for (const raw of staleRows) {
         const row = CardRowSchema.parse(raw);
@@ -1193,11 +1277,6 @@ export class CardStore {
           ageMs: Math.max(0, now - row.updated_at),
         });
         grouped.set(targetHolder, list);
-        chasedIds.push(row.id);
-      }
-
-      for (const cardId of chasedIds) {
-        this.db.prepare("UPDATE cards SET chased_at = ? WHERE id = ?").run(now, cardId);
       }
 
       for (const [holder, cards] of grouped) {
@@ -1219,9 +1298,8 @@ export class CardStore {
   }
 
   public getOverview(): BoardOverview {
-    const all = this.listCards({ state: "all", limit: 500 });
     const counts = {
-      total: all.length,
+      total: 0,
       open: 0,
       needsCaptain: 0,
       held: 0,
@@ -1231,30 +1309,29 @@ export class CardStore {
       done: 0,
       canceled: 0,
     };
-    for (const card of all) {
-      if (card.state === "done") counts.done += 1;
-      else if (card.state === "canceled") counts.canceled += 1;
-      else {
-        counts.open += 1;
-        if (card.state === "running") counts.running += 1;
-        else if (card.state === "queued") counts.queued += 1;
-        else if (card.state === "waiting") counts.waiting += 1;
-        else if (card.state === "held") {
-          counts.held += 1;
-          if (card.holder === "captain") counts.needsCaptain += 1;
-        }
-      }
+    const grouped = this.db
+      .prepare(
+        "SELECT state, holder = 'captain' AS captain, COUNT(*) AS n FROM cards GROUP BY state, captain",
+      )
+      .all();
+    for (const raw of grouped) {
+      const state = CardStateSchema.parse(Reflect.get(raw, "state"));
+      const n = z.number().int().parse(Reflect.get(raw, "n"));
+      counts.total += n;
+      counts[state] += n;
+      if (state !== "done" && state !== "canceled") counts.open += n;
+      if (state === "held" && Reflect.get(raw, "captain") === 1) counts.needsCaptain += n;
     }
     return {
       counts,
       hosts: this.listHosts(),
-      cards: all.filter((card) => card.state !== "done" && card.state !== "canceled"),
+      cards: this.listCards({ state: "open" }).cards,
       parents: this.getParents(),
     };
   }
 
   public getCharter(mate: string): string {
-    const safe = sanitizeMateFile(mate);
+    const safe = parseMateName(mate);
     if (this.dataDir === undefined) {
       return this.memoryCharters.get(safe) ?? "";
     }
@@ -1263,7 +1340,7 @@ export class CardStore {
   }
 
   public setCharter(mate: string, text: string): string {
-    const safe = sanitizeMateFile(mate);
+    const safe = parseMateName(mate);
     if (this.dataDir === undefined) {
       this.memoryCharters.set(safe, text);
       return text;

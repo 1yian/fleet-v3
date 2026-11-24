@@ -6,13 +6,21 @@ import {
   CARD_STATES,
   DELIVERIES,
   ENTRY_KINDS,
+  MateNameSchema,
+  mentionsMate,
   type BoardEvent,
   type CardState,
   type ClaimReceipt,
+  type OptionalFenceInput,
 } from "./types.ts";
 
+const FenceFields = {
+  epoch: z.number().int().positive().optional(),
+  token: z.string().min(1).optional(),
+};
+
 const CreateCardBodySchema = z.object({
-  mate: z.string().min(1),
+  mate: MateNameSchema,
   title: z.string().min(1),
   body: z.string().optional(),
   project: z.string().min(1).optional(),
@@ -20,7 +28,7 @@ const CreateCardBodySchema = z.object({
   delivery: z.enum(DELIVERIES).optional(),
   needs: z.array(z.string()).optional(),
   labels: z.record(z.string(), z.string()).optional(),
-  holder: z.string().min(1).optional(),
+  holder: MateNameSchema.optional(),
   actor: z.string().min(1).optional(),
 });
 
@@ -33,7 +41,7 @@ const QueueCardBodySchema = z.object({
 
 const ClaimBodySchema = z.object({
   host: z.string().min(1),
-  mates: z.array(z.string().min(1)).optional(),
+  mates: z.array(MateNameSchema).optional(),
   leaseSeconds: z.number().int().min(5).max(3600).default(900),
   claimBy: z.string().min(1).default("runner"),
   waitSeconds: z.number().int().min(0).max(60).default(0),
@@ -60,6 +68,7 @@ const FinishBodySchema = z.object({
 });
 
 const EntryBodySchema = z.object({
+  ...FenceFields,
   text: z.string().min(1),
   by: z.string().min(1).optional(),
   internal: z.boolean().optional(),
@@ -67,31 +76,34 @@ const EntryBodySchema = z.object({
 });
 
 const EscalateBodySchema = z.object({
+  ...FenceFields,
   reason: z.string().min(1),
-  to: z.string().min(1).optional(),
   actor: z.string().min(1).optional(),
   kind: z.string().min(1).optional(),
 });
 
 const HandoffBodySchema = z.object({
-  to: z.string().min(1).optional(),
+  ...FenceFields,
+  to: MateNameSchema.optional(),
   text: z.string().optional(),
   actor: z.string().min(1).optional(),
   internal: z.boolean().optional(),
 });
 
 const AnswerBodySchema = z.object({
+  ...FenceFields,
   text: z.string().min(1),
-  to: z.string().min(1).optional(),
   actor: z.string().min(1).optional(),
 });
 
 const CloseBodySchema = z.object({
+  ...FenceFields,
   result: z.string().optional(),
   actor: z.string().min(1).optional(),
 });
 
 const CancelBodySchema = z.object({
+  ...FenceFields,
   reason: z.string().min(1),
   actor: z.string().min(1).optional(),
 });
@@ -107,6 +119,8 @@ const TextBodySchema = z.object({
   text: z.string(),
 });
 
+const REPLAY_BATCH = 500;
+
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
@@ -120,6 +134,16 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   } catch {
     throw new BoardError(400, "invalid_json", "Request body must be valid JSON");
   }
+}
+
+function fenceOf(body: {
+  readonly epoch?: number | undefined;
+  readonly token?: string | undefined;
+}): OptionalFenceInput {
+  return {
+    ...(body.epoch !== undefined ? { epoch: body.epoch } : {}),
+    ...(body.token !== undefined ? { token: body.token } : {}),
+  };
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -140,21 +164,30 @@ function parseStateFilter(value: string | null): CardState | "open" | "all" {
   return matched;
 }
 
+function parseMateFilter(value: string | null): string | null {
+  if (value === null || value.length === 0) return null;
+  const parsed = MateNameSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new BoardError(400, "invalid_mate", `Invalid mate name: "${value}"`);
+  }
+  return parsed.data;
+}
+
 function matchesEventFilter(
   event: BoardEvent,
   holderFilter: string | null,
   mateFilter: string | null,
 ): boolean {
-  if (holderFilter !== null && holderFilter.length > 0) {
+  if (holderFilter !== null) {
     const mentionsHolder =
       event.holder === holderFilter ||
       event.mate === holderFilter ||
       (event.type === "entry.posted" &&
         typeof event.payload["text"] === "string" &&
-        new RegExp(`@${holderFilter}\\b`, "iu").test(event.payload["text"]));
+        mentionsMate(event.payload["text"], holderFilter));
     if (!mentionsHolder) return false;
   }
-  if (mateFilter !== null && mateFilter.length > 0 && event.mate !== mateFilter) {
+  if (mateFilter !== null && event.mate !== mateFilter) {
     return false;
   }
   return true;
@@ -223,8 +256,8 @@ function handleSse(store: CardStore, url: URL, req: IncomingMessage, res: Server
     url.searchParams.get("after") ?? (typeof afterHeader === "string" ? afterHeader : null);
   const afterId =
     afterRaw !== null && /^\d+$/u.test(afterRaw) ? Number(afterRaw) : store.latestEventId();
-  const holderFilter = url.searchParams.get("holder");
-  const mateFilter = url.searchParams.get("mate");
+  const holderFilter = parseMateFilter(url.searchParams.get("holder"));
+  const mateFilter = parseMateFilter(url.searchParams.get("mate"));
 
   res.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
@@ -239,9 +272,13 @@ function handleSse(store: CardStore, url: URL, req: IncomingMessage, res: Server
 
   res.write(": connected\n\n");
   let lastSentId = afterId;
-  for (const event of store.listEventsSince(afterId)) {
-    writeEvent(event);
-    lastSentId = Math.max(lastSentId, event.id);
+  for (;;) {
+    const batch = store.listEventsSince(lastSentId, REPLAY_BATCH);
+    for (const event of batch) {
+      writeEvent(event);
+      lastSentId = Math.max(lastSentId, event.id);
+    }
+    if (batch.length < REPLAY_BATCH) break;
   }
 
   const unsubscribe = store.subscribe((event) => {
@@ -271,6 +308,7 @@ async function handlePostEntry(
   const body = EntryBodySchema.parse(await readJsonBody(req));
   sendJson(res, 201, {
     entry: store.postEntry(cardId, {
+      ...fenceOf(body),
       text: body.text,
       ...(body.by !== undefined ? { by: body.by } : {}),
       ...(body.internal !== undefined ? { internal: body.internal } : {}),
@@ -305,8 +343,8 @@ async function handleEscalateCard(
   const body = EscalateBodySchema.parse(await readJsonBody(req));
   sendJson(res, 200, {
     card: store.escalateCard(cardId, {
+      ...fenceOf(body),
       reason: body.reason,
-      ...(body.to !== undefined ? { to: body.to } : {}),
       ...(body.actor !== undefined ? { actor: body.actor } : {}),
       ...(body.kind !== undefined ? { kind: body.kind } : {}),
     }),
@@ -322,6 +360,7 @@ async function handleHandoffCard(
   const body = HandoffBodySchema.parse(await readJsonBody(req));
   sendJson(res, 200, {
     card: store.handoffCard(cardId, {
+      ...fenceOf(body),
       ...(body.to !== undefined ? { to: body.to } : {}),
       ...(body.text !== undefined ? { text: body.text } : {}),
       ...(body.actor !== undefined ? { actor: body.actor } : {}),
@@ -339,8 +378,8 @@ async function handleAnswerCard(
   const body = AnswerBodySchema.parse(await readJsonBody(req));
   sendJson(res, 200, {
     card: store.answerCard(cardId, {
+      ...fenceOf(body),
       text: body.text,
-      ...(body.to !== undefined ? { to: body.to } : {}),
       ...(body.actor !== undefined ? { actor: body.actor } : {}),
     }),
   });
@@ -387,6 +426,7 @@ async function routeCardTerminalOrFenceAction(
     const body = CloseBodySchema.parse(await readJsonBody(req));
     sendJson(res, 200, {
       card: store.closeCard(cardId, {
+        ...fenceOf(body),
         ...(body.result !== undefined ? { result: body.result } : {}),
         ...(body.actor !== undefined ? { actor: body.actor } : {}),
       }),
@@ -397,6 +437,7 @@ async function routeCardTerminalOrFenceAction(
     const body = CancelBodySchema.parse(await readJsonBody(req));
     sendJson(res, 200, {
       card: store.cancelCard(cardId, {
+        ...fenceOf(body),
         reason: body.reason,
         ...(body.actor !== undefined ? { actor: body.actor } : {}),
       }),
@@ -449,19 +490,23 @@ async function routeCardsCollection(
   res: ServerResponse,
 ): Promise<boolean> {
   if (method === "GET") {
-    const mate = url.searchParams.get("mate") ?? undefined;
-    const holder = url.searchParams.get("holder") ?? undefined;
+    const mate = parseMateFilter(url.searchParams.get("mate"));
+    const holder = parseMateFilter(url.searchParams.get("holder"));
     const state = parseStateFilter(url.searchParams.get("state"));
     const limitRaw = url.searchParams.get("limit");
-    const limit = limitRaw !== null && /^\d+$/u.test(limitRaw) ? Number(limitRaw) : undefined;
-    sendJson(res, 200, {
-      cards: store.listCards({
-        ...(mate !== undefined ? { mate } : {}),
-        ...(holder !== undefined ? { holder } : {}),
+    if (limitRaw !== null && !/^[1-9]\d*$/u.test(limitRaw)) {
+      throw new BoardError(400, "invalid_limit", `Invalid limit: "${limitRaw}"`);
+    }
+    sendJson(
+      res,
+      200,
+      store.listCards({
+        ...(mate !== null ? { mate } : {}),
+        ...(holder !== null ? { holder } : {}),
         state,
-        ...(limit !== undefined ? { limit } : {}),
+        ...(limitRaw !== null ? { limit: Number(limitRaw) } : {}),
       }),
-    });
+    );
     return true;
   }
   if (method === "POST") {
@@ -596,9 +641,8 @@ export interface BoardServerOptions {
   readonly store: CardStore;
   readonly host: string;
   readonly port: number;
-  readonly uiHtml?: string;
-  readonly chaseIntervalMs?: number;
-  readonly staleAfterMs?: number;
+  readonly chaseIntervalMs: number;
+  readonly staleAfterMs: number;
 }
 
 export interface StartedBoardServer {
@@ -608,21 +652,10 @@ export interface StartedBoardServer {
 }
 
 export async function startBoardServer(options: BoardServerOptions): Promise<StartedBoardServer> {
-  const chaseIntervalMs = options.chaseIntervalMs ?? 60_000;
-  const staleAfterMs = options.staleAfterMs ?? 600_000;
-
   const server = createServer((req, res) => {
     void (async () => {
       try {
         const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
-        if (
-          options.uiHtml !== undefined &&
-          (url.pathname === "/" || url.pathname === "/index.html")
-        ) {
-          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-          res.end(options.uiHtml);
-          return;
-        }
         await routeApiRequest(options.store, url, req, res);
       } catch (error) {
         if (res.headersSent) {
@@ -643,13 +676,10 @@ export async function startBoardServer(options: BoardServerOptions): Promise<Sta
     })();
   });
 
-  const chaseTimer =
-    chaseIntervalMs > 0
-      ? setInterval(() => {
-          options.store.sweepStale(staleAfterMs);
-        }, chaseIntervalMs)
-      : undefined;
-  chaseTimer?.unref();
+  const chaseTimer = setInterval(() => {
+    options.store.sweepStale(options.staleAfterMs);
+  }, options.chaseIntervalMs);
+  chaseTimer.unref();
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -667,12 +697,14 @@ export async function startBoardServer(options: BoardServerOptions): Promise<Sta
     server,
     url,
     stop: async () => {
-      if (chaseTimer !== undefined) clearInterval(chaseTimer);
-      await new Promise<void>((resolve) => {
+      clearInterval(chaseTimer);
+      const closed = new Promise<void>((resolve) => {
         server.close(() => {
           resolve();
         });
       });
+      server.closeAllConnections();
+      await closed;
     },
   };
 }

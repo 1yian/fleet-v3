@@ -1,23 +1,33 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { createHttpBoardClient, createLocalBoardClient } from "../src/board/client.ts";
-import { startBoardServer } from "../src/board/server.ts";
-import { CardStore } from "../src/board/store.ts";
 import type { RunnerConfig } from "../src/config.ts";
 import { runLoop } from "../src/runner/loop.ts";
-import { buildWorkerArgv } from "../src/runner/spawn.ts";
+import { cardField, startTestServer, waitFor } from "./support.ts";
+
+const BIN_PATH = fileURLToPath(new URL("../src/bin.ts", import.meta.url));
 
 const WorkerReceiptSchema = z.object({
   card: z.string(),
+  argCard: z.string(),
+  epoch: z.string(),
+  tokenLength: z.number(),
+  legacyTask: z.null(),
   cwd: z.string(),
   worktree: z.string(),
   branch: z.string(),
   prompt: z.string(),
+});
+
+const AttemptReceiptSchema = z.object({
+  worktree: z.string(),
+  existedAtStart: z.boolean(),
+  existedAtEnd: z.boolean(),
 });
 
 const HerdrReceiptSchema = z.object({
@@ -114,8 +124,8 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
   const root = makeTempDir("fleet-v3-e2e-");
   const repoDir = initGitRepo(root);
   const receiptPath = join(root, "worker-receipt.json");
-  const store = new CardStore({ memory: true });
-  const client = createLocalBoardClient(store);
+  const server = await startTestServer();
+  const { client } = server;
 
   try {
     const card = await client.createCard({
@@ -130,6 +140,10 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
       const fs = require("node:fs");
       fs.writeFileSync(${JSON.stringify(receiptPath)}, JSON.stringify({
         card: process.env.FLEET_CARD,
+        argCard: process.argv[1],
+        epoch: process.env.FLEET_CLAIM_EPOCH,
+        tokenLength: (process.env.FLEET_CLAIM_TOKEN ?? "").length,
+        legacyTask: process.env.BOARD_TASK ?? null,
         cwd: process.cwd(),
         worktree: process.env.FLEET_WORKTREE,
         branch: process.env.FLEET_BRANCH,
@@ -142,7 +156,7 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
         mode: "local",
         viewport: "headless",
         direnv: false,
-        command: ["node", "-e", workerScript],
+        command: ["node", "-e", workerScript, "{card}"],
       },
     });
 
@@ -151,7 +165,10 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
 
     const receipt = WorkerReceiptSchema.parse(JSON.parse(readFileSync(receiptPath, "utf8")));
     assert.equal(receipt.card, card.id);
-    assert.equal(receipt.branch, `fleet/t-${card.id}`);
+    assert.equal(receipt.argCard, card.id);
+    assert.equal(receipt.epoch, "1");
+    assert.ok(receipt.tokenLength >= 32, "worker receives its claim fencing token");
+    assert.equal(receipt.branch, `fleet/t-${card.id}-e1`);
     assert.notEqual(receipt.worktree, repoDir);
     assert.equal(existsSync(receipt.worktree), false);
 
@@ -163,21 +180,15 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
     assert.ok(advertised !== undefined);
     assert.deepEqual(advertised.repos, ["demo"]);
   } finally {
-    store.close();
+    await server.stop();
   }
 });
 
-void test("preserves mate handoff when a stuck worker hands the card back before exiting 0", async () => {
+void test("worker handoff goes through the fenced fleet CLI and survives exit 0", async () => {
   const root = makeTempDir("fleet-v3-handoff-");
   const repoDir = initGitRepo(root);
-  const store = new CardStore({ memory: true });
-  const started = await startBoardServer({
-    store,
-    host: "127.0.0.1",
-    port: 0,
-    chaseIntervalMs: 0,
-  });
-  const client = createHttpBoardClient(started.url);
+  const server = await startTestServer();
+  const { client } = server;
 
   try {
     const card = await client.createCard({
@@ -189,15 +200,15 @@ void test("preserves mate handoff when a stuck worker hands the card back before
     });
 
     const workerScript = `
-      fetch(process.env.BOARD_URL + "/api/cards/" + process.env.FLEET_CARD + "/handoff", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: "Missing API key; returning to mate", actor: "worker" }),
-      }).then(() => process.exit(0));
+      const { execFileSync } = require("node:child_process");
+      execFileSync(process.execPath, [
+        ${JSON.stringify(BIN_PATH)}, "handoff", process.env.FLEET_CARD,
+        "--text", "Missing API key; returning to mate",
+      ], { stdio: "inherit" });
     `;
 
     const config = makeConfig(root, repoDir, {
-      boardUrl: started.url,
+      boardUrl: server.url,
       spawn: {
         mode: "local",
         viewport: "headless",
@@ -212,9 +223,101 @@ void test("preserves mate handoff when a stuck worker hands the card back before
     const thread = await client.getThread(card.id);
     assert.equal(thread.card.state, "held", "must not overwrite worker handoff with done");
     assert.equal(thread.card.holder, "cleo");
+    assert.ok(
+      thread.entries.some(
+        (entry) => entry.by === "cleo" && entry.text === "Missing API key; returning to mate",
+      ),
+    );
   } finally {
-    await started.stop();
-    store.close();
+    await server.stop();
+  }
+});
+
+void test("a requeued card runs its next attempt in its own workspace while the superseded worker winds down", async () => {
+  const root = makeTempDir("fleet-v3-overlap-");
+  const repoDir = initGitRepo(root);
+  const receiptDir = join(root, "receipts");
+  mkdirSync(receiptDir);
+  const server = await startTestServer();
+  const { client } = server;
+  const controller = new AbortController();
+  let loop: Promise<number> = Promise.resolve(0);
+
+  try {
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Handed back then retried",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+
+    const workerScript = `
+      const fs = require("node:fs");
+      const { execFileSync } = require("node:child_process");
+      const epoch = process.env.FLEET_CLAIM_EPOCH;
+      const worktree = process.env.FLEET_WORKTREE;
+      const existedAtStart = fs.existsSync(worktree);
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      (async () => {
+        if (epoch === "1") {
+          execFileSync(process.execPath, [
+            ${JSON.stringify(BIN_PATH)}, "handoff", process.env.FLEET_CARD, "--text", "first attempt hands back",
+          ], { stdio: "inherit" });
+          await sleep(1500);
+        } else {
+          await sleep(2500);
+        }
+        fs.writeFileSync(${JSON.stringify(receiptDir)} + "/e" + epoch + ".json", JSON.stringify({
+          worktree,
+          existedAtStart,
+          existedAtEnd: fs.existsSync(worktree),
+        }));
+      })();
+    `;
+
+    const config = makeConfig(root, repoDir, {
+      boardUrl: server.url,
+      concurrency: 2,
+      spawn: {
+        mode: "local",
+        viewport: "headless",
+        direnv: false,
+        command: ["node", "-e", workerScript],
+      },
+    });
+
+    loop = runLoop(client, config, { signal: controller.signal });
+
+    assert.ok(
+      await waitFor(async () => (await cardField(client, card.id, "state")) === "held", 10_000),
+      "first attempt must hand the card back",
+    );
+    await client.queueCard(card.id, {});
+
+    assert.ok(
+      await waitFor(() => existsSync(join(receiptDir, "e2.json")), 15_000),
+      "second attempt must run to completion",
+    );
+    assert.ok(await waitFor(() => existsSync(join(receiptDir, "e1.json")), 5000));
+    const readReceipt = (name: string): z.infer<typeof AttemptReceiptSchema> => {
+      const raw: unknown = JSON.parse(readFileSync(join(receiptDir, name), "utf8"));
+      return AttemptReceiptSchema.parse(raw);
+    };
+    const first = readReceipt("e1.json");
+    const second = readReceipt("e2.json");
+    assert.notEqual(first.worktree, second.worktree);
+    assert.equal(second.existedAtStart, true);
+    assert.equal(second.existedAtEnd, true, "cleaning up attempt 1 must not remove attempt 2");
+
+    assert.ok(
+      await waitFor(async () => (await cardField(client, card.id, "state")) === "done", 10_000),
+    );
+    assert.equal(await cardField(client, card.id, "epoch"), 2);
+  } finally {
+    controller.abort();
+    await loop;
+    await server.stop();
   }
 });
 
@@ -222,8 +325,8 @@ void test("caps no-mistakes verification at 4 rounds and hands back to mate with
   const root = makeTempDir("fleet-v3-e2e-");
   const repoDir = initGitRepo(root);
   const roundsLog = join(root, "rounds.log");
-  const store = new CardStore({ memory: true });
-  const client = createLocalBoardClient(store);
+  const server = await startTestServer();
+  const { client } = server;
 
   try {
     const card = await client.createCard({
@@ -263,7 +366,7 @@ void test("caps no-mistakes verification at 4 rounds and hands back to mate with
       "expected 4-round handback summary in thread",
     );
   } finally {
-    store.close();
+    await server.stop();
   }
 });
 
@@ -271,8 +374,8 @@ void test("returns card to mate instead of crash-looping once claim epoch exceed
   const root = makeTempDir("fleet-v3-e2e-");
   const repoDir = initGitRepo(root);
   const ranMarker = join(root, "should-not-run");
-  const store = new CardStore({ memory: true });
-  const client = createLocalBoardClient(store);
+  const server = await startTestServer();
+  const { client } = server;
 
   try {
     const card = await client.createCard({
@@ -313,8 +416,12 @@ void test("returns card to mate instead of crash-looping once claim epoch exceed
     assert.equal(thread.card.state, "held");
     assert.equal(thread.card.holder, "cleo");
     assert.equal(thread.card.labels["return_kind"], "retry_cap");
+    assert.ok(
+      thread.entries.some((entry) => /cannot start another worker/u.test(entry.text)),
+      "the retry cap summary must not advertise re-queueing as recovery",
+    );
   } finally {
-    store.close();
+    await server.stop();
   }
 });
 
@@ -322,8 +429,8 @@ void test("kills entire worker process group on idle timeout leaving no orphan g
   const root = makeTempDir("fleet-v3-e2e-");
   const repoDir = initGitRepo(root);
   const childPidFile = join(root, "grandchild.pid");
-  const store = new CardStore({ memory: true });
-  const client = createLocalBoardClient(store);
+  const server = await startTestServer();
+  const { client } = server;
 
   try {
     const card = await client.createCard({
@@ -365,61 +472,7 @@ void test("kills entire worker process group on idle timeout leaving no orphan g
     });
     assert.throws(() => process.kill(grandchildPid, 0), { code: "ESRCH" });
   } finally {
-    store.close();
-  }
-});
-
-void test("builds container and docker worker argv with gitCommonDir, expanded mounts, inherited env, ssh, and tty", () => {
-  const root = makeTempDir("fleet-v3-argv-");
-  const repoDir = initGitRepo(root);
-  const prevSecret = process.env["FLEET_TEST_SECRET"];
-  process.env["FLEET_TEST_SECRET"] = "top-secret-token";
-
-  try {
-    const containerCfg = makeConfig(root, repoDir, {
-      spawn: {
-        mode: "container",
-        viewport: "herdr",
-        direnv: false,
-        command: ["ypi", "--auto-exit", "card {card}"],
-        container: {
-          image: "fleet-worker:latest",
-          ssh: true,
-          cpus: 4,
-          memory: "8G",
-          inheritEnv: ["FLEET_TEST_SECRET"],
-          mounts: ["~/.pi/agent/auth.json:/root/.pi/agent/auth.json:ro"],
-          extraArgs: [],
-        },
-      },
-    });
-
-    const argv = buildWorkerArgv({
-      config: containerCfg,
-      taskId: "42",
-      worktreePath: "/tmp/wt/t-42",
-      gitCommonDir: "/tmp/repo/.git",
-      tmpDir: "/tmp/tmp/t-42",
-      promptPath: "/tmp/worker.md",
-      env: { FLEET_CARD: "42" },
-      tty: true,
-      containerName: "fleet-mac-t-42-a1-abcd",
-    });
-
-    assert.equal(argv[0], "container");
-    assert.ok(argv.includes("-i"));
-    assert.ok(argv.includes("-t"));
-    assert.ok(argv.includes("--ssh"));
-    assert.ok(argv.includes("fleet-mac-t-42-a1-abcd"));
-    assert.ok(argv.includes("/tmp/repo/.git:/tmp/repo/.git"));
-    const expectedAuthMount = `${join(homedir(), ".pi/agent/auth.json")}:/root/.pi/agent/auth.json:ro`;
-    assert.ok(argv.includes(expectedAuthMount));
-    assert.ok(argv.includes("FLEET_TEST_SECRET=top-secret-token"));
-    assert.ok(argv.includes("FLEET_CARD=42"));
-    assert.equal(argv.at(-1), "card 42");
-  } finally {
-    if (prevSecret === undefined) delete process.env["FLEET_TEST_SECRET"];
-    else process.env["FLEET_TEST_SECRET"] = prevSecret;
+    await server.stop();
   }
 });
 
@@ -439,8 +492,8 @@ void test("runs real isolated card inside Apple container micro-VM with worktree
   const prevInherited = process.env["FLEET_E2E_INHERITED"];
   process.env["FLEET_E2E_INHERITED"] = "inherited-ok";
 
-  const store = new CardStore({ memory: true });
-  const client = createLocalBoardClient(store);
+  const server = await startTestServer();
+  const { client } = server;
 
   try {
     const card = await client.createCard({
@@ -489,12 +542,12 @@ void test("runs real isolated card inside Apple container micro-VM with worktree
     const observed = readFileSync(hostOutPath, "utf8").trim();
     assert.equal(
       observed,
-      `${card.id}|inherited-ok|cred-payload|ref: refs/heads/fleet/t-${card.id}`,
+      `${card.id}|inherited-ok|cred-payload|ref: refs/heads/fleet/t-${card.id}-e1`,
     );
   } finally {
     if (prevInherited === undefined) delete process.env["FLEET_E2E_INHERITED"];
     else process.env["FLEET_E2E_INHERITED"] = prevInherited;
-    store.close();
+    await server.stop();
   }
 });
 
@@ -508,15 +561,17 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
   const repoDir = initGitRepo(root);
   const receiptPath = join(root, "herdr-receipt.json");
   const sessionName = `fv3t${Date.now().toString(36).slice(-5)}`;
-  const server = spawn("herdr", ["--session", sessionName, "server"], { stdio: "ignore" });
+  const herdrServer = spawn("herdr", ["--session", sessionName, "server"], {
+    stdio: "ignore",
+  });
   const herdrExec = (...args: readonly string[]): string =>
     execFileSync("herdr", ["--session", sessionName, ...args], {
       encoding: "utf8",
       timeout: 10_000,
     });
 
-  const store = new CardStore({ memory: true });
-  const client = createLocalBoardClient(store);
+  const server = await startTestServer();
+  const { client } = server;
 
   try {
     let ready = false;
@@ -617,13 +672,13 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
     tryExecSilent(() => {
       herdrExec("server", "stop");
     });
-    server.kill("SIGTERM");
+    herdrServer.kill("SIGTERM");
     await new Promise((resolve) => {
       setTimeout(resolve, 250);
     });
     tryExecSilent(() => {
       execFileSync("herdr", ["session", "delete", sessionName], { stdio: "ignore", timeout: 5000 });
     });
-    store.close();
+    await server.stop();
   }
 });

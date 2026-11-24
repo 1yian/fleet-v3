@@ -15,6 +15,7 @@ import {
   type Card,
   type CardState,
   type Delivery,
+  type OptionalFenceInput,
 } from "../board/types.ts";
 import { loadConfig } from "../config.ts";
 import { runLoop } from "../runner/loop.ts";
@@ -41,8 +42,9 @@ const FIELD_READERS: Record<OptionalField, (card: Card) => string | number> = {
 
 export interface FleetAxiContext {
   readonly board: () => BoardClient;
-  readonly boardUrl: string | undefined;
+  readonly boardUrl: string;
   readonly actor: string;
+  readonly fence: OptionalFenceInput;
 }
 
 export const COMMAND_HELP: Readonly<Record<string, string>> = {
@@ -97,10 +99,9 @@ Flags:
   --internal         Mark entry internal (quiet coordination note)`,
   escalate: `fleet escalate - hand a card up to the parent mate (or captain)
 Usage:
-  fleet escalate <id> --reason "<evidence, question, and recommendation>" [--to <holder>] [--kind <kind>]
+  fleet escalate <id> --reason "<evidence, question, and recommendation>" [--kind <kind>]
 Flags:
   --reason <text>    Required question, evidence, and recommendation
-  --to <holder>      Optional explicit target holder (default: parent of current holder)
   --kind <kind>      Optional escalation label`,
   handoff: `fleet handoff - pass a card to a mate (default: its home mate)
 Usage:
@@ -111,10 +112,9 @@ Flags:
   --internal         Mark note internal`,
   answer: `fleet answer - answer an escalated card and hand it back to its mate
 Usage:
-  fleet answer <id> --text "<answer>" [--to <mate>]
+  fleet answer <id> --text "<answer>"
 Flags:
-  --text <message>   Required answer text
-  --to <mate>        Optional holder to receive the card (default: card's home mate)`,
+  --text <message>   Required answer text`,
   close: `fleet close - mark a card done and unblock waiting dependents
 Usage:
   fleet close <id> [--result "<summary>"]
@@ -138,7 +138,7 @@ Usage:
   fleet prefs [--set "<preferences text>"]
 Flags:
   --set <text>       Write or replace captain-wide preferences`,
-  serve: `fleet serve - run the minimal 3-table SQLite Card Server (HTTP + SSE + Kanban UI)
+  serve: `fleet serve - run the minimal 3-table SQLite Card Server (HTTP + SSE)
 Usage:
   fleet serve [--dir <path>] [--host <addr>] [--port <n>] [--config <path>]
 Flags:
@@ -231,7 +231,7 @@ export async function homeCommand(
   }
 
   return {
-    board: active.boardUrl ?? "local",
+    board: active.boardUrl,
     counts: countsLine,
     hosts: hosts.length > 0 ? hosts : "0 runner hosts advertised yet",
     cards: cards.length > 0 ? cards : "0 open cards",
@@ -296,14 +296,14 @@ export async function cardsCommand(
 
   const mate = stringFlag(parsed.values, "mate");
   const holder = stringFlag(parsed.values, "holder");
-  const all = await active.board().listCards({
+  const page = await active.board().listCards({
     ...(mate !== undefined ? { mate } : {}),
     ...(holder !== undefined ? { holder } : {}),
     state,
-    limit: Math.max(limit, 200),
+    limit,
   });
 
-  if (all.length === 0) {
+  if (page.total === 0) {
     return {
       cards: `0 ${state} cards found`,
       help: [
@@ -313,13 +313,13 @@ export async function cardsCommand(
     };
   }
 
-  const shown = all.slice(0, limit).map((card) => formatCardRow(card, extraFields));
+  const shown = page.cards.map((card) => formatCardRow(card, extraFields));
   const help = ["Run `fleet view <id>` to inspect a card and its thread"];
-  if (all.length > limit) {
-    help.push(`Run \`fleet cards --limit ${String(all.length)}\` to see all ${String(all.length)}`);
+  if (page.total > shown.length) {
+    help.push(`Run \`fleet cards --limit ${String(page.total)}\` to see all ${String(page.total)}`);
   }
   return {
-    count: `${String(shown.length)} of ${String(all.length)} total`,
+    count: `${String(shown.length)} of ${String(page.total)} total`,
     cards: shown,
     help,
   };
@@ -522,6 +522,7 @@ export async function replyCommand(
   const text = stringFlag(parsed.values, "text") ?? "";
   const internal = boolFlag(parsed.values, "internal");
   const entry = await active.board().postEntry(id, {
+    ...active.fence,
     text,
     by: active.actor,
     internal,
@@ -540,7 +541,6 @@ export async function escalateCommand(
     args,
     {
       reason: { type: "string", required: true },
-      to: { type: "string" },
       kind: { type: "string" },
     },
     helpBlock,
@@ -550,11 +550,10 @@ export async function escalateCommand(
     throw new AxiError("card <id> is required for `escalate`", "VALIDATION_ERROR", [helpBlock]);
   }
   const reason = stringFlag(parsed.values, "reason") ?? "";
-  const to = stringFlag(parsed.values, "to");
   const kind = stringFlag(parsed.values, "kind");
   const card = await active.board().escalateCard(id, {
+    ...active.fence,
     reason,
-    ...(to !== undefined ? { to } : {}),
     ...(kind !== undefined ? { kind } : {}),
     actor: active.actor,
   });
@@ -587,6 +586,7 @@ export async function handoffCommand(
   const text = stringFlag(parsed.values, "text");
   const internal = boolFlag(parsed.values, "internal");
   const card = await active.board().handoffCard(id, {
+    ...active.fence,
     ...(to !== undefined ? { to } : {}),
     ...(text !== undefined ? { text } : {}),
     internal,
@@ -604,10 +604,7 @@ export async function answerCommand(
   const parsed = parseStrictFlags(
     "answer",
     args,
-    {
-      text: { type: "string", required: true },
-      to: { type: "string" },
-    },
+    { text: { type: "string", required: true } },
     helpBlock,
   );
   const [id] = parsed.positionals;
@@ -615,10 +612,9 @@ export async function answerCommand(
     throw new AxiError("card <id> is required for `answer`", "VALIDATION_ERROR", [helpBlock]);
   }
   const text = stringFlag(parsed.values, "text") ?? "";
-  const to = stringFlag(parsed.values, "to");
   const card = await active.board().answerCard(id, {
+    ...active.fence,
     text,
-    ...(to !== undefined ? { to } : {}),
     actor: active.actor,
   });
   return { card: { id: card.id, state: card.state, holder: card.holder } };
@@ -637,6 +633,7 @@ export async function closeCommand(
   }
   const result = stringFlag(parsed.values, "result");
   const card = await active.board().closeCard(id, {
+    ...active.fence,
     ...(result !== undefined ? { result } : {}),
     actor: active.actor,
   });
@@ -660,7 +657,11 @@ export async function cancelCommand(
     throw new AxiError("card <id> is required for `cancel`", "VALIDATION_ERROR", [helpBlock]);
   }
   const reason = stringFlag(parsed.values, "reason") ?? "";
-  const card = await active.board().cancelCard(id, { reason, actor: active.actor });
+  const card = await active.board().cancelCard(id, {
+    ...active.fence,
+    reason,
+    actor: active.actor,
+  });
   return { card: { id: card.id, state: card.state, reason: card.result } };
 }
 

@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { attachFleetPiAdapter, type PiExtensionApi } from "../src/adapters/pi.ts";
-import { createLocalBoardClient } from "../src/board/client.ts";
-import { CardStore } from "../src/board/store.ts";
-import type { RunnerConfig } from "../src/config.ts";
+import { loadConfig, type RunnerConfig } from "../src/config.ts";
 import { ensureMatesUp, listMates, stopMates } from "../src/mates.ts";
+import { startTestServer } from "./support.ts";
 
 const RecordedEnvSchema = z.object({
   mate: z.string(),
@@ -42,6 +41,14 @@ function tryExecSilent(bin: string, args: readonly string[], timeout = 5000): bo
   } catch {
     return false;
   }
+}
+
+function matesYaml(...items: readonly string[]): string[] {
+  return [
+    "mates:",
+    "  items:",
+    ...items.flatMap((entry) => entry.split("|").map((line) => `    ${line}`)),
+  ];
 }
 
 function createMockPi(): {
@@ -116,22 +123,22 @@ afterEach(() => {
 
 void test("unified Pi mate adapter scopes ambient context and wakes on escalations, answers, mentions, and chase", async () => {
   let now = 1_700_000_000_000;
-  const store = new CardStore({
-    memory: true,
+  const server = await startTestServer({
     parents: { jarvis: "captain", cleo: "jarvis", other: "jarvis" },
     now: () => now,
+    chaseIntervalMs: 50,
   });
-  const client = createLocalBoardClient(store);
+  const { client, url } = server;
 
   try {
-    store.setCharter("cleo", "Cleo owns voice AI product work.");
-    const cleoCard = store.createCard({
+    await client.setCharter("cleo", "Cleo owns voice AI product work.");
+    const cleoCard = await client.createCard({
       mate: "cleo",
       title: "Check Hayward transfer rate",
       project: "Cleo",
       actor: "captain",
     });
-    const otherCard = store.createCard({
+    const otherCard = await client.createCard({
       mate: "other",
       title: "Unrelated domain card",
       project: "other",
@@ -140,8 +147,8 @@ void test("unified Pi mate adapter scopes ambient context and wakes on escalatio
 
     const cleoMock = createMockPi();
     const jarvisMock = createMockPi();
-    attachFleetPiAdapter(cleoMock.api, { client, mate: "cleo" });
-    attachFleetPiAdapter(jarvisMock.api, { client, mate: "jarvis" });
+    attachFleetPiAdapter(cleoMock.api, { boardUrl: url, mate: "cleo" });
+    attachFleetPiAdapter(jarvisMock.api, { boardUrl: url, mate: "jarvis" });
 
     await cleoMock.emitStart();
     await jarvisMock.emitStart();
@@ -165,12 +172,11 @@ void test("unified Pi mate adapter scopes ambient context and wakes on escalatio
 
     await delay(40);
 
-    store.postEntry(otherCard.id, { text: "Noise in another domain", by: "other" });
-    store.escalateCard(cleoCard.id, { reason: "Need Jarvis decision", actor: "cleo" });
-    store.postEntry(otherCard.id, { text: "Hey @cleo can you cross-check?", by: "other" });
+    await client.postEntry(otherCard.id, { text: "Noise in another domain", by: "other" });
+    await client.escalateCard(cleoCard.id, { reason: "Need Jarvis decision", actor: "cleo" });
+    await client.postEntry(otherCard.id, { text: "Hey @cleo can you cross-check?", by: "other" });
 
     now += 650_000;
-    store.sweepStale(600_000);
 
     const deadline = Date.now() + 3000;
     while (
@@ -189,8 +195,78 @@ void test("unified Pi mate adapter scopes ambient context and wakes on escalatio
     assert.ok(cleoMock.delivered.some((text) => text.includes("Hey @cleo can you cross-check?")));
     assert.ok(!cleoMock.delivered.some((text) => text.includes("Noise in another domain")));
   } finally {
-    store.close();
+    await server.stop();
   }
+});
+
+void test("Pi mate adapter refuses to start without a configured mate identity", () => {
+  const previous = process.env["FLEET_MATE"];
+  delete process.env["FLEET_MATE"];
+  try {
+    assert.throws(() => {
+      attachFleetPiAdapter(createMockPi().api, { boardUrl: "http://127.0.0.1:1" });
+    }, /requires FLEET_MATE/u);
+  } finally {
+    if (previous !== undefined) process.env["FLEET_MATE"] = previous;
+  }
+});
+
+void test("config load rejects cyclic, duplicated, or unrooted mate hierarchies and review caps above four", () => {
+  const root = makeTempDir("fv3-config-");
+  const base = [
+    "host: h1",
+    "spawn:",
+    "  command: [echo]",
+    "repos:",
+    "  demo:",
+    "    path: /tmp/demo",
+  ];
+  const write = (name: string, extra: readonly string[]): string => {
+    const path = join(root, name);
+    writeFileSync(path, [...base, ...extra].join("\n"));
+    return path;
+  };
+
+  assert.doesNotThrow(() =>
+    loadConfig(
+      write(
+        "ok.yaml",
+        matesYaml("- name: jarvis|  parent: captain", "- name: cleo|  parent: jarvis"),
+      ),
+    ),
+  );
+  assert.throws(
+    () =>
+      loadConfig(
+        write(
+          "cycle.yaml",
+          matesYaml("- name: cleo|  parent: jarvis", "- name: jarvis|  parent: cleo"),
+        ),
+      ),
+    /does not reach captain/u,
+  );
+  assert.throws(
+    () =>
+      loadConfig(
+        write(
+          "dup.yaml",
+          matesYaml("- name: cleo|  parent: captain", "- name: cleo|  parent: captain"),
+        ),
+      ),
+    /duplicated/u,
+  );
+  assert.throws(
+    () => loadConfig(write("missing-parent.yaml", matesYaml("- name: cleo|  parent: ghost"))),
+    /does not reach captain/u,
+  );
+  assert.throws(
+    () => loadConfig(write("punctuation.yaml", matesYaml("- name: ops.qa|  parent: captain"))),
+    /mate names use letters/u,
+  );
+  assert.throws(
+    () => loadConfig(write("rounds.yaml", ["maxReviewRounds: 5"])),
+    /too_big|<=4|Too big/iu,
+  );
 });
 
 void test("fleet mates up idempotently manages permanent interactive panes in Herdr", async (t) => {

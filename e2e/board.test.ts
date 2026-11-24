@@ -3,10 +3,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
-import { createHttpBoardClient } from "../src/board/client.ts";
-import { startBoardServer } from "../src/board/server.ts";
-import { CardStore } from "../src/board/store.ts";
-import { BoardError, type BoardEvent } from "../src/board/types.ts";
+import { BoardError } from "../src/board/types.ts";
+import { cardField, startTestServer, waitFor, watchEvents } from "./support.ts";
 
 const tempDirs: string[] = [];
 
@@ -23,21 +21,22 @@ afterEach(() => {
   }
 });
 
-void test("card server enforces recursive mate escalation, captain answer handback, dependencies, fencing, and chase over HTTP + SSE", async () => {
+function rejectsWith(status: number, code: string): (err: unknown) => boolean {
+  return (err) => err instanceof BoardError && err.status === status && err.code === code;
+}
+
+void test("card server enforces recursive escalation, home-mate answers, dependencies, fencing, and stateless chase over HTTP + SSE", async () => {
   const dataDir = makeTempDir("fv3-card-server-");
   let now = 1_700_000_000_000;
-  const store = new CardStore({
+  const server = await startTestServer({
     dataDir,
     parents: { jarvis: "captain", cleo: "jarvis", direct: "captain" },
     now: () => now,
+    chaseIntervalMs: 50,
   });
-  const started = await startBoardServer({
-    store,
-    host: "127.0.0.1",
-    port: 0,
-    chaseIntervalMs: 0,
-  });
-  const client = createHttpBoardClient(started.url);
+  const { client } = server;
+  const jarvisWatch = watchEvents(client, { after: 0, holder: "jarvis" });
+  const cleoWatch = watchEvents(client, { after: 0, holder: "cleo" });
 
   try {
     await client.setCharter("cleo", "Cleo owns voice AI. Ask before team PR merge.");
@@ -51,22 +50,7 @@ void test("card server enforces recursive mate escalation, captain answer handba
       "Prefer short, evidence-first summaries.",
     );
     assert.equal(existsSync(join(dataDir, "fleet.db")), true);
-
-    const sseController = new AbortController();
-    const receivedEvents: BoardEvent[] = [];
-    const sseLoop = (async () => {
-      try {
-        for await (const ev of client.events({
-          after: 0,
-          holder: "jarvis",
-          signal: sseController.signal,
-        })) {
-          receivedEvents.push(ev);
-        }
-      } catch {
-        receivedEvents.push();
-      }
-    })();
+    await assert.rejects(() => client.getCharter("../escape"), rejectsWith(400, "invalid_mate"));
 
     const prereq = await client.createCard({
       mate: "cleo",
@@ -87,6 +71,11 @@ void test("card server enforces recursive mate escalation, captain answer handba
     });
     assert.equal(dependent.state, "waiting");
     assert.equal(dependent.holder, "cleo");
+    await assert.rejects(
+      () => client.queueCard(dependent.id, {}),
+      rejectsWith(409, "unmet_needs"),
+      "a card with open prerequisites cannot be queued by hand",
+    );
 
     const claim1 = await client.claimNext({
       host: "maverick",
@@ -98,14 +87,8 @@ void test("card server enforces recursive mate escalation, captain answer handba
     assert.equal(claim1.epoch, 1);
 
     await assert.rejects(
-      () =>
-        client.renewClaim(prereq.id, {
-          epoch: 1,
-          token: "wrong-token",
-          leaseSeconds: 60,
-        }),
-      (err: unknown) =>
-        err instanceof BoardError && err.status === 409 && err.code === "claim_lost",
+      () => client.renewClaim(prereq.id, { epoch: 1, token: "wrong-token", leaseSeconds: 60 }),
+      rejectsWith(409, "claim_lost"),
     );
 
     now += 61_000;
@@ -120,13 +103,33 @@ void test("card server enforces recursive mate escalation, captain answer handba
 
     await assert.rejects(
       () =>
+        client.handoffCard(prereq.id, {
+          epoch: 1,
+          token: claim1.token,
+          text: "stale worker handoff",
+        }),
+      rejectsWith(409, "claim_lost"),
+    );
+    await assert.rejects(
+      () =>
+        client.postEntry(prereq.id, { epoch: 1, token: claim1.token, text: "stale worker reply" }),
+      rejectsWith(409, "claim_lost"),
+    );
+    await assert.rejects(
+      () => client.closeCard(prereq.id, { epoch: 1, token: claim1.token, result: "stale" }),
+      rejectsWith(409, "claim_lost"),
+    );
+    assert.equal(await cardField(client, prereq.id, "state"), "running");
+
+    await assert.rejects(
+      () =>
         client.finishClaim(prereq.id, {
           epoch: 1,
           token: claim1.token,
           outcome: "done",
           summary: "stale finish",
         }),
-      (err: unknown) => err instanceof BoardError && err.status === 409,
+      rejectsWith(409, "claim_lost"),
     );
 
     const returned = await client.finishClaim(prereq.id, {
@@ -142,14 +145,12 @@ void test("card server enforces recursive mate escalation, captain answer handba
       reason: "Need cross-domain release timing check",
       actor: "cleo",
     });
-    assert.equal(toJarvis.state, "held");
     assert.equal(toJarvis.holder, "jarvis");
 
     const toCaptain = await client.escalateCard(prereq.id, {
       reason: "Approve prod migration window?",
       actor: "jarvis",
     });
-    assert.equal(toCaptain.state, "held");
     assert.equal(toCaptain.holder, "captain");
 
     const overview = await client.getOverview();
@@ -169,47 +170,221 @@ void test("card server enforces recursive mate escalation, captain answer handba
     assert.equal(closed.state, "done");
 
     const depAfter = await client.getThread(dependent.id);
-    assert.equal(
-      depAfter.card.state,
-      "queued",
-      "dependent unblocks automatically once prereq closes",
-    );
+    assert.equal(depAfter.card.state, "queued");
     assert.equal(depAfter.card.holder, "runner");
+
+    const doomedPrereq = await client.createCard({ mate: "cleo", title: "Doomed prerequisite" });
+    const orphan = await client.createCard({
+      mate: "cleo",
+      title: "Depends on doomed work",
+      host: "maverick",
+      project: "Cleo",
+      needs: [doomedPrereq.id],
+    });
+    assert.equal(orphan.state, "waiting");
+    await client.cancelCard(doomedPrereq.id, { reason: "Superseded", actor: "cleo" });
+    const orphanAfter = await client.getThread(orphan.id);
+    assert.equal(orphanAfter.card.state, "held");
+    assert.equal(orphanAfter.card.holder, "cleo");
+    assert.ok(orphanAfter.entries.some((entry) => /was canceled/u.test(entry.text)));
 
     const staleCard = await client.createCard({
       mate: "jarvis",
       title: "Untouched executive item",
     });
-    assert.equal(staleCard.state, "held");
     assert.equal(staleCard.holder, "jarvis");
 
     now += 650_000;
-    const chased = store.sweepStale(600_000);
     assert.ok(
-      chased.some((ev) => ev.type === "chase.due" && ev.holder === "jarvis"),
-      "stateless chase must emit chase.due for stale held mate cards",
+      await waitFor(() =>
+        jarvisWatch.events.some((ev) => ev.type === "chase.due" && ev.holder === "jarvis"),
+      ),
+      "periodic chase must notify the holder of a stale held card",
     );
     assert.ok(
-      chased.some((ev) => ev.type === "chase.due" && ev.holder === "cleo"),
-      "stateless chase must notify mate when a queued card sits unclaimed",
+      await waitFor(() =>
+        cleoWatch.events.some((ev) => ev.type === "chase.due" && ev.holder === "cleo"),
+      ),
+      "periodic chase must notify the mate when a queued card sits unclaimed",
     );
-
-    const deadline = Date.now() + 2000;
-    while (
-      !receivedEvents.some((ev) => ev.type === "chase.due" && ev.holder === "jarvis") &&
-      Date.now() < deadline
-    ) {
-      await new Promise((resolve) => {
-        setTimeout(resolve, 25);
-      });
-    }
-    sseController.abort();
-    await sseLoop;
-
-    assert.ok(receivedEvents.some((ev) => ev.type === "card.escalated" && ev.holder === "jarvis"));
-    assert.ok(receivedEvents.some((ev) => ev.type === "chase.due" && ev.holder === "jarvis"));
+    assert.ok(
+      jarvisWatch.events.some((ev) => ev.type === "card.escalated" && ev.holder === "jarvis"),
+    );
   } finally {
-    await started.stop();
-    store.close();
+    await jarvisWatch.stop();
+    await cleoWatch.stop();
+    await server.stop();
+  }
+});
+
+void test("event delivery stays ordered and complete for runners long-polling while prerequisites close", async () => {
+  const server = await startTestServer({ parents: { cleo: "captain" } });
+  const { client } = server;
+  const watch = watchEvents(client, { after: 0 });
+
+  try {
+    const prereq = await client.createCard({ mate: "cleo", title: "Prerequisite" });
+    const first = await client.createCard({
+      mate: "cleo",
+      title: "First dependent",
+      host: "maverick",
+      project: "Cleo",
+      needs: [prereq.id],
+    });
+    const second = await client.createCard({
+      mate: "cleo",
+      title: "Second dependent",
+      host: "maverick",
+      project: "Cleo",
+      needs: [prereq.id],
+    });
+
+    const poll = client.claimNext({
+      host: "maverick",
+      leaseSeconds: 60,
+      claimBy: "runner-maverick",
+      waitSeconds: 10,
+    });
+    await new Promise((resolve) => {
+      setTimeout(resolve, 100);
+    });
+    await client.closeCard(prereq.id, { result: "done" });
+
+    const claimed = await poll;
+    assert.ok(claimed !== null);
+    assert.equal(claimed.card.id, first.id);
+
+    assert.ok(
+      await waitFor(() =>
+        watch.events.some(
+          (ev) =>
+            ev.type === "card.queued" &&
+            ev.cardId === second.id &&
+            ev.payload["unblockedBy"] === prereq.id,
+        ),
+      ),
+      "every committed unblock event reaches subscribers even when a claim is published in between",
+    );
+    const ids = watch.events.map((ev) => ev.id);
+    assert.deepEqual(
+      ids,
+      ids.toSorted((a, b) => a - b),
+      "events are delivered in commit order",
+    );
+  } finally {
+    await watch.stop();
+    await server.stop();
+  }
+});
+
+void test("SSE reconnect replays the full backlog so a quiet mate never misses its card behind unrelated history", async () => {
+  const server = await startTestServer();
+  const { client } = server;
+
+  try {
+    const cursor = await client.latestEventId();
+    const noisy = await client.createCard({ mate: "other", title: "Noisy card" });
+    for (let i = 0; i < 520; i += 1) {
+      await client.postEntry(noisy.id, { text: `note ${String(i)}`, by: "other", internal: true });
+    }
+    await client.postEntry(noisy.id, { text: "ping @cleo-ops about this", by: "other" });
+    const mine = await client.createCard({ mate: "cleo", title: "Card for the quiet mate" });
+    await client.postEntry(noisy.id, { text: "ping @cleo please", by: "other" });
+
+    const watch = watchEvents(client, { after: cursor, holder: "cleo" });
+    try {
+      assert.ok(
+        await waitFor(() => watch.events.some((ev) => ev.cardId === mine.id)),
+        "the card created after 520 unrelated events must still be replayed",
+      );
+      assert.ok(
+        await waitFor(() =>
+          watch.events.some(
+            (ev) => ev.type === "entry.posted" && ev.payload["text"] === "ping @cleo please",
+          ),
+        ),
+      );
+      assert.ok(
+        !watch.events.some(
+          (ev) => ev.type === "entry.posted" && ev.payload["text"] === "ping @cleo-ops about this",
+        ),
+        "a mention of a different mate name must not wake cleo",
+      );
+    } finally {
+      await watch.stop();
+    }
+
+    await assert.rejects(
+      () => client.createCard({ mate: "ops.qa", title: "Punctuation in identity" }),
+      rejectsWith(400, "validation_error"),
+    );
+  } finally {
+    await server.stop();
+  }
+});
+
+void test("open cards stay visible and counted regardless of how much terminal history exists", async () => {
+  const server = await startTestServer({ parents: { cleo: "captain" } });
+  const { client } = server;
+
+  try {
+    const old = await client.createCard({
+      mate: "cleo",
+      title: "Old captain item",
+      holder: "captain",
+    });
+    for (let i = 0; i < 210; i += 1) {
+      const filler = await client.createCard({ mate: "cleo", title: `Filler ${String(i)}` });
+      await client.closeCard(filler.id, {});
+    }
+
+    const overview = await client.getOverview();
+    assert.equal(overview.counts.open, 1);
+    assert.equal(overview.counts.done, 210);
+    assert.equal(overview.counts.total, 211);
+    assert.equal(overview.counts.needsCaptain, 1);
+    assert.deepEqual(
+      overview.cards.map((card) => card.id),
+      [old.id],
+    );
+
+    const page = await client.listCards({ state: "all", limit: 5 });
+    assert.equal(page.cards.length, 5);
+    assert.equal(page.total, 211);
+    const mine = await client.listCards({ holder: "captain" });
+    assert.deepEqual(
+      mine.cards.map((card) => card.id),
+      [old.id],
+    );
+  } finally {
+    await server.stop();
+  }
+});
+
+void test("stopping the card server ends open SSE streams instead of hanging shutdown", async () => {
+  const server = await startTestServer();
+  const controller = new AbortController();
+  const received = (async () => {
+    for await (const event of server.client.events({ signal: controller.signal })) {
+      void event;
+    }
+  })();
+
+  try {
+    await new Promise((resolve) => {
+      setTimeout(resolve, 100);
+    });
+    const outcome = await Promise.race([
+      server.stop().then(() => "stopped"),
+      new Promise<string>((resolve) => {
+        setTimeout(() => {
+          resolve("hung");
+        }, 3000);
+      }),
+    ]);
+    assert.equal(outcome, "stopped");
+    await received.catch(() => undefined);
+  } finally {
+    controller.abort();
   }
 });

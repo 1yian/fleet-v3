@@ -196,8 +196,8 @@ export const KANBAN_HTML = `<!doctype html>
       <div class="hosts" id="hosts"></div>
     </div>
     <div class="top-actions">
-      <input class="search" id="search" placeholder="Filter cards..." oninput="renderBoard()">
-      <button class="btn btn-primary" onclick="openNewModal()">+ New card</button>
+      <input class="search" id="search" placeholder="Filter cards...">
+      <button class="btn btn-primary" id="open-new">+ New card</button>
     </div>
   </header>
 
@@ -205,30 +205,30 @@ export const KANBAN_HTML = `<!doctype html>
   <main class="board" id="board"></main>
 </div>
 
-<div class="backdrop" id="drawer-backdrop" onclick="if(event.target===this)closeDrawer()">
+<div class="backdrop" id="drawer-backdrop">
   <aside class="drawer">
     <div class="drawer-head">
       <div style="min-width:0">
         <div class="card-top" id="drawer-meta"></div>
         <h2 class="drawer-title" id="drawer-title"></h2>
       </div>
-      <button class="btn btn-ghost" onclick="closeDrawer()">Close</button>
+      <button class="btn btn-ghost" data-action="close-drawer">Close</button>
     </div>
     <div class="drawer-body" id="drawer-body"></div>
     <div class="drawer-foot" id="drawer-foot"></div>
   </aside>
 </div>
 
-<div class="modal-backdrop" id="new-modal" onclick="if(event.target===this)closeNewModal()">
-  <form class="modal" onsubmit="submitNewCard(event)">
+<div class="modal-backdrop" id="new-modal">
+  <form class="modal" id="new-form">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <strong style="font-size:16px">New card</strong>
-      <button type="button" class="btn btn-ghost" onclick="closeNewModal()">Close</button>
+      <button type="button" class="btn btn-ghost" data-action="close-new">Close</button>
     </div>
     <div class="grid-2">
       <div class="field">
         <label>Mate</label>
-        <input id="nc-mate" value="jarvis" list="mate-list" required>
+        <input id="nc-mate" placeholder="home mate name" list="mate-list" pattern="[A-Za-z0-9][A-Za-z0-9_\\-]*" required>
         <datalist id="mate-list"></datalist>
       </div>
       <div class="field">
@@ -261,7 +261,7 @@ export const KANBAN_HTML = `<!doctype html>
       <textarea id="nc-body" rows="3" placeholder="Context, links, constraints..."></textarea>
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px">
-      <button type="button" class="btn" onclick="closeNewModal()">Cancel</button>
+      <button type="button" class="btn" data-action="close-new">Cancel</button>
       <button type="submit" class="btn btn-primary">Create card</button>
     </div>
   </form>
@@ -272,9 +272,10 @@ const API = "/api";
 let allCards = [];
 let hosts = [];
 let parents = {};
-let activeMate = "all";
+let activeMate = null;
 let openCardId = null;
 let showInternal = false;
+let footKey = "";
 
 const COLS = [
   { key: "captain", title: "Needs you", color: "var(--amber)", match: c => c.state === "held" && c.holder === "captain" },
@@ -283,6 +284,8 @@ const COLS = [
   { key: "queued", title: "Queued", color: "var(--sky)", match: c => c.state === "queued" || c.state === "waiting" },
   { key: "done", title: "Done", color: "var(--dim)", match: c => c.state === "done" },
 ];
+
+function $(id) { return document.getElementById(id); }
 
 function esc(s) {
   return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
@@ -310,38 +313,41 @@ async function api(path, init = {}) {
   return res.json();
 }
 
+function post(path, payload) {
+  return api(path, { method: "POST", body: JSON.stringify(payload) });
+}
+
 async function refresh() {
   try {
-    const [cardsRes, overview] = await Promise.all([
-      api("/cards?state=all&limit=200"),
+    const [overview, done] = await Promise.all([
       api("/overview"),
+      api("/cards?state=done&limit=50"),
     ]);
-    allCards = cardsRes.cards || [];
+    allCards = overview.cards.concat(done.cards);
     hosts = overview.hosts || [];
     parents = overview.parents || {};
-    document.getElementById("live-dot").classList.remove("offline");
+    $("live-dot").classList.remove("offline");
     renderHosts();
     renderFilters();
     renderBoard();
     if (openCardId) await loadDrawer(openCardId);
   } catch {
-    document.getElementById("live-dot").classList.add("offline");
+    $("live-dot").classList.add("offline");
   }
 }
 
 function renderHosts() {
-  const el = document.getElementById("hosts");
-  el.innerHTML = hosts.map(h =>
+  $("hosts").innerHTML = hosts.map(h =>
     '<span class="host-pill"><b>' + esc(h.host) + '</b> ' + esc(h.mode) + ' · ' + h.repos.length + ' repos</span>'
   ).join("");
-  const hostSel = document.getElementById("nc-host");
+  const hostSel = $("nc-host");
   const current = hostSel.value;
   hostSel.innerHTML = '<option value="">None (mate handles)</option>' +
     hosts.map(h => '<option value="' + esc(h.host) + '">' + esc(h.host) + '</option>').join("");
   hostSel.value = current;
   const repoSet = new Set();
   for (const h of hosts) for (const r of h.repos) repoSet.add(r);
-  document.getElementById("repo-list").innerHTML = [...repoSet].sort().map(r => '<option value="' + esc(r) + '"></option>').join("");
+  $("repo-list").innerHTML = [...repoSet].sort().map(r => '<option value="' + esc(r) + '"></option>').join("");
 }
 
 function renderFilters() {
@@ -352,32 +358,25 @@ function renderFilters() {
     counts.set(c.mate, (counts.get(c.mate) || 0) + 1);
   }
   const mates = [...counts.keys()].sort();
-  document.getElementById("mate-list").innerHTML = mates.map(m => '<option value="' + esc(m) + '"></option>').join("");
+  $("mate-list").innerHTML = mates.map(m => '<option value="' + esc(m) + '"></option>').join("");
   const totalOpen = allCards.filter(c => c.state !== "done" && c.state !== "canceled").length;
-  const pills = ['<button class="pill ' + (activeMate === "all" ? "active" : "") + '" onclick="setMate(\\'all\\')">All <span class="cnt">' + totalOpen + '</span></button>'];
+  const pills = ['<button class="pill ' + (activeMate === null ? "active" : "") + '" data-action="set-mate">All <span class="cnt">' + totalOpen + '</span></button>'];
   for (const m of mates) {
-    pills.push('<button class="pill ' + (activeMate === m ? "active" : "") + '" onclick="setMate(\\'' + esc(m) + '\\')">' + esc(m) + ' <span class="cnt">' + counts.get(m) + '</span></button>');
+    pills.push('<button class="pill ' + (activeMate === m ? "active" : "") + '" data-action="set-mate" data-mate="' + esc(m) + '">' + esc(m) + ' <span class="cnt">' + counts.get(m) + '</span></button>');
   }
-  document.getElementById("filters").innerHTML = pills.join("");
-}
-
-function setMate(mate) {
-  activeMate = mate;
-  renderFilters();
-  renderBoard();
+  $("filters").innerHTML = pills.join("");
 }
 
 function renderBoard() {
-  const q = document.getElementById("search").value.trim().toLowerCase();
+  const q = $("search").value.trim().toLowerCase();
   const visible = allCards.filter(c => {
     if (c.state === "canceled") return false;
-    if (activeMate !== "all" && c.mate !== activeMate) return false;
+    if (activeMate !== null && c.mate !== activeMate) return false;
     if (!q) return true;
     return (c.title + " " + c.body + " " + c.mate + " " + c.holder + " " + (c.project || "") + " #" + c.id).toLowerCase().includes(q);
   });
 
-  const boardEl = document.getElementById("board");
-  boardEl.innerHTML = COLS.map(col => {
+  $("board").innerHTML = COLS.map(col => {
     const items = visible.filter(col.match);
     const cardsHtml = items.length === 0
       ? '<div class="col-empty">Nothing here</div>'
@@ -391,7 +390,7 @@ function renderBoard() {
           const reasonHtml = c.state === "held" && c.result
             ? '<div class="card-reason">' + esc(c.result.slice(0, 180)) + '</div>'
             : "";
-          return '<article class="card ' + esc(cls) + '" onclick="openDrawer(\\'' + esc(c.id) + '\\')">'
+          return '<article class="card ' + esc(cls) + '" data-action="open-card" data-id="' + esc(c.id) + '">'
             + '<div class="card-top"><span class="card-domain">' + esc(c.mate) + '</span><span>#' + esc(c.id) + ' · ' + ago(c.updatedAt) + '</span></div>'
             + '<div class="card-title">' + esc(c.title) + '</div>'
             + reasonHtml
@@ -404,21 +403,24 @@ function renderBoard() {
 
 async function openDrawer(id) {
   openCardId = id;
-  document.getElementById("drawer-backdrop").classList.add("open");
+  footKey = "";
+  $("drawer-backdrop").classList.add("open");
   await loadDrawer(id);
 }
 
 function closeDrawer() {
   openCardId = null;
-  document.getElementById("drawer-backdrop").classList.remove("open");
+  footKey = "";
+  $("drawer-backdrop").classList.remove("open");
 }
 
 async function loadDrawer(id) {
   const { card, entries } = await api("/cards/" + encodeURIComponent(id));
-  document.getElementById("drawer-meta").innerHTML =
+  if (openCardId !== id) return;
+  $("drawer-meta").innerHTML =
     '<span class="card-domain">' + esc(card.mate) + '</span>'
     + '<span>#' + esc(card.id) + ' · ' + esc(card.state) + (card.holder ? ' · ball: ' + esc(card.holder) : '') + '</span>';
-  document.getElementById("drawer-title").textContent = card.title;
+  $("drawer-title").textContent = card.title;
 
   const shownEntries = entries.filter(e => showInternal || !e.internal);
   const parts = [];
@@ -430,7 +432,7 @@ async function loadDrawer(id) {
   }
   parts.push(
     '<div class="thread-head"><span>Thread (' + shownEntries.length + '/' + entries.length + ')</span>'
-    + '<button class="btn btn-ghost" style="padding:2px 8px;font-size:12px" onclick="toggleInternal()">' + (showInternal ? "Hide internal" : "Show internal") + '</button></div>'
+    + '<button class="btn btn-ghost" style="padding:2px 8px;font-size:12px" data-action="toggle-internal">' + (showInternal ? "Hide internal" : "Show internal") + '</button></div>'
   );
   parts.push(shownEntries.map(e =>
     '<div class="reply ' + (e.internal ? "internal" : "") + '">'
@@ -438,10 +440,16 @@ async function loadDrawer(id) {
     + '<div class="prose">' + linkify(e.text) + '</div>'
     + '</div>'
   ).join("") || '<div class="col-empty">No entries yet</div>');
-  document.getElementById("drawer-body").innerHTML = parts.join("");
+  const bodyEl = $("drawer-body");
+  const scrollTop = bodyEl.scrollTop;
+  bodyEl.innerHTML = parts.join("");
+  bodyEl.scrollTop = scrollTop;
 
   const isOpen = card.state !== "done" && card.state !== "canceled";
-  const foot = document.getElementById("drawer-foot");
+  const nextFootKey = card.id + ":" + card.mate + ":" + isOpen;
+  if (nextFootKey === footKey) return;
+  footKey = nextFootKey;
+  const foot = $("drawer-foot");
   if (!isOpen) {
     foot.innerHTML = '<div style="color:var(--muted);font-size:12px">Card is ' + esc(card.state) + '.</div>';
     return;
@@ -450,96 +458,86 @@ async function loadDrawer(id) {
     '<textarea class="textarea" id="drawer-reply" placeholder="Reply or answer..."></textarea>'
     + '<div class="foot-row">'
     + '<div style="display:flex;gap:8px">'
-    + '<button class="btn btn-amber" onclick="answerCard(\\'' + esc(card.id) + '\\')">Answer &amp; hand to ' + esc(card.mate) + '</button>'
-    + '<button class="btn" onclick="replyCard(\\'' + esc(card.id) + '\\')">Reply</button>'
+    + '<button class="btn btn-amber" data-action="answer" data-id="' + esc(card.id) + '">Answer &amp; hand to ' + esc(card.mate) + '</button>'
+    + '<button class="btn" data-action="reply" data-id="' + esc(card.id) + '">Reply</button>'
     + '</div>'
     + '<div style="display:flex;gap:8px">'
-    + '<button class="btn btn-ghost" onclick="closeCard(\\'' + esc(card.id) + '\\')">Close</button>'
-    + '<button class="btn btn-danger" onclick="cancelCard(\\'' + esc(card.id) + '\\')">Cancel</button>'
+    + '<button class="btn btn-ghost" data-action="close-card" data-id="' + esc(card.id) + '">Close</button>'
+    + '<button class="btn btn-danger" data-action="cancel-card" data-id="' + esc(card.id) + '">Cancel</button>'
     + '</div>'
     + '</div>';
 }
 
-function toggleInternal() {
-  showInternal = !showInternal;
-  if (openCardId) loadDrawer(openCardId);
+function draftText() {
+  return $("drawer-reply").value.trim();
 }
 
-async function replyCard(id) {
-  const el = document.getElementById("drawer-reply");
-  const text = el.value.trim();
+async function submitDraft(id, path, payload) {
+  const text = draftText();
   if (!text) return;
-  await api("/cards/" + encodeURIComponent(id) + "/entries", {
-    method: "POST",
-    body: JSON.stringify({ text, by: "captain" }),
-  });
-  el.value = "";
-  await refresh();
-}
-
-async function answerCard(id) {
-  const el = document.getElementById("drawer-reply");
-  const text = el.value.trim();
-  if (!text) return;
-  await api("/cards/" + encodeURIComponent(id) + "/answer", {
-    method: "POST",
-    body: JSON.stringify({ text, actor: "captain" }),
-  });
-  el.value = "";
-  await refresh();
-}
-
-async function closeCard(id) {
-  await api("/cards/" + encodeURIComponent(id) + "/close", {
-    method: "POST",
-    body: JSON.stringify({ actor: "captain" }),
-  });
-  await refresh();
-}
-
-async function cancelCard(id) {
-  const reason = prompt("Cancel reason?") || "Canceled from board";
-  await api("/cards/" + encodeURIComponent(id) + "/cancel", {
-    method: "POST",
-    body: JSON.stringify({ reason, actor: "captain" }),
-  });
+  await post("/cards/" + encodeURIComponent(id) + path, payload(text));
+  $("drawer-reply").value = "";
   await refresh();
 }
 
 function openNewModal() {
-  document.getElementById("new-modal").classList.add("open");
-  document.getElementById("nc-title").focus();
+  $("new-modal").classList.add("open");
+  $("nc-title").focus();
 }
 
 function closeNewModal() {
-  document.getElementById("new-modal").classList.remove("open");
+  $("new-modal").classList.remove("open");
 }
 
 async function submitNewCard(e) {
   e.preventDefault();
-  const mate = document.getElementById("nc-mate").value.trim();
-  const title = document.getElementById("nc-title").value.trim();
-  const body = document.getElementById("nc-body").value.trim();
-  const host = document.getElementById("nc-host").value.trim();
-  const project = document.getElementById("nc-project").value.trim();
-  const delivery = document.getElementById("nc-delivery").value;
-  await api("/cards", {
-    method: "POST",
-    body: JSON.stringify({
-      mate,
-      title,
-      ...(body ? { body } : {}),
-      ...(host ? { host } : {}),
-      ...(project ? { project } : {}),
-      ...(host && project ? { delivery } : {}),
-      actor: "captain",
-    }),
+  const mate = $("nc-mate").value.trim();
+  const title = $("nc-title").value.trim();
+  const body = $("nc-body").value.trim();
+  const host = $("nc-host").value.trim();
+  const project = $("nc-project").value.trim();
+  const delivery = $("nc-delivery").value;
+  await post("/cards", {
+    mate,
+    title,
+    ...(body ? { body } : {}),
+    ...(host ? { host } : {}),
+    ...(project ? { project } : {}),
+    ...(host && project ? { delivery } : {}),
+    actor: "captain",
   });
-  document.getElementById("nc-title").value = "";
-  document.getElementById("nc-body").value = "";
+  $("nc-title").value = "";
+  $("nc-body").value = "";
   closeNewModal();
   await refresh();
 }
+
+const ACTIONS = {
+  "set-mate": data => { activeMate = data.mate ?? null; renderFilters(); renderBoard(); },
+  "open-card": data => openDrawer(data.id),
+  "close-drawer": () => closeDrawer(),
+  "close-new": () => closeNewModal(),
+  "toggle-internal": () => { showInternal = !showInternal; if (openCardId) return loadDrawer(openCardId); },
+  "answer": data => submitDraft(data.id, "/answer", text => ({ text, actor: "captain" })),
+  "reply": data => submitDraft(data.id, "/entries", text => ({ text, by: "captain" })),
+  "close-card": async data => { await post("/cards/" + encodeURIComponent(data.id) + "/close", { actor: "captain" }); await refresh(); },
+  "cancel-card": async data => {
+    const reason = prompt("Cancel reason?") || "Canceled from board";
+    await post("/cards/" + encodeURIComponent(data.id) + "/cancel", { reason, actor: "captain" });
+    await refresh();
+  },
+};
+
+document.addEventListener("click", e => {
+  const el = e.target.closest("[data-action]");
+  const action = el && ACTIONS[el.dataset.action];
+  if (action) action(el.dataset);
+});
+$("drawer-backdrop").addEventListener("click", e => { if (e.target === e.currentTarget) closeDrawer(); });
+$("new-modal").addEventListener("click", e => { if (e.target === e.currentTarget) closeNewModal(); });
+$("search").addEventListener("input", renderBoard);
+$("open-new").addEventListener("click", openNewModal);
+$("new-form").addEventListener("submit", submitNewCard);
 
 function connectEvents() {
   const es = new EventSource(API + "/events");
@@ -548,10 +546,10 @@ function connectEvents() {
     es.addEventListener(type, () => { refresh(); });
   }
   es.onerror = () => {
-    document.getElementById("live-dot").classList.add("offline");
+    $("live-dot").classList.add("offline");
   };
   es.onopen = () => {
-    document.getElementById("live-dot").classList.remove("offline");
+    $("live-dot").classList.remove("offline");
   };
 }
 

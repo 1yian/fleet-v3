@@ -61,6 +61,8 @@ function startLeaseRenewal(
 function buildWorkerEnv(params: {
   readonly config: RunnerConfig;
   readonly cardId: string;
+  readonly epoch: number;
+  readonly token: string;
   readonly mate: string;
   readonly project: string;
   readonly delivery: Delivery;
@@ -69,7 +71,8 @@ function buildWorkerEnv(params: {
 }): Record<string, string> {
   return {
     FLEET_CARD: params.cardId,
-    BOARD_TASK: params.cardId,
+    FLEET_CLAIM_EPOCH: String(params.epoch),
+    FLEET_CLAIM_TOKEN: params.token,
     FLEET_MATE: params.mate,
     FLEET_HOST: params.config.host,
     FLEET_PROJECT: params.project,
@@ -182,6 +185,13 @@ async function handleRunOutcome(params: {
     return { done: true, failed: true, message: `Exited ${String(params.run.exitCode)}` };
   }
   const latest = await params.client.getThread(cardId);
+  if (latest.card.epoch !== params.claim.epoch) {
+    return {
+      done: true,
+      failed: true,
+      message: `Superseded by attempt ${String(latest.card.epoch)}`,
+    };
+  }
   if (latest.card.state !== "running") {
     return {
       done: true,
@@ -230,6 +240,8 @@ async function handleVerification(params: {
   }
 
   await params.client.postEntry(cardId, {
+    epoch: params.claim.epoch,
+    token: params.claim.token,
     text: `Verification passed in ${String(verified.rounds)} round(s).`,
     by: `runner-${params.config.host}`,
     internal: true,
@@ -252,7 +264,7 @@ async function executeClaim(
       epoch: claim.epoch,
       token: claim.token,
       outcome: "needs_mate",
-      summary: `Stopped after ${String(claim.epoch - 1)} failed or expired attempts on ${config.host}. Review the thread and re-queue, escalate, or cancel.`,
+      summary: `Stopped after ${String(claim.epoch - 1)} failed or expired attempts on ${config.host}. Re-queueing cannot start another worker on this card; review the thread, then escalate, replace it with a new card, or cancel.`,
       actor: `runner-${config.host}`,
       kind: "retry_cap",
     });
@@ -279,6 +291,7 @@ async function executeClaim(
     channel: claim.card.mate,
     project,
     taskId: cardId,
+    epoch: claim.epoch,
     repo,
   });
 
@@ -317,6 +330,8 @@ async function executeClaim(
 
     const paneSuffix = pane === undefined ? "" : `, herdr ${pane.paneId}`;
     await client.postEntry(cardId, {
+      epoch: claim.epoch,
+      token: claim.token,
       text: `Runner ${config.host} claimed card #${cardId} (attempt ${String(claim.epoch)}, branch ${workspace.branch}, worktree ${workspace.worktreePath}, delivery ${delivery}${paneSuffix}).`,
       by: `runner-${config.host}`,
       internal: true,
@@ -326,6 +341,8 @@ async function executeClaim(
     const workerEnv = buildWorkerEnv({
       config,
       cardId,
+      epoch: claim.epoch,
+      token: claim.token,
       mate: claim.card.mate,
       project,
       delivery,

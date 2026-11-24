@@ -12,68 +12,93 @@ const CardSummarySchema = z.object({
   state: z.string(),
   holder: z.string(),
 });
-const CardsResponseSchema = z.object({ cards: z.array(CardSummarySchema) });
+const CardsResponseSchema = z.object({ cards: z.array(CardSummarySchema), total: z.number() });
+const CardResponseSchema = z.object({ card: CardSummarySchema });
 
-void test("kanban adapter serves UI, proxies card server API, and supports answer handback to mate", async () => {
+async function fetchCards(url: string): Promise<z.infer<typeof CardsResponseSchema>> {
+  const res = await fetch(url);
+  return CardsResponseSchema.parse(await res.json());
+}
+
+function postJson(url: string, body: unknown): Promise<Response> {
+  return fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+void test("kanban proxy exposes the card server API so a held captain card is answered back to its home mate", async () => {
   const store = new CardStore({ memory: true, parents: { jarvis: "captain", cleo: "jarvis" } });
   const board = await startBoardServer({
     store,
     host: "127.0.0.1",
     port: 0,
-    chaseIntervalMs: 0,
+    chaseIntervalMs: 3_600_000,
+    staleAfterMs: 600_000,
   });
-  const kanban = await startKanbanServer({
-    boardUrl: board.url,
-    host: "127.0.0.1",
-    port: 0,
-  });
+  const kanban = await startKanbanServer({ boardUrl: board.url, host: "127.0.0.1", port: 0 });
+  const stream = new AbortController();
 
   try {
-    const htmlRes = await fetch(`${kanban.url}/`);
-    assert.equal(htmlRes.status, 200);
-    const html = await htmlRes.text();
-    assert.match(html, /Needs you/u);
-    assert.match(html, /With mates/u);
+    const cardServerRoot = await fetch(`${board.url}/`);
+    assert.equal(cardServerRoot.status, 404, "the card server serves no UI");
+    await cardServerRoot.text();
 
-    const createRes = await fetch(`${kanban.url}/api/cards`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        mate: "cleo",
-        title: "Kanban smoke card",
-        project: "Cleo",
-      }),
+    const created = await postJson(`${kanban.url}/api/cards`, {
+      mate: "cleo",
+      title: "Kanban smoke card",
+      project: "Cleo",
     });
-    assert.equal(createRes.status, 201);
+    assert.equal(created.status, 201);
+    const card = CardResponseSchema.parse(await created.json()).card;
 
-    const listRes = await fetch(`${kanban.url}/api/cards?state=all&limit=50`);
-    assert.equal(listRes.status, 200);
-    const listed = CardsResponseSchema.parse(await listRes.json());
-    const found = listed.cards.find((each) => each.title === "Kanban smoke card");
-    assert.ok(found !== undefined);
+    const toJarvis = await postJson(`${kanban.url}/api/cards/${card.id}/escalate`, {
+      reason: "Need a second opinion",
+      actor: "cleo",
+      to: "captain",
+    });
+    assert.equal(CardResponseSchema.parse(await toJarvis.json()).card.holder, "jarvis");
 
-    store.escalateCard(found.id, { reason: "Merge PR?", to: "captain", actor: "jarvis" });
+    const toCaptain = await postJson(`${kanban.url}/api/cards/${card.id}/escalate`, {
+      reason: "Merge PR?",
+      actor: "jarvis",
+    });
+    assert.equal(CardResponseSchema.parse(await toCaptain.json()).card.holder, "captain");
 
-    const answerRes = await fetch(
-      `${kanban.url}/api/cards/${encodeURIComponent(found.id)}/answer`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: "Approved", actor: "captain" }),
-      },
+    const needsYou = await fetchCards(`${kanban.url}/api/cards?holder=captain`);
+    assert.deepEqual(
+      needsYou.cards.map((each) => each.id),
+      [card.id],
+    );
+
+    const events = await fetch(`${kanban.url}/api/events`, { signal: stream.signal });
+    assert.equal(events.status, 200);
+
+    const answerRes = await postJson(
+      `${kanban.url}/api/cards/${encodeURIComponent(card.id)}/answer`,
+      { text: "Approved", actor: "captain", to: "jarvis" },
     );
     assert.equal(answerRes.status, 200);
+    const answered = CardResponseSchema.parse(await answerRes.json()).card;
+    assert.equal(answered.state, "held");
+    assert.equal(answered.holder, "cleo", "answers always return to the home mate");
 
-    const thread = store.getThread(found.id);
-    assert.equal(thread.card.state, "held");
-    assert.equal(thread.card.holder, "cleo");
-    assert.ok(thread.entries.some((entry) => entry.kind === "answer" && entry.text === "Approved"));
+    const remaining = await fetchCards(`${kanban.url}/api/cards?holder=captain`);
+    assert.equal(remaining.total, 0);
+
+    const shutdown = await Promise.race([
+      kanban.stop().then(() => "stopped"),
+      new Promise<string>((resolve) => {
+        setTimeout(() => {
+          resolve("hung");
+        }, 3000);
+      }),
+    ]);
+    assert.equal(shutdown, "stopped", "an open SSE stream must not block proxy shutdown");
   } finally {
-    await new Promise<void>((resolve) => {
-      kanban.server.close(() => {
-        resolve();
-      });
-    });
+    stream.abort();
+    await kanban.stop();
     await board.stop();
     store.close();
   }

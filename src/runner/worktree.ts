@@ -42,11 +42,12 @@ export async function prepareWorkspace(params: {
   readonly channel: string;
   readonly project: string;
   readonly taskId: string;
+  readonly epoch: number;
   readonly repo: RepoConfig;
 }): Promise<TaskWorkspace> {
   const safeChannel = sanitizeSegment(params.channel);
   const safeProject = sanitizeSegment(params.project);
-  const safeTask = sanitizeSegment(params.taskId);
+  const safeTask = `${sanitizeSegment(params.taskId)}-e${String(params.epoch)}`;
   const baseDir = join(params.workspacesRoot, safeChannel, safeProject);
   const worktreePath = join(baseDir, "worktrees", `t-${safeTask}`);
   const tmpDir = join(baseDir, "tmp", `t-${safeTask}`);

@@ -2,7 +2,6 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { AxiError, runAxiCli } from "axi-sdk-js";
-import { KANBAN_HTML } from "./adapters/kanban-html.ts";
 import {
   answerCommand,
   cancelCommand,
@@ -25,9 +24,10 @@ import {
   type FleetAxiContext,
 } from "./axi/commands.ts";
 import { boolFlag, parseStrictFlags, stringFlag } from "./axi/parse.ts";
-import { createHttpBoardClient, type BoardClient } from "./board/client.ts";
+import { createHttpBoardClient } from "./board/client.ts";
 import { startBoardServer } from "./board/server.ts";
 import { CardStore } from "./board/store.ts";
+import type { OptionalFenceInput } from "./board/types.ts";
 import { extractMateParents, loadConfig, type RunnerConfig } from "./config.ts";
 import { ensureMatesUp, listMates, stopMates } from "./mates.ts";
 import { VERSION } from "./version.ts";
@@ -38,7 +38,7 @@ const TOP_LEVEL_HELP = `fleet - ${DESCRIPTION}
 
 Usage:
   fleet                        Live overview of open cards, counts, and advertised hosts
-  fleet serve [flags]          Run the minimal 3-table SQLite Card Server (+ Kanban UI)
+  fleet serve [flags]          Run the minimal 3-table SQLite Card Server
   fleet cards [flags]          List cards across mates and holders
   fleet view <id> [--full]     Inspect a card and its thread
   fleet dispatch [flags]       Create a card on the Card Server
@@ -62,7 +62,6 @@ Run \`fleet <command> --help\` for per-command flags and examples.`;
 
 export interface RunFleetCliOptions {
   readonly argv?: string[];
-  readonly boardClient?: BoardClient;
   readonly boardUrl?: string;
   readonly actor?: string;
   readonly stdout?: { write: (chunk: string) => unknown };
@@ -78,20 +77,37 @@ function findDefaultConfig(): string | undefined {
   return candidates.find((path): path is string => path !== undefined && existsSync(path));
 }
 
-function defaultBoardContext(): FleetAxiContext {
-  let boardUrl = process.env["BOARD_URL"];
+function fenceFromEnv(): OptionalFenceInput {
+  const epochRaw = process.env["FLEET_CLAIM_EPOCH"];
+  const token = process.env["FLEET_CLAIM_TOKEN"];
+  if (epochRaw === undefined && token === undefined) return {};
+  const epoch = Number(epochRaw);
+  if (token === undefined || token === "" || !Number.isInteger(epoch) || epoch < 1) {
+    throw new AxiError(
+      "FLEET_CLAIM_EPOCH and FLEET_CLAIM_TOKEN must be set together",
+      "VALIDATION_ERROR",
+      ["Unset both to act without a claim fence"],
+    );
+  }
+  return { epoch, token };
+}
+
+function resolveBoardUrl(explicit: string | undefined): string {
+  let boardUrl = explicit ?? process.env["BOARD_URL"];
   const configPath = findDefaultConfig();
   if (boardUrl === undefined && configPath !== undefined) {
-    const cfg = loadConfig(configPath);
-    boardUrl = cfg.boardUrl;
+    boardUrl = loadConfig(configPath).boardUrl;
   }
-  const effectiveUrl = boardUrl ?? "http://127.0.0.1:4100";
-  process.env["BOARD_URL"] ??= effectiveUrl;
-  const actor = process.env["FLEET_MATE"] ?? process.env["BOARD_PROFILE"] ?? "captain";
+  return boardUrl ?? "http://127.0.0.1:4100";
+}
+
+function boardContext(options: RunFleetCliOptions): FleetAxiContext {
+  const boardUrl = resolveBoardUrl(options.boardUrl);
   return {
-    board: () => createHttpBoardClient(effectiveUrl),
-    boardUrl: effectiveUrl,
-    actor,
+    board: () => createHttpBoardClient(boardUrl),
+    boardUrl,
+    actor: options.actor ?? process.env["FLEET_MATE"] ?? "captain",
+    fence: fenceFromEnv(),
   };
 }
 
@@ -118,7 +134,7 @@ function resolveServeOptions(
 } {
   const configPath = stringFlag(values, "config") ?? findDefaultConfig();
   const cfg: RunnerConfig | undefined =
-    configPath !== undefined && existsSync(configPath) ? loadConfig(configPath) : undefined;
+    configPath === undefined ? undefined : loadConfig(configPath);
   const serverCfg = cfg?.server;
   const dataDir =
     stringFlag(values, "dir") ?? serverCfg?.dataDir ?? resolvePath(homedir(), ".fleet-v3", "board");
@@ -153,7 +169,6 @@ async function serveCommand(args: string[]): Promise<Record<string, unknown>> {
     store,
     host: opts.host,
     port: opts.port,
-    uiHtml: KANBAN_HTML,
     chaseIntervalMs: opts.chaseIntervalMs,
     staleAfterMs: opts.staleAfterMs,
   });
@@ -186,17 +201,15 @@ async function webCommand(
     },
     helpBlock,
   );
-  const boardUrl = ctx?.boardUrl ?? process.env["BOARD_URL"] ?? "http://127.0.0.1:4100";
+  const boardUrl = ctx?.boardUrl ?? resolveBoardUrl(undefined);
   const host = stringFlag(parsed.values, "host") ?? "127.0.0.1";
   const port = parsePort(stringFlag(parsed.values, "port") ?? "4101", helpBlock);
   const { startKanbanServer } = await import("./adapters/kanban.ts");
-  const { server, url } = await startKanbanServer({ boardUrl, host, port });
+  const { url, stop } = await startKanbanServer({ boardUrl, host, port });
   process.stderr.write(`fleet kanban listening at ${url} (upstream: ${boardUrl})\n`);
   await new Promise<void>((resolve) => {
     const shutdown = (): void => {
-      server.close(() => {
-        resolve();
-      });
+      void stop().finally(resolve);
     };
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);
@@ -258,15 +271,7 @@ async function matesCommand(args: string[]): Promise<Record<string, unknown>> {
 }
 
 export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<void> {
-  const provided = options.boardClient;
-  const ctx: FleetAxiContext =
-    provided !== undefined
-      ? {
-          board: () => provided,
-          boardUrl: options.boardUrl,
-          actor: options.actor ?? "captain",
-        }
-      : defaultBoardContext();
+  const ctx = boardContext(options);
 
   await runAxiCli<FleetAxiContext>({
     description: DESCRIPTION,

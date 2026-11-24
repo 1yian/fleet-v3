@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import { createHttpBoardClient, type BoardClient } from "../board/client.ts";
-import type { BoardEvent } from "../board/types.ts";
+import { mentionsMate, type BoardEvent } from "../board/types.ts";
 import { loadConfig } from "../config.ts";
 
 interface BeforeAgentStartEvent {
@@ -27,7 +27,6 @@ export interface PiExtensionApi {
 }
 
 export interface FleetPiAdapterOptions {
-  readonly client?: BoardClient;
   readonly boardUrl?: string;
   readonly mate?: string;
   readonly parent?: string;
@@ -58,17 +57,18 @@ function resolveBoardClient(overrides: FleetPiAdapterOptions = {}): {
     resolvePath(homedir(), ".fleet-v3", "fleet.yaml"),
   ];
   const cfgPath = candidates.find((p): p is string => p !== undefined && existsSync(p));
-  if (overrides.client === undefined && boardUrl === undefined && cfgPath !== undefined) {
+  if (boardUrl === undefined && cfgPath !== undefined) {
     const cfg = loadConfig(cfgPath);
     boardUrl = cfg.boardUrl;
   }
   const effectiveUrl = boardUrl ?? "http://127.0.0.1:4100";
-  process.env["BOARD_URL"] ??= effectiveUrl;
-  const mate =
-    overrides.mate ?? process.env["FLEET_MATE"] ?? process.env["BOARD_PROFILE"] ?? "jarvis";
+  const mate = overrides.mate ?? process.env["FLEET_MATE"];
+  if (mate === undefined) {
+    throw new Error("fleet Pi adapter requires FLEET_MATE (the configured mate this pane serves)");
+  }
   const parent = overrides.parent ?? process.env["FLEET_PARENT"];
   return {
-    client: overrides.client ?? createHttpBoardClient(effectiveUrl),
+    client: createHttpBoardClient(effectiveUrl),
     mate,
     parent,
   };
@@ -127,8 +127,7 @@ function formatEntryNotice(
 ): string | undefined {
   if (event.payload["internal"] === true) return undefined;
   const text = payloadString(event.payload, "text");
-  const mention = new RegExp(`@${mate}\\b`, "iu");
-  if (event.holder !== mate && !mention.test(text)) return undefined;
+  if (event.holder !== mate && !mentionsMate(text, mate)) return undefined;
   return `[fleet] Reply on card #${cardId} (${title}) from ${event.actor ?? "unknown"}:\n${text}`;
 }
 
@@ -156,8 +155,14 @@ async function buildAmbientBlock(
 ): Promise<string> {
   const [charter, heldCards, domainCards, hosts, prefs, parents] = await Promise.all([
     client.getCharter(mate).catch(() => ""),
-    client.listCards({ holder: mate, state: "open" }).catch(() => []),
-    client.listCards({ mate, state: "open" }).catch(() => []),
+    client
+      .listCards({ holder: mate, state: "open" })
+      .then((page) => page.cards)
+      .catch(() => []),
+    client
+      .listCards({ mate, state: "open" })
+      .then((page) => page.cards)
+      .catch(() => []),
     client.listHosts().catch(() => []),
     client.getPrefs().catch(() => ""),
     client.getParents().catch((): Record<string, string> => ({})),
@@ -214,8 +219,8 @@ export function attachFleetPiAdapter(
   let controller: AbortController | undefined;
   let ambientBlock = "";
 
-  const watchEvents = async (signal: AbortSignal): Promise<void> => {
-    let lastEventId: number | undefined;
+  const watchEvents = async (signal: AbortSignal, cursor: number | undefined): Promise<void> => {
+    let lastEventId = cursor;
     let attempt = 0;
 
     while (!signal.aborted) {
@@ -245,9 +250,10 @@ export function attachFleetPiAdapter(
   };
 
   pi.on("session_start", async () => {
+    const cursor = await client.latestEventId().catch(() => undefined);
     ambientBlock = await buildAmbientBlock(client, mate, parent);
     controller = new AbortController();
-    void watchEvents(controller.signal);
+    void watchEvents(controller.signal, cursor);
   });
 
   pi.on("before_agent_start", (event) => {
