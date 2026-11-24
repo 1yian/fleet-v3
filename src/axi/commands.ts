@@ -12,7 +12,6 @@ import { createHttpBoardClient, type BoardClient } from "../board/client.ts";
 import {
   CARD_STATES,
   DELIVERIES,
-  MateNameSchema,
   type Card,
   type CardState,
   type Delivery,
@@ -314,7 +313,15 @@ export async function cardsCommand(
   const shown = page.cards.map((card) => formatCardRow(card, extraFields));
   const help = ["Run `fleet view <id>` to inspect a card and its thread"];
   if (page.total > shown.length) {
-    help.push(`Run \`fleet cards --limit ${String(page.total)}\` to see all ${String(page.total)}`);
+    const continuation = [
+      "fleet cards",
+      ...(mate !== undefined ? [`--mate ${mate}`] : []),
+      ...(holder !== undefined ? [`--holder ${holder}`] : []),
+      ...(state === "open" ? [] : [`--state ${state}`]),
+      ...(fieldsRaw !== undefined ? [`--fields ${fieldsRaw}`] : []),
+      `--limit ${String(page.total)}`,
+    ].join(" ");
+    help.push(`Run \`${continuation}\` to see all ${String(page.total)}`);
   }
   return {
     count: `${String(shown.length)} of ${String(page.total)} total`,
@@ -545,11 +552,9 @@ export async function escalateCommand(
     throw new AxiError("card <id> is required for `escalate`", "VALIDATION_ERROR", [helpBlock]);
   }
   const reason = stringFlag(parsed.values, "reason") ?? "";
-  const mate = MateNameSchema.safeParse(active.actor);
   const card = await active.board().escalateCard(id, {
     ...active.fence,
     reason,
-    ...(mate.success ? { from: mate.data } : {}),
     actor: active.actor,
   });
   return {

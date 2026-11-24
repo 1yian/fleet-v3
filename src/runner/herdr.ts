@@ -164,6 +164,7 @@ export async function openHerdrPane(params: {
   readonly mode: SpawnMode;
   readonly summary: string;
   readonly cwd: string;
+  readonly signal?: AbortSignal;
 }): Promise<HerdrPaneHandle | undefined> {
   const session = params.config.session;
   const wsLabel = interpolateWorkspaceLabel(params.config.workspace, params.channel, params.host);
@@ -184,6 +185,7 @@ export async function openHerdrPane(params: {
   try {
     const acquired = await withWorkspaceLock(lockKey, async () => {
       const latestRaw = await runHerdr(session, ["workspace", "list"]).catch(() => listRaw);
+      if (params.signal?.aborted === true) return undefined;
       const parsed = WorkspaceListSchema.parse(JSON.parse(latestRaw));
       const existing = parsed.result.workspaces.find((ws) => ws.label === wsLabel);
       if (existing !== undefined) {
@@ -224,6 +226,7 @@ export async function openHerdrPane(params: {
         paneId: createdWs.result.root_pane.pane_id,
       };
     });
+    if (acquired === undefined) return undefined;
     workspaceId = acquired.workspaceId;
     tabId = acquired.tabId;
     paneId = acquired.paneId;

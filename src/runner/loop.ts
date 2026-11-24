@@ -253,6 +253,7 @@ function openWorkerPane(
   project: string,
   workspace: TaskWorkspace,
   delivery: Delivery,
+  signal: AbortSignal,
 ): Promise<HerdrPaneHandle | undefined> {
   if (config.spawn.viewport !== "herdr") return Promise.resolve(undefined);
   return openHerdrPane({
@@ -266,6 +267,7 @@ function openWorkerPane(
     mode: config.spawn.mode,
     summary: claim.card.title,
     cwd: workspace.worktreePath,
+    signal,
   });
 }
 
@@ -340,7 +342,7 @@ async function runClaim(
       return;
     }
 
-    pane = await openWorkerPane(config, claim, project, workspace, delivery);
+    pane = await openWorkerPane(config, claim, project, workspace, delivery, controller.signal);
 
     const paneSuffix = pane === undefined ? "" : `, herdr ${pane.paneId}`;
     await client.postEntry(cardId, {

@@ -850,3 +850,92 @@ void test("shutdown during worktree setup releases the claim without launching t
     await server.stop();
   }
 });
+
+void test("a repo envrc cannot redirect the worker's board or claim fence under direnv", async () => {
+  const root = makeTempDir("fleet-v3-direnv-");
+  const repoDir = initGitRepo(root);
+  const receiptPath = join(root, "direnv-receipt.json");
+  const binDir = join(root, "bin");
+  mkdirSync(binDir);
+  const fakeDirenv = join(binDir, "direnv");
+  writeFileSync(
+    fakeDirenv,
+    '#!/bin/sh\nshift 2\nBOARD_URL=http://bogus.invalid FLEET_CLAIM_EPOCH=99 exec "$@"\n',
+  );
+  chmodSync(fakeDirenv, 0o755);
+  writeFileSync(join(root, ".envrc"), "export BOARD_URL=http://bogus.invalid\n");
+  const previousPath = process.env["PATH"];
+  process.env["PATH"] = `${binDir}:${previousPath ?? ""}`;
+  const server = await startTestServer();
+  const { client } = server;
+
+  try {
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Envrc tries to hijack the worker",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    const workerScript = `
+      require("node:fs").writeFileSync(${JSON.stringify(receiptPath)}, JSON.stringify({
+        boardUrl: process.env.BOARD_URL,
+        epoch: process.env.FLEET_CLAIM_EPOCH,
+      }));
+    `;
+    const config = makeConfig(root, repoDir, {
+      boardUrl: server.url,
+      spawn: {
+        mode: "local",
+        viewport: "headless",
+        direnv: true,
+        command: ["node", "-e", workerScript],
+      },
+    });
+
+    await runLoop(client, config, { once: true });
+
+    const receipt = z
+      .object({ boardUrl: z.string(), epoch: z.string() })
+      .parse(JSON.parse(readFileSync(receiptPath, "utf8")));
+    assert.equal(receipt.boardUrl, server.url);
+    assert.equal(receipt.epoch, "1");
+    assert.equal(await cardField(client, card.id, "state"), "done");
+  } finally {
+    if (previousPath === undefined) delete process.env["PATH"];
+    else process.env["PATH"] = previousPath;
+    await server.stop();
+  }
+});
+
+void test("a failed worktree setup leaves no scratch directory or branch behind", async () => {
+  const root = makeTempDir("fleet-v3-setup-failure-");
+  const repoDir = initGitRepo(root);
+  const server = await startTestServer();
+  const { client } = server;
+
+  try {
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Base branch is missing",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    const config = makeConfig(root, repoDir, {
+      repos: { demo: { path: repoDir, baseBranch: "no-such-branch", delivery: "direct-pr" } },
+    });
+
+    await runLoop(client, config, { once: true });
+
+    assert.equal(await cardField(client, card.id, "state"), "held");
+    const scratch = join(root, "workspaces", "cleo", "demo", "tmp", `t-${card.id}-e1`);
+    assert.equal(existsSync(scratch), false, "the failed attempt's scratch directory is removed");
+    const branches = execFileSync("git", ["-C", repoDir, "branch", "--list", "fleet/*"], {
+      encoding: "utf8",
+    });
+    assert.equal(branches.trim(), "");
+  } finally {
+    await server.stop();
+  }
+});

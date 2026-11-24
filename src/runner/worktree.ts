@@ -56,33 +56,44 @@ export async function prepareWorkspace(params: {
   mkdirSync(dirname(worktreePath), { recursive: true });
   mkdirSync(tmpDir, { recursive: true });
 
-  if (existsSync(worktreePath)) {
+  try {
+    if (existsSync(worktreePath)) {
+      await runGit(params.repo.path, ["worktree", "remove", "--force", worktreePath]).catch(
+        () => undefined,
+      );
+      rmSync(worktreePath, { recursive: true, force: true });
+    }
+
+    await runGit(params.repo.path, ["worktree", "prune"]).catch(() => undefined);
+    await runGit(params.repo.path, [
+      "worktree",
+      "add",
+      "-B",
+      branch,
+      worktreePath,
+      params.repo.baseBranch,
+    ]);
+
+    const rawCommonDir = await runGit(params.repo.path, ["rev-parse", "--git-common-dir"]);
+    const gitCommonDir = realpathSync(resolvePath(params.repo.path, rawCommonDir));
+
+    return {
+      worktreePath: realpathSync(worktreePath),
+      tmpDir: realpathSync(tmpDir),
+      branch,
+      repoPath: realpathSync(params.repo.path),
+      gitCommonDir,
+    };
+  } catch (error) {
     await runGit(params.repo.path, ["worktree", "remove", "--force", worktreePath]).catch(
       () => undefined,
     );
+    await runGit(params.repo.path, ["worktree", "prune"]).catch(() => undefined);
+    await runGit(params.repo.path, ["branch", "-D", branch]).catch(() => undefined);
     rmSync(worktreePath, { recursive: true, force: true });
+    rmSync(tmpDir, { recursive: true, force: true });
+    throw error;
   }
-
-  await runGit(params.repo.path, ["worktree", "prune"]).catch(() => undefined);
-  await runGit(params.repo.path, [
-    "worktree",
-    "add",
-    "-B",
-    branch,
-    worktreePath,
-    params.repo.baseBranch,
-  ]);
-
-  const rawCommonDir = await runGit(params.repo.path, ["rev-parse", "--git-common-dir"]);
-  const gitCommonDir = realpathSync(resolvePath(params.repo.path, rawCommonDir));
-
-  return {
-    worktreePath: realpathSync(worktreePath),
-    tmpDir: realpathSync(tmpDir),
-    branch,
-    repoPath: realpathSync(params.repo.path),
-    gitCommonDir,
-  };
 }
 
 export async function cleanupWorkspace(workspace: TaskWorkspace): Promise<void> {

@@ -176,7 +176,8 @@ export function buildWorkerArgv(params: {
   }
 
   if (params.config.spawn.direnv && hasEnvrcInAncestry(params.worktreePath)) {
-    return ["direnv", "exec", params.worktreePath, ...interpolated];
+    const assignments = Object.entries(params.env).map(([key, value]) => `${key}=${value}`);
+    return ["direnv", "exec", params.worktreePath, "env", ...assignments, ...interpolated];
   }
   return interpolated;
 }

@@ -534,6 +534,11 @@ void test("open cards stay visible and counted regardless of how much terminal h
       overview.cards.map((card) => card.id),
       [old.id],
     );
+    assert.equal(overview.recentDone.length, 50, "recent done cards are capped");
+    assert.ok(
+      overview.recentDone.every((card) => card.state === "done" && card.id !== old.id),
+      "open and done views come from one snapshot and never overlap",
+    );
 
     const page = await client.listCards({ state: "all", limit: 5 });
     assert.equal(page.cards.length, 5);

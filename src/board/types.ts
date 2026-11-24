@@ -133,6 +133,7 @@ export const OverviewSchema = z.object({
   }),
   hosts: z.array(HostInfoSchema),
   cards: z.array(CardSchema),
+  recentDone: z.array(CardSchema),
 });
 export type BoardOverview = z.infer<typeof OverviewSchema>;
 
@@ -206,7 +207,6 @@ export interface PostEntryInput extends OptionalFenceInput {
 
 export interface EscalateCardInput extends OptionalFenceInput {
   readonly reason: string;
-  readonly from?: string;
   readonly actor?: string;
 }
 

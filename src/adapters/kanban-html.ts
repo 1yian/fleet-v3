@@ -324,13 +324,9 @@ function post(path, payload) {
 async function refresh() {
   const seq = ++refreshSeq;
   try {
-    const [overview, done, mates] = await Promise.all([
-      api("/overview"),
-      api("/cards?state=done&limit=50"),
-      api("/mates"),
-    ]);
+    const [overview, mates] = await Promise.all([api("/overview"), api("/mates")]);
     if (seq !== refreshSeq) return;
-    allCards = overview.cards.concat(done.cards);
+    allCards = overview.cards.concat(overview.recentDone);
     hosts = overview.hosts || [];
     parents = mates.parents || {};
     $("live-dot").classList.remove("offline");
@@ -390,7 +386,7 @@ function renderBoard() {
       : items.map(c => {
           const cls = c.holder === "captain" ? "captain" : c.state;
           const chips = [];
-          if (c.state === "waiting") chips.push('<span class="chip waiting">waiting on ' + c.needs.map(n => '#' + esc(n)).join(", ") + '</span>');
+          if (c.state === "waiting") chips.push('<span class="chip waiting">Waiting</span>');
           if (c.holder) chips.push('<span class="chip holder">ball: ' + esc(c.holder) + '</span>');
           if (c.project) chips.push('<span class="chip">' + esc(c.project) + '</span>');
           if (c.host) chips.push('<span class="chip">' + esc(c.host) + '</span>');

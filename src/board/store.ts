@@ -228,6 +228,8 @@ function rowToEvent(raw: unknown): BoardEvent {
   };
 }
 
+const RECENT_DONE_LIMIT = 50;
+
 export interface CardStoreOptions {
   readonly dataDir?: string;
   readonly memory?: boolean;
@@ -987,16 +989,6 @@ export class CardStore {
       }
       const actor = input.actor ?? (row.holder === "worker" ? row.mate : row.holder);
       const fromHolder = row.holder === "worker" || row.holder === "runner" ? row.mate : row.holder;
-      if (input.from !== undefined && input.from !== fromHolder) {
-        if (row.state === "held" && row.holder === this.parentOf(input.from)) {
-          return { result: rowToCard(row), events: [] };
-        }
-        throw new BoardError(
-          409,
-          "holder_mismatch",
-          `Card #${String(id)} is held by ${row.holder}, not ${input.from}`,
-        );
-      }
       const targetHolder = this.parentOf(fromHolder);
       if (row.state === "held" && row.holder === targetHolder && row.result === reason) {
         return { result: rowToCard(row), events: [] };
@@ -1379,6 +1371,7 @@ export class CardStore {
       counts,
       hosts: this.listHosts(),
       cards: this.listCards({ state: "open" }).cards,
+      recentDone: this.listCards({ state: "done", limit: RECENT_DONE_LIMIT }).cards,
     };
   }
 

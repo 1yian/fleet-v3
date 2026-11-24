@@ -171,7 +171,7 @@ void test("truncates long bodies in view by default and reveals full text with -
   }
 });
 
-void test("escalate, answer, handoff, close, cancel, charter, prefs, and init mutations are idempotent", async () => {
+void test("escalation, answer, and handoff flows work end to end, and close, cancel, and init are idempotent", async () => {
   const server = await startTestServer({ parents: { jarvis: "captain", cleo: "jarvis" } });
   const { client, url } = server;
   const dir = makeTempDir("fv3-axi-init-");
@@ -195,14 +195,6 @@ void test("escalate, answer, handoff, close, cancel, charter, prefs, and init mu
     assert.equal(esc1.exitCode, 0);
     assert.match(esc1.out, /holder: jarvis/u);
 
-    const replay = await captureCli(
-      ["escalate", card.id, "--reason", "Need Jarvis check"],
-      url,
-      "cleo",
-    );
-    assert.equal(replay.exitCode, 0);
-    assert.match(replay.out, /holder: jarvis/u, "a retried escalation stops at the parent");
-
     const esc2 = await captureCli(
       ["escalate", card.id, "--reason", "Approve merge?"],
       url,
@@ -210,14 +202,6 @@ void test("escalate, answer, handoff, close, cancel, charter, prefs, and init mu
     );
     assert.equal(esc2.exitCode, 0);
     assert.match(esc2.out, /holder: captain/u);
-
-    const stale = await captureCli(
-      ["escalate", card.id, "--reason", "Late retry from cleo"],
-      url,
-      "cleo",
-    );
-    assert.notEqual(stale.exitCode, 0, "a mate cannot escalate a card it no longer holds");
-    assert.match(stale.out, /held by captain/u);
 
     const ans = await captureCli(["answer", card.id, "--text", "Merge it"], url, "captain");
     assert.equal(ans.exitCode, 0);
@@ -274,7 +258,13 @@ void test("cards lists report the true total and keep open work visible behind c
 
     const allList = await captureCli(["cards", "--state", "all", "--limit", "2"], url);
     assert.match(allList.out, /count: 2 of 4 total/u);
-    assert.match(allList.out, /fleet cards --limit 4/u);
+    assert.match(allList.out, /fleet cards --state all --limit 4/u);
+
+    const filtered = await captureCli(
+      ["cards", "--mate", "cleo", "--state", "all", "--fields", "project", "--limit", "2"],
+      url,
+    );
+    assert.match(filtered.out, /fleet cards --mate cleo --state all --fields project --limit 4/u);
   } finally {
     await server.stop();
   }

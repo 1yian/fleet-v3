@@ -7,7 +7,7 @@ Read [VISION.md](VISION.md) for the design principles and [AGENTS.md](AGENTS.md)
 ## Layout
 
 - `src/board/` - minimal 3-table `node:sqlite` Card Server (`cards`, `entries`, `events`) + plain-Markdown charters/prefs, HTTP + SSE push, leases with epoch fencing, dependencies, and stateless stale-ball chase (`fleet serve`).
-- `src/bin.ts` + `src/cli.ts` + `src/axi/` - the `fleet` AXI CLI (TOON output, content-first home view, `--version` fast path, strict flag validation, idempotent mutations, and opt-in session-start hooks via `axi-sdk-js`).
+- `src/bin.ts` + `src/cli.ts` + `src/axi/` - the `fleet` AXI CLI (TOON output, content-first home view, `--version` fast path, strict flag validation, idempotent `close`, `cancel`, and `init`, and opt-in session-start hooks via `axi-sdk-js`).
 - `src/runner/` - `fleet-runner` claiming queued cards for a host, managing git worktrees, `direnv`, container isolation (`docker` on Linux or Apple `container` on macOS), ephemeral interactive `herdr` panes, process-group timeouts, and 4-round capped `no-mistakes` verification.
 - `src/mates.ts` - `fleet mates` idempotently manages permanent interactive mate panes in `herdr` (Jarvis with `parent: captain` and domain mates with `parent: jarvis` are the same primitive).
 - `src/adapters/` - thin optional viewports: the unified Pi/ypi SSE mate adapter (`pi.ts`) and visual Kanban UI (`kanban.ts`, served only by `fleet web`, which proxies the Card Server API).

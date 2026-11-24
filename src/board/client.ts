@@ -65,7 +65,6 @@ export interface BoardClient {
   readonly events: (options?: {
     readonly after?: number;
     readonly holder?: string;
-    readonly mate?: string;
     readonly signal?: AbortSignal;
   }) => AsyncIterable<BoardEvent>;
 }
@@ -325,7 +324,6 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
           const params = new URLSearchParams();
           if (options.after !== undefined) params.set("after", String(options.after));
           if (options.holder !== undefined) params.set("holder", options.holder);
-          if (options.mate !== undefined) params.set("mate", options.mate);
           const qs = params.toString();
           const res = await fetch(`${cleanBase}/api/events${qs.length > 0 ? `?${qs}` : ""}`, {
             headers: { accept: "text/event-stream" },

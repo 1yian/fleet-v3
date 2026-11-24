@@ -48,7 +48,7 @@ export interface EventWatch {
 
 export function watchEvents(
   client: BoardClient,
-  options: { readonly after?: number; readonly holder?: string; readonly mate?: string } = {},
+  options: { readonly after?: number; readonly holder?: string } = {},
 ): EventWatch {
   const controller = new AbortController();
   const events: BoardEvent[] = [];

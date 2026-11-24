@@ -77,7 +77,6 @@ const EntryBodySchema = z.object({
 const EscalateBodySchema = z.object({
   ...FenceFields,
   reason: z.string().min(1),
-  from: MateNameSchema.optional(),
   actor: z.string().min(1).optional(),
 });
 
@@ -171,18 +170,8 @@ function parseNameFilter(value: string | null, schema: z.ZodType<string>): strin
   return parsed.data;
 }
 
-function matchesEventFilter(
-  event: BoardEvent,
-  holderFilter: string | null,
-  mateFilter: string | null,
-): boolean {
-  if (holderFilter !== null && event.holder !== holderFilter) {
-    return false;
-  }
-  if (mateFilter !== null && event.mate !== mateFilter) {
-    return false;
-  }
-  return true;
+function matchesHolderFilter(event: BoardEvent, holderFilter: string | null): boolean {
+  return holderFilter === null || event.holder === holderFilter;
 }
 
 function waitForClaim(
@@ -249,7 +238,6 @@ function handleSse(store: CardStore, url: URL, req: IncomingMessage, res: Server
   const afterId =
     afterRaw !== null && /^\d+$/u.test(afterRaw) ? Number(afterRaw) : store.latestEventId();
   const holderFilter = parseNameFilter(url.searchParams.get("holder"), HolderFilterSchema);
-  const mateFilter = parseNameFilter(url.searchParams.get("mate"), MateNameSchema);
 
   res.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
@@ -258,7 +246,7 @@ function handleSse(store: CardStore, url: URL, req: IncomingMessage, res: Server
   });
 
   const writeEvent = (event: BoardEvent): void => {
-    if (res.writableEnded || !matchesEventFilter(event, holderFilter, mateFilter)) return;
+    if (res.writableEnded || !matchesHolderFilter(event, holderFilter)) return;
     res.write(`id: ${String(event.id)}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
   };
 
@@ -338,7 +326,6 @@ async function handleEscalateCard(
     card: store.escalateCard(cardId, {
       ...fenceOf(body),
       reason: body.reason,
-      ...(body.from !== undefined ? { from: body.from } : {}),
       ...(body.actor !== undefined ? { actor: body.actor } : {}),
     }),
   });
