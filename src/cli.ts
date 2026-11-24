@@ -74,6 +74,9 @@ function defaultBoardContext(): FleetAxiContext {
     boardUrl = cfg.boardUrl;
     metaChannel = cfg.metaChannel;
   }
+  if (boardUrl !== undefined && process.env["BOARD_URL"] === undefined) {
+    process.env["BOARD_URL"] = boardUrl;
+  }
   return {
     board: () => board(boardUrl !== undefined ? { url: boardUrl } : {}),
     boardUrl,
