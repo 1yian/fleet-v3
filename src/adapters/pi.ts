@@ -1,15 +1,10 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
-import { board, type Board, type BoardEventView, type MessageView } from "@vercel/board";
-import {
-  charterCommand,
-  homeCommand,
-  hostsCommand,
-  prefsCommand,
-  tasksCommand,
-} from "../axi/commands.ts";
-import { loadConfig } from "../config.ts";
+import { resolve as resolvePath } from "node:path";
+import { z } from "zod";
+import { createHttpBoardClient, type BoardClient } from "../board/client.ts";
+import type { BoardEvent } from "../board/types.ts";
+import { loadFleetConfig } from "../config.ts";
 
 interface BeforeAgentStartEvent {
   readonly systemPrompt: string;
@@ -32,152 +27,270 @@ export interface PiExtensionApi {
 }
 
 export interface FleetPiAdapterOptions {
-  readonly client?: Board;
   readonly boardUrl?: string;
-  readonly metaChannel?: string;
-  readonly profile?: string;
-  readonly channel?: string;
+  readonly mate?: string;
+  readonly reconnectDelayMs?: number;
 }
+
+const ChaseItemSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  state: z.string(),
+  ageMs: z.number(),
+  stalledChild: z.string().optional(),
+});
+const ChasePayloadSchema = z.object({
+  holder: z.string(),
+  cards: z.array(ChaseItemSchema),
+});
 
 function resolveBoardClient(overrides: FleetPiAdapterOptions = {}): {
-  readonly client: Board;
-  readonly boardUrl: string | undefined;
-  readonly metaChannel: string;
-  readonly profile: string;
-  readonly channel: string | undefined;
+  readonly client: BoardClient;
+  readonly mate: string;
 } {
   let boardUrl = overrides.boardUrl ?? process.env["BOARD_URL"];
-  let metaChannel = overrides.metaChannel ?? "meta";
   const candidates = [
     process.env["FLEET_CONFIG"],
-    resolve(process.cwd(), "fleet.yaml"),
-    resolve(homedir(), ".config", "fleet", "fleet.yaml"),
-    resolve(homedir(), ".fleet-v3", "fleet.yaml"),
+    resolvePath(process.cwd(), "fleet.yaml"),
+    resolvePath(homedir(), ".config", "fleet", "fleet.yaml"),
+    resolvePath(homedir(), ".fleet-v3", "fleet.yaml"),
   ];
   const cfgPath = candidates.find((p): p is string => p !== undefined && existsSync(p));
-  if (overrides.client === undefined && boardUrl === undefined && cfgPath !== undefined) {
-    const cfg = loadConfig(cfgPath);
+  if (boardUrl === undefined && cfgPath !== undefined) {
+    const cfg = loadFleetConfig(cfgPath);
     boardUrl = cfg.boardUrl;
-    metaChannel = cfg.metaChannel;
   }
-  if (boardUrl !== undefined && process.env["BOARD_URL"] === undefined) {
-    process.env["BOARD_URL"] = boardUrl;
+  const effectiveUrl = boardUrl ?? "http://127.0.0.1:4100";
+  const mate = overrides.mate ?? process.env["FLEET_MATE"];
+  if (mate === undefined) {
+    throw new Error("fleet Pi adapter requires FLEET_MATE (the configured mate this pane serves)");
   }
-  const profile = overrides.profile ?? process.env["BOARD_PROFILE"] ?? "jarvis";
-  const rawChannel = overrides.channel ?? process.env["FLEET_CHANNEL"]?.trim();
-  const channel = rawChannel !== undefined && rawChannel.length > 0 ? rawChannel : undefined;
   return {
-    client: overrides.client ?? board(boardUrl !== undefined ? { url: boardUrl } : {}),
-    boardUrl,
-    metaChannel,
-    profile,
-    channel,
+    client: createHttpBoardClient(effectiveUrl),
+    mate,
   };
 }
 
-function formatTaskEvent(type: string, msg: MessageView): string | undefined {
-  const title = msg.text.split("\n")[0] ?? "";
-  const detail = msg.task?.result ?? "";
-  if (type === "task.blocked") {
-    const reason = detail === "" ? "" : `\nReason: ${detail}`;
-    return `[fleet] Task #${msg.id} (${msg.channel}) blocked: ${title}${reason}\nRun \`fleet view ${msg.id} --full\` and \`fleet charter ${msg.channel}\` before deciding whether to act or escalate.`;
-  }
-  if (type === "task.failed") {
-    const reason = detail === "" ? "" : `\nReason: ${detail}`;
-    return `[fleet] Task #${msg.id} (${msg.channel}) failed: ${title}${reason}\nRun \`fleet view ${msg.id} --full\` to diagnose and decide the next step.`;
-  }
-  if (type === "task.completed") {
-    return `[fleet] Task #${msg.id} (${msg.channel}) completed: ${title}${detail === "" ? "" : ` (${detail})`}`;
-  }
-  return undefined;
+function payloadString(payload: Readonly<Record<string, unknown>>, key: string): string {
+  const val = payload[key];
+  return typeof val === "string" ? val : "";
 }
 
-function formatHighSignalEvent(
-  event: BoardEventView,
-  profile: string,
-  channel: string | undefined,
+function formatChaseNotice(event: BoardEvent): string | undefined {
+  const parsed = ChasePayloadSchema.safeParse(event.payload);
+  if (!parsed.success || parsed.data.cards.length === 0) return undefined;
+  const lines = parsed.data.cards.map((card) => {
+    const mins = Math.max(1, Math.round(card.ageMs / 60_000));
+    const status =
+      card.stalledChild !== undefined ? `stalled with ${card.stalledChild}` : card.state;
+    return `- #${card.id} [${status}, ${String(mins)}m]: ${card.title}`;
+  });
+  return `[fleet] Cards needing attention:\n${lines.join("\n")}\nReview each with \`fleet view <id> --full\` and close, queue, snooze, hand off, or escalate.`;
+}
+
+function formatHolderTransition(
+  event: BoardEvent,
+  mate: string,
+  cardId: string,
+  title: string,
 ): string | undefined {
-  const msg = event.message;
-  if (msg === undefined || msg.by.profile === profile) return undefined;
-  const taskNotice = formatTaskEvent(event.type, msg);
-  if (taskNotice !== undefined) {
-    if (channel !== undefined && msg.channel !== channel) return undefined;
-    return taskNotice;
+  if (event.holder !== mate) return undefined;
+  if (event.type === "card.returned") {
+    const summary = payloadString(event.payload, "summary");
+    return `[fleet] Card #${cardId} returned to you: ${title}${summary.length > 0 ? `\n${summary}` : ""}\nRun \`fleet view ${cardId} --full\` to decide the next step.`;
   }
-  if (event.type !== "message.posted" || msg.noSync) return undefined;
-  const mention = new RegExp(`@${profile}\\b`, "iu");
-  const inOwnChannel = channel !== undefined && msg.channel === channel;
-  if (inOwnChannel || msg.channel === profile || mention.test(msg.text)) {
-    const target = msg.re ?? msg.id;
-    return `[fleet] Message in #${msg.channel} (thread #${target}) from ${msg.by.actor}:\n${msg.text}`;
+  if (event.type === "card.escalated") {
+    const from = payloadString(event.payload, "from");
+    const reason = payloadString(event.payload, "reason");
+    return `[fleet] Card #${cardId} escalated from ${from || "mate"} to you: ${title}\nReason: ${reason}\nRun \`fleet view ${cardId} --full\` and \`fleet charter ${event.mate ?? mate}\` before answering or escalating.`;
+  }
+  if (event.type === "card.answered") {
+    const text = payloadString(event.payload, "text");
+    return `[fleet] Card #${cardId} answered by ${event.actor ?? "parent"}: ${title}\nAnswer: ${text}\nRun \`fleet view ${cardId} --full\` to proceed.`;
+  }
+  if (event.type === "card.handed_off") {
+    const text = payloadString(event.payload, "text");
+    return `[fleet] Card #${cardId} handed to you by ${event.actor ?? "mate"}: ${title}${text.length > 0 ? `\n${text}` : ""}\nRun \`fleet view ${cardId} --full\`.`;
+  }
+  if (event.type === "card.created") {
+    return `[fleet] New card #${cardId} in your court: ${title}\nRun \`fleet view ${cardId} --full\`.`;
   }
   return undefined;
 }
 
-async function buildAmbientBlock(params: {
-  readonly client: Board;
-  readonly boardUrl: string | undefined;
-  readonly metaChannel: string;
-  readonly profile: string;
-  readonly channel: string | undefined;
-}): Promise<string> {
-  const ctx = {
-    board: () => params.client,
-    boardUrl: params.boardUrl,
-    metaChannel: params.metaChannel,
-  };
-  if (params.channel !== undefined) {
-    const [charter, tasks, hosts, prefs] = await Promise.all([
-      charterCommand([params.channel], ctx).catch(() => undefined),
-      tasksCommand(["--channel", params.channel], ctx).catch(() => undefined),
-      hostsCommand([], ctx).catch(() => undefined),
-      prefsCommand([], ctx).catch(() => undefined),
-    ]);
-    const parts: string[] = [`Domain Mate: ${params.profile} (owns channel ${params.channel})`];
-    if (charter !== undefined) parts.push(`Domain charter:\n${JSON.stringify(charter, null, 2)}`);
-    if (tasks !== undefined) parts.push(`Open domain tasks:\n${JSON.stringify(tasks, null, 2)}`);
-    if (hosts !== undefined) parts.push(`Available hosts:\n${JSON.stringify(hosts, null, 2)}`);
-    if (prefs !== undefined) parts.push(`Operator preferences:\n${JSON.stringify(prefs, null, 2)}`);
-    return parts.join("\n\n");
-  }
+function formatEntryNotice(
+  event: BoardEvent,
+  mate: string,
+  cardId: string,
+  title: string,
+): string | undefined {
+  if (event.payload["internal"] === true) return undefined;
+  const text = payloadString(event.payload, "text");
+  if (event.holder !== mate) return undefined;
+  return `[fleet] Reply on card #${cardId} (${title}) from ${event.actor ?? "unknown"}:\n${text}`;
+}
 
-  const [home, prefs] = await Promise.all([
-    homeCommand([], ctx).catch(() => undefined),
-    prefsCommand([], ctx).catch(() => undefined),
+function formatMateEvent(event: BoardEvent, mate: string): string | undefined {
+  if (event.actor === mate) return undefined;
+  if (event.type === "chase.due") {
+    return event.holder === mate ? formatChaseNotice(event) : undefined;
+  }
+  const cardId = event.cardId ?? payloadString(event.payload, "id");
+  const title = payloadString(event.payload, "title");
+  if (event.type === "card.done" && event.holder === mate) {
+    const result = payloadString(event.payload, "result");
+    return `[fleet] Card #${cardId} completed: ${title}${result.length > 0 ? ` (${result})` : ""}`;
+  }
+  if (event.type === "card.canceled" && event.holder === mate) {
+    const reason = payloadString(event.payload, "reason");
+    return `[fleet] Card #${cardId} canceled: ${title}${reason.length > 0 ? ` (${reason})` : ""}`;
+  }
+  if (event.type === "entry.posted") {
+    return formatEntryNotice(event, mate, cardId, title);
+  }
+  return formatHolderTransition(event, mate, cardId, title);
+}
+
+async function buildAmbientBlock(client: BoardClient, mate: string): Promise<string> {
+  const [charter, heldCards, domainCards, hosts, prefs, parents] = await Promise.all([
+    client.getCharter(mate).catch(() => ""),
+    client
+      .listCards({ holder: mate, state: "open", scope: mate })
+      .then((page) => page.cards)
+      .catch(() => []),
+    client
+      .listCards({ scope: mate, state: "open" })
+      .then((page) => page.cards)
+      .catch(() => []),
+    client.listHosts().catch(() => []),
+    client.getPrefs().catch(() => ""),
+    client.getParents().catch((): Record<string, string> => ({})),
   ]);
-  const parts: string[] = [];
-  if (home !== undefined) parts.push(`Live fleet snapshot:\n${JSON.stringify(home, null, 2)}`);
-  if (prefs !== undefined) parts.push(`Operator preferences:\n${JSON.stringify(prefs, null, 2)}`);
+
+  const parent = Object.hasOwn(parents, mate) ? (parents[mate] ?? "captain") : "captain";
+  const children = Object.entries(parents)
+    .filter(([, p]) => p === mate)
+    .map(([name]) => name)
+    .toSorted();
+
+  const parts: string[] = [
+    `Mate: ${mate} (parent: ${parent}${children.length > 0 ? `, subordinates: ${children.join(", ")}` : ""})`,
+  ];
+  if (charter.trim().length > 0) parts.push(`Charter:\n${charter.trim()}`);
+  if (heldCards.length > 0) {
+    parts.push(`Cards currently held by ${mate}:\n${JSON.stringify(heldCards, null, 2)}`);
+  }
+  if (domainCards.length > 0) {
+    parts.push(`Open cards owned by ${mate}:\n${JSON.stringify(domainCards, null, 2)}`);
+  }
+  if (hosts.length > 0) {
+    parts.push(`Available hosts:\n${JSON.stringify(hosts, null, 2)}`);
+  }
+  if (prefs.trim().length > 0) {
+    parts.push(`Captain preferences:\n${prefs.trim()}`);
+  }
   return parts.join("\n\n");
+}
+
+async function buildReconciliationNotice(
+  client: BoardClient,
+  mate: string,
+): Promise<string | undefined> {
+  const [held, overview] = await Promise.all([
+    client.listCards({ holder: mate, state: "open", scope: mate }),
+    client.getOverview(mate),
+  ]);
+  const involved = (card: { readonly mate: string; readonly createdBy: string }): boolean =>
+    card.mate === mate || card.createdBy === mate;
+  const completed = overview.recentDone.filter(involved).slice(0, 5);
+  const canceled = overview.recentCanceled.slice(0, 5);
+  if (held.cards.length === 0 && completed.length === 0 && canceled.length === 0) {
+    return undefined;
+  }
+  const lines = [
+    ...held.cards.map((card) => `- #${card.id} [${card.state}] in your court: ${card.title}`),
+    ...completed.map((card) => `- #${card.id} completed: ${card.title}`),
+    ...canceled.map((card) => `- #${card.id} canceled: ${card.title}`),
+  ];
+  return `[fleet] The Card Server is reachable again after an outage. Current state for ${mate}:\n${lines.join("\n")}`;
+}
+
+function waitAbortable(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const state: { timer?: ReturnType<typeof setTimeout> } = {};
+    const onAbort = (): void => {
+      if (state.timer !== undefined) clearTimeout(state.timer);
+      resolve();
+    };
+    state.timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    state.timer.unref();
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export function attachFleetPiAdapter(
   pi: PiExtensionApi,
   overrides: FleetPiAdapterOptions = {},
 ): void {
-  const { client, boardUrl, metaChannel, profile, channel } = resolveBoardClient(overrides);
+  const { client, mate } = resolveBoardClient(overrides);
+  const baseDelayMs = overrides.reconnectDelayMs ?? 1500;
   let controller: AbortController | undefined;
   let ambientBlock = "";
 
-  const watchEvents = async (signal: AbortSignal): Promise<void> => {
-    try {
-      for await (const event of client.events({}, { signal })) {
-        const notice = formatHighSignalEvent(event, profile, channel);
-        if (notice === undefined) continue;
-        pi.sendMessage(
-          { customType: "fleet", content: notice, display: true },
-          { triggerTurn: true, deliverAs: "followUp" },
-        );
+  const wake = (content: string): void => {
+    pi.sendMessage(
+      { customType: "fleet", content, display: true },
+      { triggerTurn: true, deliverAs: "followUp" },
+    );
+  };
+
+  const watchEvents = async (signal: AbortSignal, cursor: number | undefined): Promise<void> => {
+    let lastEventId = cursor;
+    let initialChase = cursor !== undefined;
+    let attempt = 0;
+
+    while (!signal.aborted) {
+      try {
+        if (lastEventId === undefined) {
+          const recovered = await client.latestEventId();
+          const reconciliation = await buildReconciliationNotice(client, mate);
+          ambientBlock = await buildAmbientBlock(client, mate);
+          lastEventId = recovered;
+          if (reconciliation !== undefined) wake(reconciliation);
+        }
+        const wantsChase = initialChase;
+        initialChase = false;
+        for await (const event of client.events({
+          ...(lastEventId !== undefined ? { after: lastEventId } : {}),
+          ...(wantsChase ? { initialChase: true } : {}),
+          holder: mate,
+          signal,
+        })) {
+          attempt = 0;
+          if (event.id > 0) lastEventId = Math.max(lastEventId ?? 0, event.id);
+          const notice = formatMateEvent(event, mate);
+          if (notice === undefined) continue;
+          wake(notice);
+        }
+      } catch {
+        if (signal.aborted) break;
       }
-    } catch {
-      controller = undefined;
+      if (signal.aborted) break;
+      const delayMs = Math.min(30_000, baseDelayMs * 2 ** Math.min(attempt, 4));
+      attempt += 1;
+      await waitAbortable(delayMs, signal);
     }
   };
 
   pi.on("session_start", async () => {
-    ambientBlock = await buildAmbientBlock({ client, boardUrl, metaChannel, profile, channel });
+    const cursor = await client.latestEventId().catch(() => undefined);
+    ambientBlock = await buildAmbientBlock(client, mate);
     controller = new AbortController();
-    void watchEvents(controller.signal);
+    void watchEvents(controller.signal, cursor);
   });
 
   pi.on("before_agent_start", (event) => {
@@ -189,6 +302,7 @@ export function attachFleetPiAdapter(
 
   pi.on("session_shutdown", () => {
     controller?.abort();
+    controller = undefined;
   });
 }
 

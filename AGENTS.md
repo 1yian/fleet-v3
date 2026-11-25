@@ -11,5 +11,5 @@ If a request conflicts with `VISION.md`, stop and propose an aligned alternative
 
 ## Verification and docs
 
-- Keep the end-to-end suite small, fast, and focused on core user journeys against real boundaries (`@vercel/board`'s `local({ memory: true })` backend, real git worktrees, real child processes). Do not write unit tests, and do not add a new test for every small change - extend an existing journey or record live verification evidence unless a core contract changed.
+- Keep the end-to-end suite small, fast, and focused on core user journeys against real boundaries (the in-memory SQLite Card Server, real git worktrees, real child processes). Do not write unit tests, and do not add a new test for every small change - extend an existing journey or record live verification evidence unless a core contract changed.
 - Write documentation in plain, declarative sentences using plain hyphens, never em dashes.

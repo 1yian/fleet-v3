@@ -1,7 +1,6 @@
-import { copyFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Board, MessageView, ThreadSummaryView } from "@vercel/board";
 import {
   AxiError,
   installSessionStartHooks,
@@ -9,331 +8,259 @@ import {
   uninstallSessionStartHooks,
   type SessionStartHookScope,
 } from "axi-sdk-js";
-import { DELIVERIES, loadConfig } from "../config.ts";
+import { createHttpBoardClient, type BoardClient } from "../board/client.ts";
+import {
+  CARD_STATES,
+  DELIVERIES,
+  type Card,
+  type CardState,
+  type Delivery,
+  type OptionalFenceInput,
+} from "../board/types.ts";
+import { loadConfig } from "../config.ts";
 import { runLoop } from "../runner/loop.ts";
 import { boolFlag, parseStrictFlags, stringFlag } from "./parse.ts";
 
 const EXAMPLE_CONFIG = fileURLToPath(new URL("../../fleet.example.yaml", import.meta.url));
-const TRUNCATE_CHARS = 600;
-const HOME_TASK_LIMIT = 25;
-const LIST_DEFAULT_LIMIT = 50;
+const LIST_DEFAULT_LIMIT = 30;
+const HOME_CARD_LIMIT = 15;
+const BODY_PREVIEW_LIMIT = 240;
 
-const BOARD_STATES = [
-  "all",
-  "waiting",
-  "ready",
-  "claimed",
-  "blocked",
-  "failed",
-  "completed",
-  "canceled",
-] as const;
+type CardStateFilter = CardState | "open" | "all";
 
-type BoardState = (typeof BOARD_STATES)[number];
-type TaskStateFilter = "open" | BoardState;
-
-const OPTIONAL_FIELDS = [
-  "owner",
-  "claimedBy",
-  "project",
-  "host",
-  "delivery",
-  "pr",
-  "epoch",
-  "replies",
-  "result",
-] as const;
-
+const OPTIONAL_FIELDS = ["project", "host", "delivery", "epoch", "entries", "result"] as const;
 type OptionalField = (typeof OPTIONAL_FIELDS)[number];
 
-const FIELD_READERS: Record<OptionalField, (item: ThreadSummaryView) => string | number> = {
-  owner: (item) => item.message.task?.owner ?? "",
-  claimedBy: (item) => item.message.task?.by ?? "",
-  project: (item) => item.message.labels["project"] ?? "",
-  host: (item) => item.message.labels["host"] ?? "",
-  delivery: (item) => item.message.labels["delivery"] ?? "",
-  pr: (item) => item.message.labels["pr"] ?? "",
-  epoch: (item) => item.message.task?.epoch ?? 0,
-  replies: (item) => item.replies,
-  result: (item) => item.message.task?.result ?? "",
+const FIELD_READERS: Record<OptionalField, (card: Card) => string | number> = {
+  project: (card) => card.project ?? "",
+  host: (card) => card.host ?? "",
+  delivery: (card) => card.delivery ?? "",
+  epoch: (card) => card.epoch,
+  entries: (card) => card.entryCount,
+  result: (card) => card.result,
 };
 
 export interface FleetAxiContext {
-  readonly board: () => Board;
-  readonly boardUrl: string | undefined;
-  readonly metaChannel: string;
+  readonly board: () => BoardClient;
+  readonly boardUrl: string;
+  readonly actor: string;
+  readonly fence: OptionalFenceInput;
 }
 
 export const COMMAND_HELP: Readonly<Record<string, string>> = {
-  tasks: `fleet tasks - list tasks across channels
+  cards: `fleet cards - list cards across mates and holders
 Usage:
-  fleet tasks [--channel <ch>] [--state <state>] [--fields <cols>] [--limit <n>]
+  fleet cards [--mate <name>] [--holder <name>] [--state <state>] [--fields <cols>] [--limit <n>]
 Flags:
-  --channel <ch>     Filter to one channel or prefix (e.g. cleo)
-  --state <state>    open (default), all, waiting, ready, claimed, blocked, failed, completed, canceled
+  --mate <name>      Filter to cards owned by one mate (e.g. cleo, jarvis)
+  --holder <name>    Filter to cards currently held by one actor (e.g. captain, jarvis, cleo)
+  --state <state>    open (default), all, waiting, queued, running, held, done, canceled
   --fields <cols>    Extra columns: ${OPTIONAL_FIELDS.join(", ")}
   --limit <n>        Max rows to show (default: ${String(LIST_DEFAULT_LIMIT)})
 Examples:
-  fleet tasks
-  fleet tasks --channel cleo --state blocked
-  fleet tasks --state all --fields project,host,pr`,
-  view: `fleet view - inspect one task and its thread
+  fleet cards
+  fleet cards --holder captain
+  fleet cards --mate cleo --state all --fields project,host,result`,
+  view: `fleet view - inspect one card and its thread
 Usage:
   fleet view <id> [--full]
 Flags:
-  --full             Show untruncated task body and replies
+  --full             Show untruncated card body and entries
 Examples:
-  fleet view 412
-  fleet view 412 --full`,
-  dispatch: `fleet dispatch - create a task on the board
+  fleet view 42
+  fleet view 42 --full`,
+  dispatch: `fleet dispatch - delegate a card to a child mate or spawn a worker for yourself
 Usage:
-  fleet dispatch --channel <ch> --title "<text>" [--body "<spec>"] [--project <p>] [--host <h>] [--delivery <mode>] [--needs <ids>] [--for <profile>]
+  fleet dispatch [--mate <name>] --title "<text>" [--body "<spec>"] [--project <repo>] [--host <host>] [--delivery <mode>] [--needs <ids>]
 Flags:
-  --channel <ch>     Required domain channel
-  --title <text>     Required task title or intent
+  --mate <name>      Target mate (defaults to $FLEET_MATE; omit --project/--host when delegating to a child mate)
+  --title <text>     Required card title or intent
   --body <spec>      Optional additional spec text
-  --project <repo>   Repository label for fleet-runner
-  --host <host>      Execution host label (e.g. p620, maverick)
+  --project <repo>   Repository name for fleet-runner (requires --host; mates spawn workers only for themselves)
+  --host <host>      Execution host name (e.g. maverick, p620; requires --project)
   --delivery <mode>  ${DELIVERIES.join(" | ")}
-  --needs <ids>      Comma-separated prerequisite task IDs
-  --for <profile>    Assign to a specific agent profile
+  --needs <ids>      Comma-separated prerequisite card IDs
 Examples:
-  fleet dispatch --channel cleo --project Cleo --host p620 --title "Fix webhook timeout"
-  fleet dispatch --channel growth --title "Audit Google Ads CPA"`,
-  reply: `fleet reply - post a reply on a task thread
+  fleet dispatch --mate cleo --title "Investigate recent conversion drop"
+  fleet dispatch --project Cleo --host p620 --title "Fix webhook timeout"`,
+  queue: `fleet queue - put a held card in the runner queue for a worker (resets retry attempts on held cards)
+Usage:
+  fleet queue <id> [--project <repo>] [--host <host>] [--delivery <mode>]
+Flags:
+  --project <repo>   Repository name for fleet-runner
+  --host <host>      Execution host name
+  --delivery <mode>  ${DELIVERIES.join(" | ")}`,
+  snooze: `fleet snooze - defer stale-card chases on a held card while waiting on an external event
+Usage:
+  fleet snooze <id> --for <duration> [--reason "<why>"]
+Flags:
+  --for <duration>   Duration such as 30s, 15m, 2h, or 1d
+  --reason <text>    Optional reason (e.g. waiting on external PR review)
+Examples:
+  fleet snooze 42 --for 2h --reason "Waiting for Stripe support reply"`,
+  reply: `fleet reply - post an entry on a card thread
 Usage:
   fleet reply <id> --text "<message>" [--internal]
 Flags:
   --text <message>   Required reply text
-  --internal         Keep reply on board only (--no-sync)
-Examples:
-  fleet reply 412 --text "PR is green: https://github.com/org/repo/pull/9"
-  fleet reply 412 --text "Running checks" --internal`,
-  block: `fleet block - hold a task for human judgment
+  --internal         Mark entry internal (quiet coordination note)`,
+  escalate: `fleet escalate - hand a card up to the parent mate (or captain)
 Usage:
-  fleet block <id> --reason "<question and recommendation>" [--kind <kind>]
+  fleet escalate <id> --reason "<evidence, question, and recommendation>" 
 Flags:
-  --reason <text>    Required question, evidence, and recommendation
-  --kind <kind>      Optional free-text label (e.g. needs_input, awaiting_approval)
-Examples:
-  fleet block 412 --reason "PR #9 is green. Merge to main? Rec: merge."`,
-  unblock: `fleet unblock - lift a block on a task (optionally posting an answer)
+  --reason <text>    Required question, evidence, and recommendation`,
+  handoff: `fleet handoff - pass a card to a mate (default: its home mate)
 Usage:
-  fleet unblock <id> [--reply "<answer>"]
+  fleet handoff <id> [--to <mate>] [--text "<context>"]
 Flags:
-  --reply <text>     Optional reply to post before unblocking
-Examples:
-  fleet unblock 412 --reply "merge"
-  fleet unblock 412`,
-  cancel: `fleet cancel - cancel an open or obsolete task
+  --to <mate>        Target holder (default: card's home mate)
+  --text <message>   Optional handoff note`,
+  answer: `fleet answer - answer an escalated card and hand it back to its mate
+Usage:
+  fleet answer <id> --text "<answer>"
+Flags:
+  --text <message>   Required answer text`,
+  close: `fleet close - mark a card done and unblock waiting dependents (captain and mates only; workers exit cleanly or hand off)
+Usage:
+  fleet close <id> [--result "<summary>"]
+Flags:
+  --result <text>    Optional completion summary`,
+  cancel: `fleet cancel - cancel an open or obsolete card
 Usage:
   fleet cancel <id> --reason "<why>"
 Flags:
-  --reason <text>    Required cancellation reason
-Examples:
-  fleet cancel 412 --reason "Superseded by #419"`,
-  hosts: `fleet hosts - list runner hosts advertised in meta
+  --reason <text>    Required cancellation reason`,
+  hosts: `fleet hosts - list runner hosts advertised on the Card Server
 Usage:
-  fleet hosts
-Examples:
   fleet hosts`,
-  charter: `fleet charter - read or update a domain charter on the board
+  charter: `fleet charter - read or update a mate's plain-Markdown charter
 Usage:
-  fleet charter <channel> [--set "<text>"]
+  fleet charter <mate> [--set "<charter text>"]
 Flags:
-  --set <text>       Publish a new charter message to <channel>
-Examples:
-  fleet charter cleo
-  fleet charter growth --set "Full autopilot within $150/day ad cap."`,
-  prefs: `fleet prefs - read or update operator-wide preferences in meta
+  --set <text>       Write or replace the mate's charter`,
+  prefs: `fleet prefs - read or update captain-wide preferences
 Usage:
-  fleet prefs [--set "<text>"]
+  fleet prefs [--set "<preferences text>"]
 Flags:
-  --set <text>       Publish updated preferences to meta
-Examples:
-  fleet prefs
-  fleet prefs --set "Prefer smallest diff; no unit tests."`,
-  init: `fleet init - copy fleet.example.yaml to ./fleet.yaml (idempotent)
+  --set <text>       Write or replace captain-wide preferences`,
+  serve: `fleet serve - run the minimal 3-table SQLite Card Server (HTTP + SSE)
 Usage:
-  fleet init [--config <path>]
+  fleet serve [--dir <path>] [--host <addr>] [--port <n>] [--config <path>]
 Flags:
-  --config <path>    Target config path (default: ./fleet.yaml)
-Examples:
-  fleet init`,
-  setup: `fleet setup - install or inspect session-start hooks (Claude Code, Codex, OpenCode)
+  --dir <path>       Data directory for fleet.db, charters/, and prefs.md
+  --host <addr>      Bind host (default: 127.0.0.1)
+  --port <n>         Bind port (default: 4100)
+  --config <path>    Path to fleet.yaml for defaults and mate parent hierarchy`,
+  init: `fleet init - create fleet.yaml from fleet.example.yaml
 Usage:
-  fleet setup hooks [--scope <user|project>] [--status] [--uninstall]
-Flags:
-  --scope <scope>    user (default) or project
-  --status           Show current hook installation status
-  --uninstall        Remove installed session-start hooks
-Examples:
-  fleet setup hooks --status
-  fleet setup hooks --scope user`,
-  run: `fleet run - start the fleet-runner execution loop for this host
+  fleet init [--config <path>]`,
+  setup: `fleet setup - install or inspect session-start hooks
 Usage:
-  fleet run [--config <path>] [--once]
-Flags:
-  --config <path>    Path to fleet.yaml (default: $FLEET_CONFIG or ./fleet.yaml)
-  --once             Claim and run at most one ready task, then exit
-Examples:
-  fleet run
-  fleet run --config ./fleet.yaml --once`,
-  web: `fleet web - serve the optional visual Kanban viewport over @vercel/board
+  fleet setup hooks [--scope user|project] [--status | --uninstall]`,
+  run: `fleet run - run fleet-runner for this host
 Usage:
-  fleet web [--host <addr>] [--port <n>] [--inspect-origin <url>]
-Flags:
-  --host <addr>            Bind address (default: 127.0.0.1)
-  --port <n>               Port to listen on (default: 4101)
-  --inspect-origin <url>   Optional vb inspect origin to proxy under /inspect
-Examples:
-  fleet web --host 100.107.213.95 --port 4100`,
+  fleet run [--config <path>] [--once]`,
+  web: `fleet web - serve the visual Kanban viewport proxying to the Card Server
+Usage:
+  fleet web [--host <addr>] [--port <n>]`,
 };
-
-function firstLine(text: string): string {
-  const line =
-    text
-      .split("\n")
-      .map((each) => each.trim())
-      .find((each) => each !== "") ?? "";
-  return line.length <= 100 ? line : `${line.slice(0, 97)}...`;
-}
-
-function truncate(
-  text: string,
-  full: boolean,
-): { readonly value: string; readonly truncated: boolean } {
-  if (full || text.length <= TRUNCATE_CHARS) {
-    return { value: text, truncated: false };
-  }
-  return {
-    value: `${text.slice(0, TRUNCATE_CHARS).trimEnd()}...\n... (truncated, ${String(text.length)} chars total)`,
-    truncated: true,
-  };
-}
-
-function parseHosts(messages: readonly MessageView[]): Record<string, string>[] {
-  const byHost = new Map<string, Record<string, string>>();
-  for (const msg of messages) {
-    if (msg.labels["kind"] !== "host") continue;
-    const host = msg.labels["host"] ?? "";
-    if (host === "") continue;
-    const modeMatch = /\bmode=(\S+)/u.exec(msg.text);
-    const reposMatch = /\brepos=(.+)$/u.exec(msg.text);
-    byHost.set(host, {
-      host,
-      mode: modeMatch?.[1] ?? "unknown",
-      repos: reposMatch?.[1]?.trim() ?? "none",
-    });
-  }
-  return [...byHost.values()].toSorted((a, b) => (a["host"] ?? "").localeCompare(b["host"] ?? ""));
-}
-
-function formatTaskRow(
-  item: ThreadSummaryView,
-  extraFields: readonly OptionalField[],
-): Record<string, string | number> {
-  const row: Record<string, string | number> = {
-    id: item.message.id,
-    channel: item.message.channel,
-    state: item.message.task?.state ?? "unknown",
-    title: firstLine(item.message.text),
-  };
-  for (const field of extraFields) {
-    row[field] = FIELD_READERS[field](item);
-  }
-  return row;
-}
-
-function summarizeCounts(tasks: readonly ThreadSummaryView[]): string {
-  const tally: Record<string, number> = {
-    blocked: 0,
-    claimed: 0,
-    ready: 0,
-    waiting: 0,
-    failed: 0,
-  };
-  for (const item of tasks) {
-    const state = item.message.task?.state;
-    if (state !== undefined && Object.hasOwn(tally, state)) {
-      tally[state] = (tally[state] ?? 0) + 1;
-    }
-  }
-  const parts = Object.entries(tally)
-    .filter(([, n]) => n > 0)
-    .map(([state, n]) => `${String(n)} ${state}`);
-  if (parts.length === 0) return "0 open tasks";
-  return `${parts.join(", ")} (${String(tasks.length)} open total)`;
-}
 
 function requireBoard(ctx: FleetAxiContext | undefined): FleetAxiContext {
   if (ctx === undefined) {
-    throw new AxiError("No board context configured", "config", [
+    throw new AxiError("No Card Server configured", "config", [
       "Set BOARD_URL or create fleet.yaml with `fleet init`",
     ]);
   }
   return ctx;
 }
 
-async function listAllTasks(
-  client: Board,
-  params: { readonly channel?: string; readonly state?: TaskStateFilter },
-): Promise<ThreadSummaryView[]> {
-  const state = params.state === undefined || params.state === "open" ? undefined : params.state;
-  const page = await client.tasks.list({
-    limit: 100,
-    ...(params.channel !== undefined ? { channel: params.channel } : {}),
-    ...(state !== undefined ? { state } : {}),
-  });
-  return page.tasks;
+function truncateText(text: string, maxChars: number): string {
+  const single = text.replaceAll(/\s+/gu, " ").trim();
+  if (single.length <= maxChars) return single;
+  return `${single.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+function formatCardRow(card: Card, extraFields: readonly OptionalField[]): Record<string, unknown> {
+  const row: Record<string, unknown> = {
+    id: card.id,
+    mate: card.mate,
+    state: card.state,
+    holder: card.holder,
+    title: truncateText(card.title, 96),
+  };
+  for (const field of extraFields) {
+    row[field] = FIELD_READERS[field](card);
+  }
+  return row;
+}
+
+function scopeOf(active: FleetAxiContext): string | undefined {
+  if (active.fence.epoch !== undefined) return undefined;
+  return active.actor === "captain" ? undefined : active.actor;
 }
 
 export async function homeCommand(
-  _args: string[],
-  ctx: FleetAxiContext | undefined,
-): Promise<Record<string, unknown>> {
-  const active = requireBoard(ctx);
-  const client = active.board();
-  const [openTasks, metaPage] = await Promise.all([
-    listAllTasks(client, { state: "open" }),
-    client
-      .channel(active.metaChannel)
-      .messages({ limit: 50 })
-      .catch(() => ({ messages: [] })),
-  ]);
-  const hosts = parseHosts(metaPage.messages);
-  const shown = openTasks.slice(0, HOME_TASK_LIMIT).map((task) => formatTaskRow(task, []));
-  const hasBlocked = openTasks.some((task) => task.message.task?.state === "blocked");
-  const help: string[] = [];
-  if (shown.length > 0) help.push("Run `fleet view <id>` to inspect a task and its thread");
-  if (hasBlocked) help.push('Run `fleet unblock <id> --reply "<answer>"` to answer a blocked task');
-  if (openTasks.length > HOME_TASK_LIMIT) {
-    help.push(`Run \`fleet tasks\` to see all ${String(openTasks.length)} open tasks`);
-  }
-  help.push(
-    'Run `fleet dispatch --channel <ch> --title "<text>" [--project <repo>] [--host <host>]` to create a task',
-  );
-
-  return {
-    ...(active.boardUrl !== undefined ? { board: active.boardUrl } : {}),
-    counts: summarizeCounts(openTasks),
-    hosts: hosts.length === 0 ? "0 runner hosts advertised in meta" : hosts,
-    tasks: shown.length === 0 ? "0 open tasks found" : shown,
-    help,
-  };
-}
-
-export async function tasksCommand(
   args: string[],
   ctx: FleetAxiContext | undefined,
 ): Promise<Record<string, unknown>> {
   const active = requireBoard(ctx);
-  const helpBlock = COMMAND_HELP["tasks"] ?? "";
+  parseStrictFlags("fleet", args, {}, "Run `fleet --help` for commands.");
+  const overview = await active.board().getOverview(scopeOf(active));
+
+  const summaryParts: string[] = [];
+  if (overview.counts.needsCaptain > 0) {
+    summaryParts.push(`${String(overview.counts.needsCaptain)} needs captain`);
+  }
+  if (overview.counts.held > 0) summaryParts.push(`${String(overview.counts.held)} held`);
+  if (overview.counts.running > 0) summaryParts.push(`${String(overview.counts.running)} running`);
+  if (overview.counts.queued > 0) summaryParts.push(`${String(overview.counts.queued)} queued`);
+  if (overview.counts.waiting > 0) summaryParts.push(`${String(overview.counts.waiting)} waiting`);
+
+  const countsLine =
+    overview.counts.open === 0
+      ? "0 open cards"
+      : `${summaryParts.join(", ")} (${String(overview.counts.open)} open total)`;
+
+  const hosts = overview.hosts.map((host) => ({
+    host: host.host,
+    mode: host.mode,
+    viewport: host.viewport,
+    repos: host.repos.join(", "),
+  }));
+
+  const cards = overview.cards.slice(0, HOME_CARD_LIMIT).map((card) => formatCardRow(card, []));
+  const help = [
+    "Run `fleet view <id>` to inspect a card and its thread",
+    'Run `fleet dispatch --mate <name> --title "<text>" [--project <repo>] [--host <host>]` to create a card',
+  ];
+  if (overview.counts.needsCaptain > 0) {
+    help.unshift("Run `fleet cards --holder captain` to inspect cards waiting on the captain");
+  }
+  if (overview.cards.length > HOME_CARD_LIMIT) {
+    help.push(`Run \`fleet cards --limit ${String(overview.cards.length)}\` to see all open cards`);
+  }
+
+  return {
+    board: active.boardUrl,
+    counts: countsLine,
+    hosts: hosts.length > 0 ? hosts : "0 runner hosts advertised yet",
+    cards: cards.length > 0 ? cards : "0 open cards",
+    help,
+  };
+}
+
+export async function cardsCommand(
+  args: string[],
+  ctx: FleetAxiContext | undefined,
+): Promise<Record<string, unknown>> {
+  const active = requireBoard(ctx);
+  const helpBlock = COMMAND_HELP["cards"] ?? "";
   const parsed = parseStrictFlags(
-    "tasks",
+    "cards",
     args,
     {
-      channel: { type: "string" },
+      mate: { type: "string" },
+      holder: { type: "string" },
       state: { type: "string" },
       fields: { type: "string" },
       limit: { type: "string" },
@@ -342,7 +269,7 @@ export async function tasksCommand(
   );
 
   const stateArg = stringFlag(parsed.values, "state") ?? "open";
-  const allStates: readonly TaskStateFilter[] = ["open", ...BOARD_STATES];
+  const allStates: readonly CardStateFilter[] = ["open", "all", ...CARD_STATES];
   const state = allStates.find((each) => each === stateArg);
   if (state === undefined) {
     throw new AxiError(`invalid --state "${stateArg}"`, "VALIDATION_ERROR", [
@@ -374,34 +301,46 @@ export async function tasksCommand(
   const limitRaw = stringFlag(parsed.values, "limit");
   const limit = limitRaw === undefined ? LIST_DEFAULT_LIMIT : Number(limitRaw);
   if (!Number.isInteger(limit) || limit < 1) {
-    throw new AxiError(`--limit must be a positive integer`, "VALIDATION_ERROR", [helpBlock]);
+    throw new AxiError("--limit must be a positive integer", "VALIDATION_ERROR", [helpBlock]);
   }
 
-  const channel = stringFlag(parsed.values, "channel");
-  const all = await listAllTasks(active.board(), {
-    ...(channel !== undefined ? { channel } : {}),
+  const mate = stringFlag(parsed.values, "mate");
+  const holder = stringFlag(parsed.values, "holder");
+  const scope = scopeOf(active);
+  const page = await active.board().listCards({
+    ...(mate !== undefined ? { mate } : {}),
+    ...(holder !== undefined ? { holder } : {}),
+    ...(scope !== undefined ? { scope } : {}),
     state,
+    limit,
   });
 
-  if (all.length === 0) {
-    const scope = channel === undefined ? "" : ` in channel ${channel}`;
+  if (page.total === 0) {
     return {
-      tasks: `0 ${state} tasks found${scope}`,
+      cards: `0 ${state} cards found`,
       help: [
-        'Run `fleet dispatch --channel <ch> --title "<text>"` to create a task',
-        ...(state === "open" ? ["Run `fleet tasks --state all` to include completed tasks"] : []),
+        'Run `fleet dispatch --mate <name> --title "<text>"` to create a card',
+        ...(state === "open" ? ["Run `fleet cards --state all` to include closed cards"] : []),
       ],
     };
   }
 
-  const shown = all.slice(0, limit).map((task) => formatTaskRow(task, extraFields));
-  const help = ["Run `fleet view <id>` to inspect a task and its thread"];
-  if (all.length > limit) {
-    help.push(`Run \`fleet tasks --limit ${String(all.length)}\` to see all ${String(all.length)}`);
+  const shown = page.cards.map((card) => formatCardRow(card, extraFields));
+  const help = ["Run `fleet view <id>` to inspect a card and its thread"];
+  if (page.total > shown.length) {
+    const continuation = [
+      "fleet cards",
+      ...(mate !== undefined ? [`--mate ${mate}`] : []),
+      ...(holder !== undefined ? [`--holder ${holder}`] : []),
+      ...(state === "open" ? [] : [`--state ${state}`]),
+      ...(extraFields.length > 0 ? [`--fields ${extraFields.join(",")}`] : []),
+      `--limit ${String(page.total)}`,
+    ].join(" ");
+    help.push(`Run \`${continuation}\` to see all ${String(page.total)}`);
   }
   return {
-    count: `${String(shown.length)} of ${String(all.length)} total`,
-    tasks: shown,
+    count: `${String(shown.length)} of ${String(page.total)} total`,
+    cards: shown,
     help,
   };
 }
@@ -415,45 +354,71 @@ export async function viewCommand(
   const parsed = parseStrictFlags("view", args, { full: { type: "boolean" } }, helpBlock);
   const [id] = parsed.positionals;
   if (id === undefined) {
-    throw new AxiError("task <id> is required for `view`", "VALIDATION_ERROR", [helpBlock]);
+    throw new AxiError("card <id> is required for `view`", "VALIDATION_ERROR", [helpBlock]);
   }
-
   const full = boolFlag(parsed.values, "full");
-  const thread = await active.board().thread(id);
-  const root = thread.message;
-  const body = truncate(root.text, full);
-  let anyTruncated = body.truncated;
-  const replies = thread.replies.map((reply) => {
-    const clipped = truncate(reply.text, full);
-    anyTruncated ||= clipped.truncated;
-    return {
-      id: reply.id,
-      by: reply.by.actor,
-      text: clipped.value,
+  const { card, entries } = await active.board().getThread(id, scopeOf(active));
+
+  let truncated = false;
+  const body =
+    full || card.body.length <= BODY_PREVIEW_LIMIT
+      ? card.body
+      : (() => {
+          truncated = true;
+          return truncateText(card.body, BODY_PREVIEW_LIMIT);
+        })();
+
+  const formattedEntries = entries.map((entry) => {
+    const text =
+      full || entry.text.length <= BODY_PREVIEW_LIMIT
+        ? entry.text
+        : (() => {
+            truncated = true;
+            return truncateText(entry.text, BODY_PREVIEW_LIMIT);
+          })();
+    const formatted: Record<string, unknown> = {
+      id: entry.id,
+      by: entry.by,
+      kind: entry.kind,
+      text,
     };
+    if (entry.internal) formatted["internal"] = true;
+    return formatted;
   });
 
-  const result: Record<string, unknown> = {
-    task: {
-      id: root.id,
-      channel: root.channel,
-      state: root.task?.state ?? "unknown",
-      epoch: root.task?.epoch ?? 0,
-      owner: root.task?.owner ?? "",
-      claimedBy: root.task?.by ?? "",
-      labels: root.labels,
-      ...(root.task?.result !== undefined && root.task.result !== null
-        ? { result: root.task.result }
+  return {
+    card: {
+      id: card.id,
+      mate: card.mate,
+      state: card.state,
+      holder: card.holder,
+      title: card.title,
+      ...(body.length > 0 ? { body } : {}),
+      ...(card.project !== null ? { project: card.project } : {}),
+      ...(card.host !== null ? { host: card.host } : {}),
+      ...(card.delivery !== null ? { delivery: card.delivery } : {}),
+      ...(card.needs.length > 0 ? { needs: card.needs } : {}),
+      epoch: card.epoch,
+      ...(card.snoozeUntil !== null
+        ? { snoozeUntil: new Date(card.snoozeUntil).toISOString() }
         : {}),
-      body: body.value,
+      ...(card.result.length > 0 ? { result: card.result } : {}),
     },
-    replies: replies.length === 0 ? "0 replies" : replies,
+    entries: formattedEntries.length > 0 ? formattedEntries : "0 entries",
+    ...(truncated ? { help: [`Run \`fleet view ${card.id} --full\` for untruncated text`] } : {}),
   };
+}
 
-  if (anyTruncated) {
-    result["help"] = [`Run \`fleet view ${id} --full\` to see complete text`];
+function parseDeliveryFlag(raw: string | undefined, helpBlock: string): Delivery | undefined {
+  if (raw === undefined) return undefined;
+  const matched = DELIVERIES.find((each) => each === raw);
+  if (matched === undefined) {
+    throw new AxiError(`invalid --delivery "${raw}"`, "VALIDATION_ERROR", [
+      `valid values: ${DELIVERIES.join(", ")}`,
+      helpBlock,
+    ]);
   }
-  return result;
+  return matched;
 }
 
 export async function dispatchCommand(
@@ -466,38 +431,31 @@ export async function dispatchCommand(
     "dispatch",
     args,
     {
-      channel: { type: "string", required: true },
+      mate: { type: "string" },
       title: { type: "string", required: true },
       body: { type: "string" },
       project: { type: "string" },
       host: { type: "string" },
       delivery: { type: "string" },
       needs: { type: "string" },
-      for: { type: "string" },
     },
     helpBlock,
   );
 
-  const channel = stringFlag(parsed.values, "channel") ?? "";
+  const explicitMate = stringFlag(parsed.values, "mate");
+  const inferredMate = scopeOf(active);
+  const mate = explicitMate ?? inferredMate ?? "";
+  if (mate.length === 0) {
+    throw new AxiError("--mate is required when dispatching as captain", "VALIDATION_ERROR", [
+      helpBlock,
+    ]);
+  }
   const title = stringFlag(parsed.values, "title") ?? "";
   const body = stringFlag(parsed.values, "body");
   const project = stringFlag(parsed.values, "project");
   const host = stringFlag(parsed.values, "host");
-  const delivery = stringFlag(parsed.values, "delivery");
+  const delivery = parseDeliveryFlag(stringFlag(parsed.values, "delivery"), helpBlock);
   const needsRaw = stringFlag(parsed.values, "needs");
-  const assignFor = stringFlag(parsed.values, "for");
-
-  if (delivery !== undefined && !DELIVERIES.some((each) => each === delivery)) {
-    throw new AxiError(`invalid --delivery "${delivery}"`, "VALIDATION_ERROR", [
-      `valid values: ${DELIVERIES.join(", ")}`,
-    ]);
-  }
-
-  const labels: Record<string, string> = {};
-  if (project !== undefined) labels["project"] = project;
-  if (host !== undefined) labels["host"] = host;
-  if (delivery !== undefined) labels["delivery"] = delivery;
-
   const needs =
     needsRaw === undefined
       ? undefined
@@ -506,25 +464,67 @@ export async function dispatchCommand(
           .map((each) => each.trim())
           .filter((each) => each !== "");
 
-  const text = body === undefined ? title : `${title}\n\n${body}`;
-  const created = await active.board().tasks.create(channel, {
-    text,
-    ...(Object.keys(labels).length > 0 ? { labels } : {}),
+  const card = await active.board().createCard({
+    mate,
+    title,
+    ...(body !== undefined ? { body } : {}),
+    ...(project !== undefined ? { project } : {}),
+    ...(host !== undefined ? { host } : {}),
+    ...(delivery !== undefined ? { delivery } : {}),
     ...(needs !== undefined && needs.length > 0 ? { needs } : {}),
-    ...(assignFor !== undefined ? { for: assignFor } : {}),
+    actor: active.actor,
   });
 
   return {
-    task: {
-      id: created.task.id,
-      channel: created.task.channel,
-      state: created.task.task?.state ?? "ready",
-      title: firstLine(created.task.text),
+    card: {
+      id: card.id,
+      mate: card.mate,
+      state: card.state,
+      holder: card.holder,
+      title: card.title,
     },
-    help: [
-      `Run \`fleet view ${created.task.id}\` to inspect the task`,
-      `Run \`fleet reply ${created.task.id} --text "<note>"\` to add context`,
-    ],
+    help: [`Run \`fleet view ${card.id}\` to track progress`],
+  };
+}
+
+export async function queueCommand(
+  args: string[],
+  ctx: FleetAxiContext | undefined,
+): Promise<Record<string, unknown>> {
+  const active = requireBoard(ctx);
+  const helpBlock = COMMAND_HELP["queue"] ?? "";
+  const parsed = parseStrictFlags(
+    "queue",
+    args,
+    {
+      project: { type: "string" },
+      host: { type: "string" },
+      delivery: { type: "string" },
+    },
+    helpBlock,
+  );
+  const [id] = parsed.positionals;
+  if (id === undefined) {
+    throw new AxiError("card <id> is required for `queue`", "VALIDATION_ERROR", [helpBlock]);
+  }
+  const project = stringFlag(parsed.values, "project");
+  const host = stringFlag(parsed.values, "host");
+  const delivery = parseDeliveryFlag(stringFlag(parsed.values, "delivery"), helpBlock);
+  const card = await active.board().queueCard(id, {
+    ...active.fence,
+    ...(project !== undefined ? { project } : {}),
+    ...(host !== undefined ? { host } : {}),
+    ...(delivery !== undefined ? { delivery } : {}),
+    actor: active.actor,
+  });
+  return {
+    card: {
+      id: card.id,
+      state: card.state,
+      holder: card.holder,
+      host: card.host,
+      project: card.project,
+    },
   };
 }
 
@@ -545,79 +545,179 @@ export async function replyCommand(
   );
   const [id] = parsed.positionals;
   if (id === undefined) {
-    throw new AxiError("task <id> is required for `reply`", "VALIDATION_ERROR", [helpBlock]);
+    throw new AxiError("card <id> is required for `reply`", "VALIDATION_ERROR", [helpBlock]);
   }
   const text = stringFlag(parsed.values, "text") ?? "";
   const internal = boolFlag(parsed.values, "internal");
-  const posted = await active.board().reply(id, { text, ...(internal ? { noSync: true } : {}) });
-  return {
-    reply: {
-      id: posted.id,
-      task: id,
-      internal,
-    },
-  };
+  const entry = await active.board().postEntry(id, {
+    ...active.fence,
+    text,
+    by: active.actor,
+    internal,
+  });
+  return { reply: { id: entry.id, cardId: entry.cardId, internal: entry.internal } };
 }
 
-export async function blockCommand(
+export async function escalateCommand(
   args: string[],
   ctx: FleetAxiContext | undefined,
 ): Promise<Record<string, unknown>> {
   const active = requireBoard(ctx);
-  const helpBlock = COMMAND_HELP["block"] ?? "";
+  const helpBlock = COMMAND_HELP["escalate"] ?? "";
   const parsed = parseStrictFlags(
-    "block",
+    "escalate",
     args,
     {
       reason: { type: "string", required: true },
-      kind: { type: "string" },
     },
     helpBlock,
   );
   const [id] = parsed.positionals;
   if (id === undefined) {
-    throw new AxiError("task <id> is required for `block`", "VALIDATION_ERROR", [helpBlock]);
+    throw new AxiError("card <id> is required for `escalate`", "VALIDATION_ERROR", [helpBlock]);
   }
   const reason = stringFlag(parsed.values, "reason") ?? "";
-  const kind = stringFlag(parsed.values, "kind");
-  const client = active.board();
-  const current = await client.thread(id);
-  if (current.message.task?.state === "blocked") {
-    return { task: `#${id} already blocked (no-op)` };
-  }
-  await client.tasks.block(id, reason, kind === undefined ? {} : { kind });
+  const card = await active.board().escalateCard(id, {
+    ...active.fence,
+    reason,
+    actor: active.actor,
+  });
   return {
-    task: { id, state: "blocked", reason },
-    help: [`Run \`fleet unblock ${id} --reply "<answer>"\` once answered`],
+    card: { id: card.id, state: card.state, holder: card.holder, reason: card.result },
   };
 }
 
-export async function unblockCommand(
+export async function handoffCommand(
   args: string[],
   ctx: FleetAxiContext | undefined,
 ): Promise<Record<string, unknown>> {
   const active = requireBoard(ctx);
-  const helpBlock = COMMAND_HELP["unblock"] ?? "";
-  const parsed = parseStrictFlags("unblock", args, { reply: { type: "string" } }, helpBlock);
+  const helpBlock = COMMAND_HELP["handoff"] ?? "";
+  const parsed = parseStrictFlags(
+    "handoff",
+    args,
+    {
+      to: { type: "string" },
+      text: { type: "string" },
+    },
+    helpBlock,
+  );
   const [id] = parsed.positionals;
   if (id === undefined) {
-    throw new AxiError("task <id> is required for `unblock`", "VALIDATION_ERROR", [helpBlock]);
+    throw new AxiError("card <id> is required for `handoff`", "VALIDATION_ERROR", [helpBlock]);
   }
-  const replyText = stringFlag(parsed.values, "reply");
-  const client = active.board();
-  if (replyText !== undefined) {
-    await client.reply(id, { text: replyText });
+  const to = stringFlag(parsed.values, "to");
+  const text = stringFlag(parsed.values, "text");
+  const card = await active.board().handoffCard(id, {
+    ...active.fence,
+    ...(to !== undefined ? { to } : {}),
+    ...(text !== undefined ? { text } : {}),
+    actor: active.actor,
+  });
+  return { card: { id: card.id, state: card.state, holder: card.holder } };
+}
+
+export async function answerCommand(
+  args: string[],
+  ctx: FleetAxiContext | undefined,
+): Promise<Record<string, unknown>> {
+  const active = requireBoard(ctx);
+  const helpBlock = COMMAND_HELP["answer"] ?? "";
+  const parsed = parseStrictFlags(
+    "answer",
+    args,
+    { text: { type: "string", required: true } },
+    helpBlock,
+  );
+  const [id] = parsed.positionals;
+  if (id === undefined) {
+    throw new AxiError("card <id> is required for `answer`", "VALIDATION_ERROR", [helpBlock]);
   }
-  const current = await client.thread(id);
-  if (current.message.task?.state !== "blocked") {
-    return {
-      task: `#${id} already ${current.message.task?.state ?? "unblocked"} (no-op)`,
-    };
+  const text = stringFlag(parsed.values, "text") ?? "";
+  const card = await active.board().answerCard(id, {
+    ...active.fence,
+    text,
+    actor: active.actor,
+  });
+  return { card: { id: card.id, state: card.state, holder: card.holder } };
+}
+
+const DURATION_UNITS: Readonly<Record<string, number>> = {
+  s: 1000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+};
+
+function parseDurationMs(raw: string, helpBlock: string): number {
+  const match = /^([1-9]\d*)(s|m|h|d)$/u.exec(raw.trim());
+  if (match?.[1] === undefined || match[2] === undefined) {
+    throw new AxiError(
+      `invalid --for duration "${raw}" (use e.g. 30s, 15m, 2h, 1d)`,
+      "VALIDATION_ERROR",
+      [helpBlock],
+    );
   }
-  const updated = await client.tasks.unblock(id);
+  const unitMs = DURATION_UNITS[match[2]] ?? 0;
+  return Number(match[1]) * unitMs;
+}
+
+export async function snoozeCommand(
+  args: string[],
+  ctx: FleetAxiContext | undefined,
+): Promise<Record<string, unknown>> {
+  const active = requireBoard(ctx);
+  const helpBlock = COMMAND_HELP["snooze"] ?? "";
+  const parsed = parseStrictFlags(
+    "snooze",
+    args,
+    {
+      for: { type: "string", required: true },
+      reason: { type: "string" },
+    },
+    helpBlock,
+  );
+  const [id] = parsed.positionals;
+  if (id === undefined) {
+    throw new AxiError("card <id> is required for `snooze`", "VALIDATION_ERROR", [helpBlock]);
+  }
+  const durationMs = parseDurationMs(stringFlag(parsed.values, "for") ?? "", helpBlock);
+  const reason = stringFlag(parsed.values, "reason");
+  const until = Date.now() + durationMs;
+  const card = await active.board().snoozeCard(id, {
+    ...active.fence,
+    until,
+    ...(reason !== undefined ? { reason } : {}),
+    actor: active.actor,
+  });
   return {
-    task: { id, state: updated.task?.state ?? "ready" },
+    card: {
+      id: card.id,
+      state: card.state,
+      holder: card.holder,
+      snoozeUntil: card.snoozeUntil !== null ? new Date(card.snoozeUntil).toISOString() : null,
+    },
   };
+}
+
+export async function closeCommand(
+  args: string[],
+  ctx: FleetAxiContext | undefined,
+): Promise<Record<string, unknown>> {
+  const active = requireBoard(ctx);
+  const helpBlock = COMMAND_HELP["close"] ?? "";
+  const parsed = parseStrictFlags("close", args, { result: { type: "string" } }, helpBlock);
+  const [id] = parsed.positionals;
+  if (id === undefined) {
+    throw new AxiError("card <id> is required for `close`", "VALIDATION_ERROR", [helpBlock]);
+  }
+  const result = stringFlag(parsed.values, "result");
+  const card = await active.board().closeCard(id, {
+    ...active.fence,
+    ...(result !== undefined ? { result } : {}),
+    actor: active.actor,
+  });
+  return { card: { id: card.id, state: card.state, result: card.result } };
 }
 
 export async function cancelCommand(
@@ -634,18 +734,15 @@ export async function cancelCommand(
   );
   const [id] = parsed.positionals;
   if (id === undefined) {
-    throw new AxiError("task <id> is required for `cancel`", "VALIDATION_ERROR", [helpBlock]);
+    throw new AxiError("card <id> is required for `cancel`", "VALIDATION_ERROR", [helpBlock]);
   }
   const reason = stringFlag(parsed.values, "reason") ?? "";
-  const client = active.board();
-  const current = await client.thread(id);
-  if (current.message.task?.state === "canceled") {
-    return { task: `#${id} already canceled (no-op)` };
-  }
-  await client.tasks.cancel(id, reason);
-  return {
-    task: { id, state: "canceled", reason },
-  };
+  const card = await active.board().cancelCard(id, {
+    ...active.fence,
+    reason,
+    actor: active.actor,
+  });
+  return { card: { id: card.id, state: card.state, reason: card.result } };
 }
 
 export async function hostsCommand(
@@ -654,19 +751,21 @@ export async function hostsCommand(
 ): Promise<Record<string, unknown>> {
   const active = requireBoard(ctx);
   parseStrictFlags("hosts", args, {}, COMMAND_HELP["hosts"] ?? "");
-  const page = await active
-    .board()
-    .channel(active.metaChannel)
-    .messages({ limit: 50 })
-    .catch(() => ({ messages: [] }));
-  const hosts = parseHosts(page.messages);
+  const hosts = await active.board().listHosts();
   if (hosts.length === 0) {
     return {
-      hosts: "0 runner hosts advertised in meta",
-      help: ["Start a runner on a host with `fleet run` to advertise its repos"],
+      hosts: "0 runner hosts advertised yet",
+      help: ["Start a host runner with `fleet run --config fleet.yaml`"],
     };
   }
-  return { hosts };
+  return {
+    hosts: hosts.map((host) => ({
+      host: host.host,
+      mode: host.mode,
+      viewport: host.viewport,
+      repos: host.repos.join(", "),
+    })),
+  };
 }
 
 export async function charterCommand(
@@ -676,32 +775,23 @@ export async function charterCommand(
   const active = requireBoard(ctx);
   const helpBlock = COMMAND_HELP["charter"] ?? "";
   const parsed = parseStrictFlags("charter", args, { set: { type: "string" } }, helpBlock);
-  const [channel] = parsed.positionals;
-  if (channel === undefined) {
-    throw new AxiError("<channel> is required for `charter`", "VALIDATION_ERROR", [helpBlock]);
+  const [mate] = parsed.positionals;
+  if (mate === undefined) {
+    throw new AxiError("<mate> is required for `charter`", "VALIDATION_ERROR", [helpBlock]);
   }
-  const nextText = stringFlag(parsed.values, "set");
-  const client = active.board();
-  if (nextText !== undefined) {
-    const posted = await client.post(channel, {
-      text: nextText,
-      labels: { kind: "charter" },
-      noSync: true,
-    });
-    return { charter: { channel, id: posted.id, updated: true } };
+  const setText = stringFlag(parsed.values, "set");
+  if (setText !== undefined) {
+    const text = await active.board().setCharter(mate, setText);
+    return { charter: { mate, updated: true, text } };
   }
-  const page = await client
-    .channel(channel)
-    .messages({ limit: 50 })
-    .catch(() => ({ messages: [] }));
-  const latest = page.messages.findLast((msg) => msg.labels["kind"] === "charter");
-  if (latest === undefined) {
+  const text = await active.board().getCharter(mate);
+  if (text.trim().length === 0) {
     return {
-      charter: `0 charters set in channel ${channel}`,
-      help: [`Run \`fleet charter ${channel} --set "<autonomy and boundaries>"\` to set one`],
+      charter: `0 charter set for ${mate}`,
+      help: [`Run \`fleet charter ${mate} --set "<autonomy rules>"\` to publish one`],
     };
   }
-  return { charter: { channel, id: latest.id, text: latest.text } };
+  return { charter: { mate, text } };
 }
 
 export async function prefsCommand(
@@ -711,28 +801,19 @@ export async function prefsCommand(
   const active = requireBoard(ctx);
   const helpBlock = COMMAND_HELP["prefs"] ?? "";
   const parsed = parseStrictFlags("prefs", args, { set: { type: "string" } }, helpBlock);
-  const nextText = stringFlag(parsed.values, "set");
-  const client = active.board();
-  if (nextText !== undefined) {
-    const posted = await client.post(active.metaChannel, {
-      text: nextText,
-      labels: { kind: "prefs" },
-      noSync: true,
-    });
-    return { prefs: { id: posted.id, updated: true } };
+  const setText = stringFlag(parsed.values, "set");
+  if (setText !== undefined) {
+    const text = await active.board().setPrefs(setText);
+    return { prefs: { updated: true, text } };
   }
-  const page = await client
-    .channel(active.metaChannel)
-    .messages({ limit: 50 })
-    .catch(() => ({ messages: [] }));
-  const latest = page.messages.findLast((msg) => msg.labels["kind"] === "prefs");
-  if (latest === undefined) {
+  const text = await active.board().getPrefs();
+  if (text.trim().length === 0) {
     return {
-      prefs: "0 operator preferences set in meta",
+      prefs: "0 captain preferences set",
       help: ['Run `fleet prefs --set "<preferences>"` to publish them'],
     };
   }
-  return { prefs: { id: latest.id, text: latest.text } };
+  return { prefs: { text } };
 }
 
 export function initCommand(args: string[]): Record<string, unknown> {
@@ -742,10 +823,11 @@ export function initCommand(args: string[]): Record<string, unknown> {
   if (existsSync(target)) {
     return { config: `${target} already exists (no-op)` };
   }
+  mkdirSync(dirname(target), { recursive: true });
   copyFileSync(EXAMPLE_CONFIG, target);
   return {
     config: { path: target, created: true },
-    help: [`Edit ${target}, then run \`fleet run --config ${target}\``],
+    help: [`Edit ${target}, then run \`fleet serve\` and \`fleet run --config ${target}\``],
   };
 }
 
@@ -798,10 +880,7 @@ export async function runCommand(args: string[]): Promise<Record<string, unknown
     helpBlock,
   );
   const config = loadConfig(stringFlag(parsed.values, "config"));
-  const { board: makeBoard } = await import("@vercel/board");
-  const client = makeBoard(config.boardUrl !== undefined ? { url: config.boardUrl } : {}).as(
-    `runner-${config.host}`,
-  );
+  const client = createHttpBoardClient(config.boardUrl);
   const controller = new AbortController();
   const stop = (): void => {
     controller.abort();

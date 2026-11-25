@@ -154,7 +154,7 @@ export function buildWorkerArgv(params: {
 }): string[] {
   const interpolated = params.config.spawn.command.map((part) =>
     part
-      .replaceAll("{task}", params.taskId)
+      .replaceAll("{card}", params.taskId)
       .replaceAll("{worktree}", params.worktreePath)
       .replaceAll("{prompt}", params.promptPath),
   );
@@ -176,7 +176,8 @@ export function buildWorkerArgv(params: {
   }
 
   if (params.config.spawn.direnv && hasEnvrcInAncestry(params.worktreePath)) {
-    return ["direnv", "exec", params.worktreePath, ...interpolated];
+    const assignments = Object.entries(params.env).map(([key, value]) => `${key}=${value}`);
+    return ["direnv", "exec", params.worktreePath, "env", ...assignments, ...interpolated];
   }
   return interpolated;
 }
@@ -186,6 +187,11 @@ export function runIsolatedCommand(options: RunCommandOptions): Promise<SpawnRes
     const [bin, ...args] = options.argv;
     if (bin === undefined) {
       reject(new Error("Command argv must not be empty"));
+      return;
+    }
+
+    if (options.signal?.aborted === true) {
+      resolve({ exitCode: null, signal: null, timedOut: null, aborted: true, outputTail: "" });
       return;
     }
 

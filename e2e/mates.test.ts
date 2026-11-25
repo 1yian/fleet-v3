@@ -5,16 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { board } from "@vercel/board";
-import { local } from "@vercel/board/backend-local";
 import { z } from "zod";
-import { attachFleetPiAdapter, type PiExtensionApi } from "../src/adapters/pi.ts";
+import { attachFleetPiAdapter } from "../src/adapters/pi.ts";
 import type { RunnerConfig } from "../src/config.ts";
 import { ensureMatesUp, listMates, stopMates } from "../src/mates.ts";
+import { createMockPi, startTestServer, waitFor } from "./support.ts";
 
 const RecordedEnvSchema = z.object({
-  profile: z.string(),
-  channel: z.string(),
   mate: z.string(),
   optchat: z.string(),
 });
@@ -45,69 +42,6 @@ function tryExecSilent(bin: string, args: readonly string[], timeout = 5000): bo
   }
 }
 
-function createMockPi(): {
-  readonly api: PiExtensionApi;
-  readonly delivered: string[];
-  readonly emitStart: () => Promise<void>;
-  readonly emitShutdown: () => Promise<void>;
-  readonly emitBeforeStart: (systemPrompt: string) => Promise<{ systemPrompt: string } | undefined>;
-} {
-  const handlers: {
-    start?: () => Promise<void> | void;
-    shutdown?: () => Promise<void> | void;
-    beforeStart?: (event: {
-      readonly systemPrompt: string;
-    }) => Promise<{ systemPrompt: string } | undefined> | { systemPrompt: string } | undefined;
-  } = {};
-  const delivered: string[] = [];
-
-  const on: PiExtensionApi["on"] = (event: string, handler: (...args: never[]) => unknown) => {
-    if (event === "session_start") {
-      handlers.start = () => {
-        const result: unknown = Reflect.apply(handler, undefined, []);
-        return result instanceof Promise ? result.then(() => undefined) : undefined;
-      };
-      return;
-    }
-    if (event === "session_shutdown") {
-      handlers.shutdown = () => {
-        const result: unknown = Reflect.apply(handler, undefined, []);
-        return result instanceof Promise ? result.then(() => undefined) : undefined;
-      };
-      return;
-    }
-    if (event === "before_agent_start") {
-      handlers.beforeStart = async (ev) => {
-        const raw: unknown = await Promise.resolve(Reflect.apply(handler, undefined, [ev]));
-        if (typeof raw === "object" && raw !== null && "systemPrompt" in raw) {
-          const prompt: unknown = Reflect.get(raw, "systemPrompt");
-          if (typeof prompt === "string") return { systemPrompt: prompt };
-        }
-        return undefined;
-      };
-    }
-  };
-
-  return {
-    api: {
-      on,
-      sendMessage(message) {
-        delivered.push(message.content);
-      },
-    },
-    delivered,
-    async emitStart() {
-      await handlers.start?.();
-    },
-    async emitShutdown() {
-      await handlers.shutdown?.();
-    },
-    emitBeforeStart(systemPrompt: string) {
-      return Promise.resolve(handlers.beforeStart?.({ systemPrompt }));
-    },
-  };
-}
-
 afterEach(() => {
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
@@ -115,58 +49,209 @@ afterEach(() => {
   }
 });
 
-void test("domain mate Pi adapter scopes ambient context and wakeups to its channel", async () => {
-  const backend = local({ memory: true });
-  const client = board({ backend });
-
-  await client.post("domains/cleo", {
-    text: "Cleo owns voice AI product work.",
-    labels: { kind: "charter" },
-    noSync: true,
+void test("unified Pi mate adapter scopes ambient context and wakes on escalations, answers, and chase", async () => {
+  let now = 1_700_000_000_000;
+  const server = await startTestServer({
+    parents: { jarvis: "captain", cleo: "jarvis", other: "jarvis" },
+    now: () => now,
+    chaseIntervalMs: 50,
   });
-  await client.tasks.create("domains/cleo", {
-    text: "Check Hayward transfer rate",
-    labels: { project: "Cleo" },
-  });
-  await client.tasks.create("domains/other", {
-    text: "Unrelated domain task",
-    labels: { project: "other" },
-  });
+  const { client, url } = server;
 
-  const mock = createMockPi();
-  attachFleetPiAdapter(mock.api, {
-    client,
-    profile: "cleo",
-    channel: "domains/cleo",
-    metaChannel: "meta",
-  });
+  try {
+    await client.setCharter("cleo", "Cleo owns voice AI product work.");
+    const cleoCard = await client.createCard({
+      mate: "cleo",
+      title: "Check Hayward transfer rate",
+      actor: "captain",
+    });
+    const otherCard = await client.createCard({
+      mate: "other",
+      title: "Unrelated domain card",
+      actor: "captain",
+    });
 
-  await mock.emitStart();
-  const prompt1 = await mock.emitBeforeStart("BASE");
-  const prompt2 = await mock.emitBeforeStart("BASE");
-  assert.ok(prompt1 !== undefined);
-  assert.equal(prompt1.systemPrompt, prompt2?.systemPrompt, "ambient prompt stays cache-stable");
-  assert.ok(prompt1.systemPrompt.includes("Domain Mate: cleo (owns channel domains/cleo)"));
-  assert.ok(prompt1.systemPrompt.includes("Cleo owns voice AI product work."));
-  assert.ok(prompt1.systemPrompt.includes("Check Hayward transfer rate"));
-  assert.ok(!prompt1.systemPrompt.includes("Unrelated domain task"));
+    const cleoMock = createMockPi();
+    const jarvisMock = createMockPi();
+    attachFleetPiAdapter(cleoMock.api, { boardUrl: url, mate: "cleo" });
+    attachFleetPiAdapter(jarvisMock.api, { boardUrl: url, mate: "jarvis" });
 
-  await delay(50);
+    await cleoMock.emitStart();
+    await jarvisMock.emitStart();
 
-  await client.post("domains/other", { text: "Noise in another domain" });
-  await client.post("domains/cleo", { text: "Please inspect live calls" });
-  await client.post("domains/other", { text: "Hey @cleo can you cross-check this?" });
+    const prompt1 = await cleoMock.emitBeforeStart("BASE");
+    const prompt2 = await cleoMock.emitBeforeStart("BASE");
+    assert.ok(prompt1 !== undefined);
+    assert.equal(prompt1.systemPrompt, prompt2?.systemPrompt, "ambient prompt stays cache-stable");
+    assert.ok(prompt1.systemPrompt.includes("Mate: cleo (parent: jarvis)"));
+    assert.ok(prompt1.systemPrompt.includes("Cleo owns voice AI product work."));
+    assert.ok(prompt1.systemPrompt.includes("Check Hayward transfer rate"));
+    assert.ok(!prompt1.systemPrompt.includes("Unrelated domain card"));
 
-  const deadline = Date.now() + 3000;
-  while (mock.delivered.length < 2 && Date.now() < deadline) {
-    await delay(25);
+    const jarvisPrompt = await jarvisMock.emitBeforeStart("BASE");
+    assert.ok(jarvisPrompt !== undefined);
+    assert.ok(
+      jarvisPrompt.systemPrompt.includes(
+        "Mate: jarvis (parent: captain, subordinates: cleo, other)",
+      ),
+    );
+
+    await delay(40);
+
+    await client.postEntry(otherCard.id, { text: "Noise in another domain", by: "other" });
+    await client.escalateCard(cleoCard.id, { reason: "Need Jarvis decision", actor: "cleo" });
+    await client.postEntry(otherCard.id, { text: "Hey @cleo can you cross-check?", by: "other" });
+    const secondCard = await client.createCard({
+      mate: "cleo",
+      title: "Second Hayward check",
+      actor: "jarvis",
+    });
+    await client.escalateCard(secondCard.id, { reason: "Approve the plan?", actor: "cleo" });
+    await client.answerCard(secondCard.id, { text: "Go ahead with the plan", actor: "jarvis" });
+    await client.closeCard(secondCard.id, {
+      result: "Shipped Hayward check inline",
+      actor: "cleo",
+    });
+
+    now += 650_000;
+
+    await waitFor(
+      () =>
+        jarvisMock.delivered.some((text) => text.includes("Cards needing attention")) &&
+        jarvisMock.delivered.some((text) => text.includes("Shipped Hayward check inline")) &&
+        cleoMock.delivered.some((text) => text.includes("Go ahead with the plan")),
+      5000,
+    );
+    await cleoMock.emitShutdown();
+    await jarvisMock.emitShutdown();
+
+    assert.ok(jarvisMock.delivered.some((text) => text.includes("Need Jarvis decision")));
+    assert.ok(jarvisMock.delivered.some((text) => text.includes("Cards needing attention")));
+    assert.ok(
+      jarvisMock.delivered.some((text) => text.includes("Shipped Hayward check inline")),
+      "closing a card delegated by jarvis wakes jarvis with the result",
+    );
+    const completionIndex = jarvisMock.delivered.findIndex((text) =>
+      text.includes("Shipped Hayward check inline"),
+    );
+    assert.equal(
+      jarvisMock.woke[completionIndex],
+      true,
+      "a delegated completion triggers a Pi turn",
+    );
+    assert.ok(!jarvisMock.delivered.some((text) => text.includes("Noise in another domain")));
+
+    const answerIndex = cleoMock.delivered.findIndex((text) =>
+      text.includes("Go ahead with the plan"),
+    );
+    assert.notEqual(answerIndex, -1);
+    assert.equal(cleoMock.woke[answerIndex], true, "a holder transfer must trigger a Pi turn");
+    assert.ok(
+      !cleoMock.delivered.some((text) => text.includes("cross-check")),
+      "a mention on another mate's card does not wake cleo",
+    );
+    assert.ok(!cleoMock.delivered.some((text) => text.includes("Noise in another domain")));
+  } finally {
+    await server.stop();
   }
-  await mock.emitShutdown();
+});
 
-  assert.equal(mock.delivered.length, 2);
-  assert.ok(mock.delivered.some((text) => text.includes("Please inspect live calls")));
-  assert.ok(mock.delivered.some((text) => text.includes("Hey @cleo can you cross-check this?")));
-  assert.ok(!mock.delivered.some((text) => text.includes("Noise in another domain")));
+void test("a mate pane started during a board outage is reconciled once the board returns", async () => {
+  const dataDir = makeTempDir("fv3-outage-");
+  const parents = { cleo: "jarvis", jarvis: "captain", sub: "cleo" };
+  const seed = await startTestServer({ dataDir, parents });
+  const port = Number(new URL(seed.url).port);
+  const delegated = await seed.client.createCard({
+    mate: "cleo",
+    title: "Delegated then withdrawn",
+    actor: "jarvis",
+  });
+  await seed.client.cancelCard(delegated.id, { reason: "Superseded", actor: "cleo" });
+  for (let n = 0; n < 51; n += 1) {
+    const filler = await seed.client.createCard({
+      mate: "sub",
+      title: `Filler ${String(n)}`,
+      actor: "cleo",
+    });
+    await seed.client.cancelCard(filler.id, { reason: "Noise", actor: "sub" });
+  }
+  const waiting = await seed.client.createCard({ mate: "cleo", title: "Waiting on Jarvis" });
+  await seed.client.escalateCard(waiting.id, { reason: "Decide?", actor: "cleo" });
+  const finished = await seed.client.createCard({
+    mate: "jarvis",
+    title: "Finished during outage",
+  });
+  await seed.client.closeCard(finished.id, { result: "ok" });
+  await seed.stop();
+
+  const pane = createMockPi();
+  attachFleetPiAdapter(pane.api, { boardUrl: seed.url, mate: "jarvis", reconnectDelayMs: 50 });
+  await pane.emitStart();
+  const revived = await startTestServer({ dataDir, port, parents });
+
+  try {
+    assert.ok(
+      await waitFor(
+        () =>
+          pane.delivered.some(
+            (text) =>
+              text.includes("reachable again") &&
+              text.includes("Waiting on Jarvis") &&
+              text.includes("Finished during outage") &&
+              text.includes("Delegated then withdrawn"),
+          ),
+        8000,
+      ),
+      "the mate learns what it missed instead of tailing from the new head",
+    );
+    assert.ok(pane.woke.every(Boolean), "reconciliation wakes a turn");
+  } finally {
+    await pane.emitShutdown();
+    await revived.stop();
+  }
+});
+
+void test("a mate that starts against a healthy board with stale held work is chased at once", async () => {
+  let now = 1_700_000_000_000;
+  const server = await startTestServer({
+    parents: { cleo: "jarvis", jarvis: "captain" },
+    now: () => now,
+    staleAfterMs: 120_000,
+  });
+  await server.client.createCard({ mate: "cleo", title: "Stale before restart", actor: "jarvis" });
+  const snoozed = await server.client.createCard({
+    mate: "cleo",
+    title: "Deferred before restart",
+    actor: "jarvis",
+  });
+  await server.client.snoozeCard(snoozed.id, { until: now + 3_600_000, actor: "cleo" });
+  now += 130_000;
+
+  const pane = createMockPi();
+  attachFleetPiAdapter(pane.api, { boardUrl: server.url, mate: "cleo", reconnectDelayMs: 50 });
+  await pane.emitStart();
+
+  try {
+    assert.ok(
+      await waitFor(
+        () =>
+          pane.delivered.some(
+            (text) =>
+              text.includes("Cards needing attention") && text.includes("Stale before restart"),
+          ),
+        3000,
+      ),
+      "a restarted mate gets its T=0 chase without waiting for the next sweep",
+    );
+    assert.ok(pane.woke.every(Boolean), "the startup chase wakes a Pi turn");
+    assert.ok(
+      !pane.delivered.some((text) => text.includes("Deferred before restart")),
+      "snoozed cards are not chased",
+    );
+  } finally {
+    await pane.emitShutdown();
+    await server.stop();
+  }
 });
 
 void test("fleet mates up idempotently manages permanent interactive panes in Herdr", async (t) => {
@@ -181,8 +266,6 @@ void test("fleet mates up idempotently manages permanent interactive panes in He
   const envDump = join(root, "cleo-env.json");
   const sleeperScript = `import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(envDump)}, JSON.stringify({
-  profile: process.env.BOARD_PROFILE,
-  channel: process.env.FLEET_CHANNEL,
   mate: process.env.FLEET_MATE,
   optchat: process.env.YPI_OPTCHAT_CONFIG,
 }));
@@ -190,9 +273,8 @@ setInterval(() => {}, 1000);`;
 
   const config: RunnerConfig = {
     host: "test-host",
-    from: [],
-    channels: ["domains/"],
-    metaChannel: "meta",
+    boardUrl: "http://127.0.0.1:4100",
+    matesFilter: [],
     workspacesRoot: join(root, "workspaces"),
     concurrency: 1,
     leaseSeconds: 60,
@@ -222,14 +304,14 @@ setInterval(() => {}, 1000);`;
       items: [
         {
           name: "cleo",
-          channel: "domains/cleo",
+          parent: "jarvis",
           cwd: join(root, "cleo-dir"),
           autoStart: true,
           env: {},
         },
         {
           name: "quiet",
-          channel: "domains/quiet",
+          parent: "jarvis",
           cwd: join(root, "quiet-dir"),
           autoStart: false,
           env: {},
@@ -253,6 +335,7 @@ setInterval(() => {}, 1000);`;
     const first = await ensureMatesUp(config);
     assert.equal(first.length, 1);
     assert.equal(first[0]?.name, "cleo");
+    assert.equal(first[0]?.parent, "jarvis");
     assert.equal(first[0]?.action, "started");
     const cleoPaneId = first[0]?.paneId;
     assert.ok(cleoPaneId !== undefined);
@@ -269,8 +352,6 @@ setInterval(() => {}, 1000);`;
     }
     assert.ok(recordedRaw !== undefined, "permanent mate pane must launch its command with env");
     const recorded = RecordedEnvSchema.parse(JSON.parse(recordedRaw));
-    assert.equal(recorded.profile, "cleo");
-    assert.equal(recorded.channel, "domains/cleo");
     assert.equal(recorded.mate, "cleo");
     assert.equal(recorded.optchat, join(root, "mates-state", "cleo", "optchat.json"));
 

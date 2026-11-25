@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
-import { dirname, join, resolve as resolvePath } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import type { RepoConfig } from "../config.ts";
 
 export interface TaskWorkspace {
@@ -42,46 +42,50 @@ export async function prepareWorkspace(params: {
   readonly channel: string;
   readonly project: string;
   readonly taskId: string;
+  readonly epoch: number;
   readonly repo: RepoConfig;
 }): Promise<TaskWorkspace> {
   const safeChannel = sanitizeSegment(params.channel);
   const safeProject = sanitizeSegment(params.project);
-  const safeTask = sanitizeSegment(params.taskId);
   const baseDir = join(params.workspacesRoot, safeChannel, safeProject);
-  const worktreePath = join(baseDir, "worktrees", `t-${safeTask}`);
-  const tmpDir = join(baseDir, "tmp", `t-${safeTask}`);
-  const branch = `fleet/t-${safeTask}`;
+  const scratchRoot = join(baseDir, "tmp");
+  mkdirSync(scratchRoot, { recursive: true });
+  const tmpDir = mkdtempSync(
+    join(scratchRoot, `t-${sanitizeSegment(params.taskId)}-e${String(params.epoch)}-`),
+  );
+  const launchName = basename(tmpDir);
+  const worktreePath = join(baseDir, "worktrees", launchName);
+  const branch = `fleet/${launchName}`;
+  let branchCreated = false;
 
-  mkdirSync(dirname(worktreePath), { recursive: true });
-  mkdirSync(tmpDir, { recursive: true });
+  try {
+    mkdirSync(dirname(worktreePath), { recursive: true });
+    await runGit(params.repo.path, ["branch", "--no-track", branch, params.repo.baseBranch]);
+    branchCreated = true;
+    await runGit(params.repo.path, ["worktree", "add", worktreePath, branch]);
 
-  if (existsSync(worktreePath)) {
-    await runGit(params.repo.path, ["worktree", "remove", "--force", worktreePath]).catch(
-      () => undefined,
-    );
-    rmSync(worktreePath, { recursive: true, force: true });
+    const rawCommonDir = await runGit(params.repo.path, ["rev-parse", "--git-common-dir"]);
+    const gitCommonDir = realpathSync(resolvePath(params.repo.path, rawCommonDir));
+
+    return {
+      worktreePath: realpathSync(worktreePath),
+      tmpDir: realpathSync(tmpDir),
+      branch,
+      repoPath: realpathSync(params.repo.path),
+      gitCommonDir,
+    };
+  } catch (error) {
+    if (branchCreated) {
+      await runGit(params.repo.path, ["worktree", "remove", "--force", worktreePath]).catch(
+        () => undefined,
+      );
+      rmSync(worktreePath, { recursive: true, force: true });
+      await runGit(params.repo.path, ["worktree", "prune"]).catch(() => undefined);
+      await runGit(params.repo.path, ["branch", "-D", branch]).catch(() => undefined);
+    }
+    rmSync(tmpDir, { recursive: true, force: true });
+    throw error;
   }
-
-  await runGit(params.repo.path, ["worktree", "prune"]).catch(() => undefined);
-  await runGit(params.repo.path, [
-    "worktree",
-    "add",
-    "-B",
-    branch,
-    worktreePath,
-    params.repo.baseBranch,
-  ]);
-
-  const rawCommonDir = await runGit(params.repo.path, ["rev-parse", "--git-common-dir"]);
-  const gitCommonDir = realpathSync(resolvePath(params.repo.path, rawCommonDir));
-
-  return {
-    worktreePath: realpathSync(worktreePath),
-    tmpDir: realpathSync(tmpDir),
-    branch,
-    repoPath: realpathSync(params.repo.path),
-    gitCommonDir,
-  };
 }
 
 export async function cleanupWorkspace(workspace: TaskWorkspace): Promise<void> {
