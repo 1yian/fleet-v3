@@ -838,3 +838,81 @@ void test("unified dispatch guards, subtree scoping, parent wake on close/cancel
     await server.stop();
   }
 });
+
+void test("a mate connecting to a restarted board is chased at once and out-of-scope probes learn nothing about card state", async () => {
+  let now = 1_700_000_000_000;
+  const server = await startTestServer({
+    parents: { jarvis: "captain", cleo: "jarvis", cnp: "jarvis" },
+    now: () => now,
+    staleAfterMs: 120_000,
+  });
+  const { client } = server;
+
+  try {
+    const stalled = await client.createCard({
+      mate: "cleo",
+      title: "Stalled before restart",
+      actor: "jarvis",
+    });
+    const snoozed = await client.createCard({
+      mate: "cleo",
+      title: "Deferred before restart",
+      actor: "jarvis",
+    });
+    await client.snoozeCard(snoozed.id, { until: now + 3_600_000, actor: "cleo" });
+    now += 130_000;
+
+    const fresh = watchEvents(client, { holder: "cleo" });
+    const stale = await waitFor(() => fresh.events.some((ev) => ev.type === "chase.due"), 2000);
+    await fresh.stop();
+    assert.equal(stale, true, "a new subscription gets its T=0 chase without any cursor");
+    const chase = fresh.events.find((ev) => ev.type === "chase.due");
+    assert.equal(chase?.holder, "cleo");
+    const chased = JSON.stringify(chase?.payload);
+    assert.ok(chased.includes(`"id":"${stalled.id}"`));
+    assert.ok(!chased.includes(`"id":"${snoozed.id}"`), "snoozed cards are not chased");
+
+    const quiet = watchEvents(client, { holder: "jarvis" });
+    await new Promise((resolve) => {
+      setTimeout(resolve, 150);
+    });
+    await quiet.stop();
+    assert.ok(
+      !quiet.events.some((ev) => ev.type === "chase.due"),
+      "a mate with nothing stale is not chased",
+    );
+
+    const queued = await client.createCard({
+      mate: "cnp",
+      title: "Queued sibling work",
+      host: "h1",
+      project: "CNP",
+    });
+    const finished = await client.createCard({ mate: "cnp", title: "Finished sibling work" });
+    await client.closeCard(finished.id, { result: "done" });
+    const denied =
+      (id: string): ((err: unknown) => boolean) =>
+      (err) =>
+        rejectsWith(403, "out_of_scope")(err) &&
+        err instanceof Error &&
+        err.message === `Mate "cleo" cannot access card #${id}`;
+    await assert.rejects(
+      () => client.snoozeCard(queued.id, { until: now + 60_000, actor: "cleo" }),
+      denied(queued.id),
+    );
+    await assert.rejects(
+      () => client.escalateCard(queued.id, { reason: "peek", actor: "cleo" }),
+      denied(queued.id),
+    );
+    await assert.rejects(
+      () => client.handoffCard(finished.id, { to: "cleo", actor: "cleo" }),
+      denied(finished.id),
+    );
+    await assert.rejects(
+      () => client.answerCard(finished.id, { text: "peek", actor: "cleo" }),
+      denied(finished.id),
+    );
+  } finally {
+    await server.stop();
+  }
+});

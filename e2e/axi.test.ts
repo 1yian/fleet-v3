@@ -238,7 +238,7 @@ void test("escalation, answer, and handoff flows work end to end, and close, can
     const getPrefs = await captureCli(["prefs"], url);
     assert.match(getPrefs.out, /No em dashes/u);
 
-    const cfgPath = join(dir, "fleet.yaml");
+    const cfgPath = join(dir, "nested", "deeper", "fleet.yaml");
     const init1 = await captureCli(["init", "--config", cfgPath], url);
     const init2 = await captureCli(["init", "--config", cfgPath], url);
     assert.equal(init1.exitCode, 0);

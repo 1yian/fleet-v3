@@ -27,6 +27,7 @@ Install:
 git clone https://github.com/1yian/fleet-v3.git ~/Projects/fleet-v3
 cd ~/Projects/fleet-v3
 bun install
+mkdir -p ~/.local/bin
 ln -sf "$PWD/src/bin.ts" ~/.local/bin/fleet
 chmod +x "$PWD/src/bin.ts"
 fleet --version
@@ -38,7 +39,7 @@ Verify `node -v` is >= 24 and `~/.local/bin` is on `PATH`.
 
 ## 2. Set up the Control Host (Card Server + Kanban)
 
-Create `~/.fleet-v3/fleet.yaml` (start from `fleet.example.yaml` via `fleet init --config ~/.fleet-v3/fleet.yaml`).
+Create `~/.fleet-v3/fleet.yaml` (start from `fleet.example.yaml` via `fleet init --config ~/.fleet-v3/fleet.yaml`, which creates the parent directory).
 `fleet serve` only needs `server` and `mates` (it does not require runner `host`/`spawn`/`repos`):
 
 ```yaml

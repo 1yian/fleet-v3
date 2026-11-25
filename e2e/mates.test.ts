@@ -169,6 +169,19 @@ void test("a mate pane started during a board outage is reconciled once the boar
   const parents = { cleo: "jarvis", jarvis: "captain" };
   const seed = await startTestServer({ dataDir, parents });
   const port = Number(new URL(seed.url).port);
+  const delegated = await seed.client.createCard({
+    mate: "cleo",
+    title: "Delegated then withdrawn",
+    actor: "jarvis",
+  });
+  for (let n = 0; n < 51; n += 1) {
+    const filler = await seed.client.createCard({
+      mate: "cleo",
+      title: `Filler ${String(n)}`,
+      actor: "jarvis",
+    });
+    await seed.client.cancelCard(filler.id, { reason: "Noise", actor: "cleo" });
+  }
   const waiting = await seed.client.createCard({ mate: "cleo", title: "Waiting on Jarvis" });
   await seed.client.escalateCard(waiting.id, { reason: "Decide?", actor: "cleo" });
   const finished = await seed.client.createCard({
@@ -176,11 +189,6 @@ void test("a mate pane started during a board outage is reconciled once the boar
     title: "Finished during outage",
   });
   await seed.client.closeCard(finished.id, { result: "ok" });
-  const delegated = await seed.client.createCard({
-    mate: "cleo",
-    title: "Delegated then withdrawn",
-    actor: "jarvis",
-  });
   await seed.client.cancelCard(delegated.id, { reason: "Superseded", actor: "cleo" });
   await seed.stop();
 

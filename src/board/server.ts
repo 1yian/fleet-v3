@@ -239,7 +239,13 @@ function waitForClaim(
   });
 }
 
-function handleSse(store: CardStore, url: URL, req: IncomingMessage, res: ServerResponse): void {
+function handleSse(
+  store: CardStore,
+  staleAfterMs: number,
+  url: URL,
+  req: IncomingMessage,
+  res: ServerResponse,
+): void {
   const afterHeader = req.headers["last-event-id"];
   const afterRaw =
     url.searchParams.get("after") ?? (typeof afterHeader === "string" ? afterHeader : null);
@@ -267,6 +273,11 @@ function handleSse(store: CardStore, url: URL, req: IncomingMessage, res: Server
       lastSentId = Math.max(lastSentId, event.id);
     }
     if (batch.length < REPLAY_BATCH) break;
+  }
+
+  if (holderFilter !== null) {
+    const pending = store.pendingChase(holderFilter, staleAfterMs);
+    if (pending !== undefined) writeEvent(pending);
   }
 
   const unsubscribe = store.subscribe((event) => {
@@ -539,6 +550,7 @@ async function routeCardsCollection(
 
 async function routeCollectionRequest(
   store: CardStore,
+  staleAfterMs: number,
   method: string,
   path: string,
   url: URL,
@@ -558,7 +570,7 @@ async function routeCollectionRequest(
     return true;
   }
   if (method === "GET" && path === "/api/events") {
-    handleSse(store, url, req, res);
+    handleSse(store, staleAfterMs, url, req, res);
     return true;
   }
   if (method === "GET" && path === "/api/mates") {
@@ -636,13 +648,14 @@ async function routeResourceRequest(
 
 async function routeApiRequest(
   store: CardStore,
+  staleAfterMs: number,
   url: URL,
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
   const method = req.method ?? "GET";
   const path = url.pathname;
-  if (await routeCollectionRequest(store, method, path, url, req, res)) return;
+  if (await routeCollectionRequest(store, staleAfterMs, method, path, url, req, res)) return;
   if (await routeResourceRequest(store, method, path, url, req, res)) return;
   sendJson(res, 404, { error: "not_found", message: `No route for ${method} ${path}` });
 }
@@ -668,7 +681,7 @@ export async function startBoardServer(options: BoardServerOptions): Promise<Sta
         const rejected = checkWriteIngress(req);
         if (rejected !== undefined) throw rejected;
         const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
-        await routeApiRequest(options.store, url, req, res);
+        await routeApiRequest(options.store, options.staleAfterMs, url, req, res);
       } catch (error) {
         if (res.headersSent) {
           if (!res.writableEnded) res.end();

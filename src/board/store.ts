@@ -247,6 +247,14 @@ function rowToEvent(raw: unknown): BoardEvent {
 }
 
 const RECENT_DONE_LIMIT = 50;
+interface StaleChaseCard {
+  readonly id: string;
+  readonly title: string;
+  readonly state: CardState;
+  readonly ageMs: number;
+  readonly stalledChild?: string;
+}
+
 const MAX_DATE_TIMESTAMP = 8_640_000_000_000_000;
 
 export interface CardStoreOptions {
@@ -1144,6 +1152,8 @@ export class CardStore {
       const row = this.getCardRow(id);
       const fenced = input.epoch !== undefined || input.token !== undefined;
       CardStore.guardFence(row, input, now);
+      const actor = input.actor ?? row.holder;
+      this.assertScope(actor, row, fenced);
       if (row.state === "done" || row.state === "canceled") {
         throw new BoardError(409, "card_terminal", `Card #${String(id)} is ${row.state}`);
       }
@@ -1154,8 +1164,6 @@ export class CardStore {
           `Card #${String(id)} is ${row.state}; only held cards escalate, workers hand off to their mate`,
         );
       }
-      const actor = input.actor ?? row.holder;
-      this.assertScope(actor, row, fenced);
       if (actor !== "captain" && actor !== row.holder) {
         throw new BoardError(
           409,
@@ -1206,6 +1214,8 @@ export class CardStore {
       const row = this.getCardRow(id);
       const fenced = input.epoch !== undefined || input.token !== undefined;
       CardStore.guardFence(row, input, now);
+      const actor = input.actor ?? row.holder;
+      this.assertScope(actor, row, fenced);
       if (row.state === "done" || row.state === "canceled") {
         throw new BoardError(409, "card_terminal", `Card #${String(id)} is ${row.state}`);
       }
@@ -1218,8 +1228,6 @@ export class CardStore {
         );
       }
       const target = trimmedTo.length > 0 ? trimmedTo : row.mate;
-      const actor = input.actor ?? row.holder;
-      this.assertScope(actor, row, fenced);
       const text = input.text?.trim() ?? "";
       this.db
         .prepare(
@@ -1264,11 +1272,11 @@ export class CardStore {
       const row = this.getCardRow(id);
       const fenced = input.epoch !== undefined || input.token !== undefined;
       CardStore.guardFence(row, input, now);
+      const actor = input.actor ?? "captain";
+      this.assertScope(actor, row, fenced);
       if (row.state === "done" || row.state === "canceled") {
         throw new BoardError(409, "card_terminal", `Card #${String(id)} is ${row.state}`);
       }
-      const actor = input.actor ?? "captain";
-      this.assertScope(actor, row, fenced);
       const target = row.mate;
       this.db
         .prepare(
@@ -1308,6 +1316,8 @@ export class CardStore {
       const row = this.getCardRow(id);
       const fenced = input.epoch !== undefined || input.token !== undefined;
       CardStore.guardFence(row, input, now);
+      const actor = input.actor ?? row.holder;
+      this.assertScope(actor, row, fenced);
       if (row.state !== "held") {
         throw new BoardError(
           409,
@@ -1326,8 +1336,6 @@ export class CardStore {
           "snooze until timestamp must be a representable future time",
         );
       }
-      const actor = input.actor ?? row.holder;
-      this.assertScope(actor, row, fenced);
       if (actor !== "captain" && actor !== row.holder) {
         throw new BoardError(
           409,
@@ -1553,63 +1561,58 @@ export class CardStore {
     });
   }
 
+  private staleChaseGroups(now: number, staleAfterMs: number): Map<string, StaleChaseCard[]> {
+    const cutoff = now - staleAfterMs;
+    const staleRows = this.db
+      .prepare(
+        `${CARD_SELECT}
+         WHERE ((c.state = 'held' AND c.holder != 'captain') OR c.state = 'queued')
+         AND c.updated_at <= ?
+         AND (c.snooze_until IS NULL OR c.snooze_until <= ?)
+         ORDER BY c.updated_at ASC`,
+      )
+      .all(cutoff, now);
+
+    const grouped = new Map<string, StaleChaseCard[]>();
+
+    const parentThresholdMs = staleAfterMs * 3;
+    for (const raw of staleRows) {
+      const row = CardRowSchema.parse(raw);
+      const ageMs = Math.max(0, now - row.updated_at);
+      const targetHolder = row.state === "queued" ? row.mate : row.holder;
+      const list = grouped.get(targetHolder) ?? [];
+      list.push({
+        id: String(row.id),
+        title: row.title,
+        state: row.state,
+        ageMs,
+      });
+      grouped.set(targetHolder, list);
+
+      if (row.state === "held" && ageMs >= parentThresholdMs) {
+        const parent = this.parentOf(row.holder);
+        if (parent !== "captain" && parent !== row.holder && this.isInSubtree(parent, row.mate)) {
+          const parentList = grouped.get(parent) ?? [];
+          parentList.push({
+            id: String(row.id),
+            title: row.title,
+            state: row.state,
+            ageMs,
+            stalledChild: row.holder,
+          });
+          grouped.set(parent, parentList);
+        }
+      }
+    }
+
+    return grouped;
+  }
+
   public sweepStale(staleAfterMs: number): BoardEvent[] {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const events: BoardEvent[] = [];
-      const cutoff = now - staleAfterMs;
-      const staleRows = this.db
-        .prepare(
-          `${CARD_SELECT}
-           WHERE ((c.state = 'held' AND c.holder != 'captain') OR c.state = 'queued')
-           AND c.updated_at <= ?
-           AND (c.snooze_until IS NULL OR c.snooze_until <= ?)
-           ORDER BY c.updated_at ASC`,
-        )
-        .all(cutoff, now);
-
-      const grouped = new Map<
-        string,
-        {
-          readonly id: string;
-          readonly title: string;
-          readonly state: CardState;
-          readonly ageMs: number;
-          readonly stalledChild?: string;
-        }[]
-      >();
-
-      const parentThresholdMs = staleAfterMs * 3;
-      for (const raw of staleRows) {
-        const row = CardRowSchema.parse(raw);
-        const ageMs = Math.max(0, now - row.updated_at);
-        const targetHolder = row.state === "queued" ? row.mate : row.holder;
-        const list = grouped.get(targetHolder) ?? [];
-        list.push({
-          id: String(row.id),
-          title: row.title,
-          state: row.state,
-          ageMs,
-        });
-        grouped.set(targetHolder, list);
-
-        if (row.state === "held" && ageMs >= parentThresholdMs) {
-          const parent = this.parentOf(row.holder);
-          if (parent !== "captain" && parent !== row.holder && this.isInSubtree(parent, row.mate)) {
-            const parentList = grouped.get(parent) ?? [];
-            parentList.push({
-              id: String(row.id),
-              title: row.title,
-              state: row.state,
-              ageMs,
-              stalledChild: row.holder,
-            });
-            grouped.set(parent, parentList);
-          }
-        }
-      }
-
-      for (const [holder, cards] of grouped) {
+      for (const [holder, cards] of this.staleChaseGroups(now, staleAfterMs)) {
         events.push(
           this.appendEvent({
             type: "chase.due",
@@ -1622,9 +1625,24 @@ export class CardStore {
           }),
         );
       }
-
       return { result: events, events };
     });
+  }
+
+  public pendingChase(holder: string, staleAfterMs: number): BoardEvent | undefined {
+    const now = this.nowFn();
+    const cards = this.staleChaseGroups(now, staleAfterMs).get(holder);
+    if (cards === undefined) return undefined;
+    return {
+      id: this.latestEventId(),
+      type: "chase.due",
+      cardId: null,
+      mate: holder,
+      holder,
+      actor: SERVER_ACTOR,
+      payload: { holder, cards },
+      createdAt: now,
+    };
   }
 
   public getOverview(scope?: string): BoardOverview {
@@ -1655,10 +1673,6 @@ export class CardStore {
       if (state !== "done" && state !== "canceled") counts.open += n;
       if (state === "held" && Reflect.get(raw, "captain") === 1) counts.needsCaptain += n;
     }
-    const doneWhere =
-      scopeCheck.clause === undefined
-        ? "WHERE c.state = 'done'"
-        : `WHERE c.state = 'done' AND ${scopeCheck.clause}`;
     return {
       counts,
       hosts: this.listHosts(),
@@ -1666,20 +1680,33 @@ export class CardStore {
         state: "open",
         ...(scope !== undefined ? { scope } : {}),
       }).cards,
-      recentDone: this.db
-        .prepare(
-          `SELECT c.*, (SELECT COUNT(*) FROM entries e WHERE e.card_id = c.id) AS entry_count
-           FROM cards c
-           LEFT JOIN (
-             SELECT card_id, MAX(id) AS done_event_id
-             FROM events WHERE type = 'card.done' GROUP BY card_id
-           ) de ON de.card_id = c.id
-           ${doneWhere}
-           ORDER BY COALESCE(de.done_event_id, 0) DESC, c.id DESC LIMIT ?`,
-        )
-        .all(...scopeCheck.params, RECENT_DONE_LIMIT)
-        .map((raw) => rowToCard(CardRowSchema.parse(raw))),
+      recentDone: this.recentTerminal("done", "card.done", scopeCheck),
+      recentCanceled: this.recentTerminal("canceled", "card.canceled", scopeCheck),
     };
+  }
+
+  private recentTerminal(
+    state: "done" | "canceled",
+    eventType: "card.done" | "card.canceled",
+    scopeCheck: { readonly clause: string | undefined; readonly params: string[] },
+  ): Card[] {
+    const where =
+      scopeCheck.clause === undefined
+        ? `WHERE c.state = '${state}'`
+        : `WHERE c.state = '${state}' AND ${scopeCheck.clause}`;
+    return this.db
+      .prepare(
+        `SELECT c.*, (SELECT COUNT(*) FROM entries e WHERE e.card_id = c.id) AS entry_count
+         FROM cards c
+         LEFT JOIN (
+           SELECT card_id, MAX(id) AS terminal_event_id
+           FROM events WHERE type = '${eventType}' GROUP BY card_id
+         ) te ON te.card_id = c.id
+         ${where}
+         ORDER BY COALESCE(te.terminal_event_id, 0) DESC, c.id DESC LIMIT ?`,
+      )
+      .all(...scopeCheck.params, RECENT_DONE_LIMIT)
+      .map((raw) => rowToCard(CardRowSchema.parse(raw)));
   }
 
   public getCharter(mate: string): string {

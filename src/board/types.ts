@@ -137,6 +137,7 @@ export const OverviewSchema = z.object({
   hosts: z.array(HostInfoSchema),
   cards: z.array(CardSchema),
   recentDone: z.array(CardSchema),
+  recentCanceled: z.array(CardSchema),
 });
 export type BoardOverview = z.infer<typeof OverviewSchema>;
 

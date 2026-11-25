@@ -1,5 +1,5 @@
-import { copyFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   AxiError,
@@ -823,6 +823,7 @@ export function initCommand(args: string[]): Record<string, unknown> {
   if (existsSync(target)) {
     return { config: `${target} already exists (no-op)` };
   }
+  mkdirSync(dirname(target), { recursive: true });
   copyFileSync(EXAMPLE_CONFIG, target);
   return {
     config: { path: target, created: true },
