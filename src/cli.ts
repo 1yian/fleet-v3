@@ -35,6 +35,7 @@ import {
   postWakeWebhook,
   validateWebhookUrl,
   watchMateWakes,
+  writeLine,
 } from "./board/wake.ts";
 import { extractMateParents, loadFleetConfig, type FleetConfig } from "./config.ts";
 import { ensureMatesUp, listMates, stopMates } from "./mates.ts";
@@ -385,7 +386,7 @@ async function watchCommand(
           await postWakeWebhook(webhookUrl, wake, headers, controller.signal);
           return;
         }
-        process.stdout.write(`${JSON.stringify(wake)}\n`);
+        await writeLine(process.stdout, `${JSON.stringify(wake)}\n`, controller.signal);
       },
       onError(error) {
         process.stderr.write(

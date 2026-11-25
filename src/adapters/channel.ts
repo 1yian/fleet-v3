@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import type { BoardClient } from "../board/client.ts";
-import { watchMateWakes, type WakeMessage } from "../board/wake.ts";
+import { watchMateWakes, writeLine, type WakeMessage } from "../board/wake.ts";
 import { VERSION } from "../version.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -53,10 +53,6 @@ function channelMeta(wake: WakeMessage): Record<string, string> {
   };
 }
 
-function writeJsonLine(output: Writable, payload: unknown): void {
-  output.write(`${JSON.stringify(payload)}\n`);
-}
-
 function channelInstructions(mate: string): string {
   return [
     `Fleet wake events for mate "${mate}" arrive inside <channel source="fleet"> tags.`,
@@ -74,6 +70,12 @@ export async function runFleetChannel(options: FleetChannelOptions): Promise<voi
   };
   options.signal?.addEventListener("abort", onExternalAbort, { once: true });
 
+  const send = (payload: unknown): Promise<void> =>
+    writeLine(output, `${JSON.stringify(payload)}\n`, controller.signal);
+  const reply = (payload: unknown): void => {
+    void send(payload);
+  };
+
   let watchPromise: Promise<void> | undefined;
   const startWatch = (): void => {
     if (watchPromise !== undefined || controller.signal.aborted) return;
@@ -90,7 +92,7 @@ export async function runFleetChannel(options: FleetChannelOptions): Promise<voi
           ? { reconnectDelayMs: options.reconnectDelayMs }
           : {}),
         onWake(wake) {
-          writeJsonLine(output, {
+          return send({
             jsonrpc: "2.0",
             method: "notifications/claude/channel",
             params: {
@@ -104,7 +106,7 @@ export async function runFleetChannel(options: FleetChannelOptions): Promise<voi
   };
 
   const writeError = (id: string | number | null, code: number, message: string): void => {
-    writeJsonLine(output, { jsonrpc: "2.0", id, error: { code, message } });
+    reply({ jsonrpc: "2.0", id, error: { code, message } });
   };
 
   let initializeAnswered = false;
@@ -118,8 +120,12 @@ export async function runFleetChannel(options: FleetChannelOptions): Promise<voi
     }
 
     if (method === "initialize") {
+      if (initializeAnswered) {
+        writeError(id, INVALID_REQUEST, "Already initialized");
+        return;
+      }
       initializeAnswered = true;
-      writeJsonLine(output, {
+      reply({
         jsonrpc: "2.0",
         id,
         result: {
@@ -133,7 +139,7 @@ export async function runFleetChannel(options: FleetChannelOptions): Promise<voi
     }
 
     if (method === "ping") {
-      writeJsonLine(output, { jsonrpc: "2.0", id, result: {} });
+      reply({ jsonrpc: "2.0", id, result: {} });
       return;
     }
 

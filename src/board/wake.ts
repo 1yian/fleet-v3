@@ -1,3 +1,4 @@
+import type { Writable } from "node:stream";
 import { z } from "zod";
 import type { BoardClient } from "./client.ts";
 import type { BoardEvent } from "./types.ts";
@@ -164,7 +165,27 @@ function waitAbortable(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+export async function writeLine(
+  output: Writable,
+  line: string,
+  signal: AbortSignal,
+): Promise<void> {
+  if (output.write(line) || signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    const done = (): void => {
+      output.off("drain", done);
+      output.off("close", done);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    output.once("drain", done);
+    output.once("close", done);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
 async function deliverWake(options: WatchMateWakesOptions, wake: WakeMessage): Promise<void> {
+  if (options.signal.aborted) return;
   try {
     await options.onWake(wake);
   } catch (error) {
@@ -244,7 +265,12 @@ export function parseHeaderFlag(raw: string): readonly [string, string] {
   }
   const name = raw.slice(0, colon).trim();
   const value = raw.slice(colon + 1).trim();
-  if (!/^[A-Za-z0-9-]+$/u.test(name) || /[\r\n]/u.test(value)) {
+  if (name.toLowerCase() === "content-type") {
+    throw new Error("--header cannot override Content-Type");
+  }
+  try {
+    new Headers().set(name, value);
+  } catch {
     throw new Error("Invalid --header name or value");
   }
   return [name, value];

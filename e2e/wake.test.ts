@@ -112,6 +112,21 @@ void test("fleet watch streams filtered NDJSON wakes and rejects invalid flags",
     assert.equal(badUrl.exitCode, 2);
     assert.match(badUrl.output, /http:\/\/ or https:\/\//u);
 
+    const hookUrl = "http://127.0.0.1:9/hook";
+    const badHeaders = [
+      "Authorization: Bearer \u{1F511}",
+      "Content-Type: text/plain",
+      "content-type: text/plain",
+    ];
+    for (const header of badHeaders) {
+      const result = await runBinOnce(
+        ["watch", "--mate", "cleo", "--webhook", hookUrl, "--header", header],
+        { BOARD_URL: server.url },
+      );
+      assert.equal(result.exitCode, 2);
+      assert.equal(result.output.includes("\u{1F511}"), false);
+    }
+
     const credentialedUrl = await runBinOnce(
       ["watch", "--mate", "cleo", "--webhook", "https://user:hunter2@example.com/hook?token=abc"],
       { BOARD_URL: server.url },
@@ -349,9 +364,10 @@ void test("fleet channel speaks Claude Code MCP Channel protocol over stdio and 
       const initResp = messages.find((m) => m["id"] === 1);
       assert.ok(initResp !== undefined && isRecord(initResp["result"]));
       assert.equal(initResp["result"]["protocolVersion"], "2025-03-26");
-      const unsupportedResp = messages.find((m) => m["id"] === 4);
-      assert.ok(unsupportedResp !== undefined && isRecord(unsupportedResp["result"]));
-      assert.equal(unsupportedResp["result"]["protocolVersion"], "2025-06-18");
+      const repeatInitResp = messages.find((m) => m["id"] === 4);
+      assert.ok(repeatInitResp !== undefined);
+      assert.ok(isRecord(repeatInitResp["error"]));
+      assert.equal(repeatInitResp["error"]["code"], -32_600);
       const invalidResp = messages.find((m) => m["id"] === 5);
       assert.ok(invalidResp !== undefined && isRecord(invalidResp["error"]));
       assert.equal(invalidResp["error"]["code"], -32_600);
@@ -400,6 +416,42 @@ void test("fleet channel speaks Claude Code MCP Channel protocol over stdio and 
         child.kill("SIGTERM");
         await waitForExit(child);
       }
+    }
+  } finally {
+    await server.stop();
+  }
+});
+
+void test("fleet channel negotiates the highest supported MCP version for unsupported requests", async () => {
+  const server = await startTestServer({ parents: FLEET_PARENTS });
+  try {
+    const child = spawn(process.execPath, [BIN_PATH, "channel", "--mate", "cleo"], {
+      env: { ...process.env, BOARD_URL: server.url },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const messages: Record<string, unknown>[] = [];
+    const rl = createInterface({ input: child.stdout });
+    rl.on("line", (line) => {
+      const parsed: unknown = JSON.parse(line);
+      if (isRecord(parsed)) messages.push(parsed);
+    });
+    try {
+      child.stdin.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: { protocolVersion: "1999-01-01", capabilities: {} },
+        })}\n`,
+      );
+      await waitFor(() => messages.some((m) => m["id"] === 1));
+      const response = messages.find((m) => m["id"] === 1);
+      assert.ok(response !== undefined && isRecord(response["result"]));
+      assert.equal(response["result"]["protocolVersion"], "2025-06-18");
+    } finally {
+      rl.close();
+      child.stdin.end();
+      await waitForExit(child);
     }
   } finally {
     await server.stop();

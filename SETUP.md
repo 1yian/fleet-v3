@@ -152,15 +152,21 @@ command:
 
 **Container / Docker workers note:** Inside a container or Apple `container` micro-VM, `127.0.0.1` is the guest loopback. Set `server.host` to a reachable interface (e.g. Tailscale IP or `0.0.0.0` behind your private firewall) and point `boardUrl` at that address.
 
-Start and verify the Control Host + optional Kanban UI + local runner:
+Start the Control Host, the optional Kanban UI, and the local runner. Each of these commands runs in the foreground, so run each in its own terminal (or its own `herdr` pane), or skip ahead and install them as services with the Section 6 templates before the smoke test:
 
 ```bash
 fleet serve
+```
+
+```bash
 fleet web --host 127.0.0.1 --port 4101
+```
+
+```bash
 fleet run
 ```
 
-Verify:
+Once `fleet serve` is up, verify:
 
 ```bash
 curl -sf http://127.0.0.1:4100/api/health
@@ -342,6 +348,8 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 ```
+
+The `fleet` launcher finds `node` through the `PATH` in each unit, so add the directory printed by `dirname "$(which node)"` to that `PATH` line in both units (for example an `nvm` or `mise` Node directory).
 
 Enable with:
 
