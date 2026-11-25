@@ -3,11 +3,17 @@ import { createInterface } from "node:readline";
 import { z } from "zod";
 import type { BoardClient } from "../board/client.ts";
 import { checkWriteIngress } from "../board/ingress.ts";
-import { CARD_STATES, DELIVERIES, HolderFilterSchema, MateNameSchema } from "../board/types.ts";
+import {
+  CARD_STATES,
+  DELIVERIES,
+  HolderFilterSchema,
+  HolderNameSchema,
+  MateNameSchema,
+} from "../board/types.ts";
 import { createLineWriter } from "../board/wake.ts";
 import { VERSION } from "../version.ts";
 
-const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] as const;
+const PROTOCOL_VERSION = "2025-06-18";
 const PARSE_ERROR = -32_700;
 const INVALID_REQUEST = -32_600;
 const METHOD_NOT_FOUND = -32_601;
@@ -104,7 +110,7 @@ const EscalateArgsSchema = z
 const HandoffArgsSchema = z
   .object({
     id: z.string().min(1),
-    to: MateNameSchema.optional(),
+    to: HolderNameSchema.optional(),
     text: z.string().optional(),
   })
   .strict();
@@ -135,19 +141,6 @@ const CancelArgsSchema = z
   .object({
     id: z.string().min(1),
     reason: z.string().min(1),
-  })
-  .strict();
-
-const CharterArgsSchema = z
-  .object({
-    mate: MateNameSchema.optional(),
-    text: z.string().optional(),
-  })
-  .strict();
-
-const PrefsArgsSchema = z
-  .object({
-    text: z.string().optional(),
   })
   .strict();
 
@@ -310,12 +303,12 @@ const FLEET_MCP_TOOLS: readonly McpToolSpec[] = [
   {
     name: "fleet_handoff",
     description:
-      "Pass a held card to another mate (or back to its owning mate if `to` is omitted).",
+      "Pass a held card to another mate or the captain (or back to its owning mate if `to` is omitted).",
     inputSchema: {
       type: "object",
       properties: {
         id: { type: "string", description: "Card ID" },
-        to: { type: "string", description: "Target mate name" },
+        to: { type: "string", description: "Target mate name or captain" },
         text: { type: "string", description: "Optional handoff summary" },
       },
       required: ["id"],
@@ -428,42 +421,20 @@ const FLEET_MCP_TOOLS: readonly McpToolSpec[] = [
   },
   {
     name: "fleet_charter",
-    description: "Read or update a mate's Markdown charter (defaults to this mate).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        mate: { type: "string", description: "Mate name (defaults to this mate)" },
-        text: { type: "string", description: "When set, replaces the charter text" },
-      },
-      additionalProperties: false,
-    },
+    description: "Read this mate's Markdown charter.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
     execute: async (raw, ctx) => {
-      const args = CharterArgsSchema.parse(raw ?? {});
-      const target = args.mate ?? ctx.mate;
-      if (args.text !== undefined) {
-        const text = await ctx.client.setCharter(target, args.text);
-        return { mate: target, updated: true, text };
-      }
-      const text = await ctx.client.getCharter(target, ctx.signal);
-      return { mate: target, text };
+      EmptyArgsSchema.parse(raw ?? {});
+      const text = await ctx.client.getCharter(ctx.mate, ctx.signal);
+      return { mate: ctx.mate, text };
     },
   },
   {
     name: "fleet_prefs",
-    description: "Read or update captain-wide preferences.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        text: { type: "string", description: "When set, replaces captain preferences" },
-      },
-      additionalProperties: false,
-    },
+    description: "Read captain-wide preferences.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
     execute: async (raw, ctx) => {
-      const args = PrefsArgsSchema.parse(raw ?? {});
-      if (args.text !== undefined) {
-        const text = await ctx.client.setPrefs(args.text);
-        return { updated: true, text };
-      }
+      EmptyArgsSchema.parse(raw ?? {});
       const text = await ctx.client.getPrefs(ctx.signal);
       return { text };
     },
@@ -478,14 +449,6 @@ function parseJsonRpcRequest(value: unknown): JsonRpcRequest | undefined {
   if (jsonrpc !== "2.0" || typeof method !== "string") return undefined;
   if (id !== undefined && typeof id !== "string" && typeof id !== "number") return undefined;
   return { ...(id !== undefined ? { id } : {}), method, params };
-}
-
-function negotiateProtocolVersion(params: unknown): string {
-  const requested = isRecord(params) ? params["protocolVersion"] : undefined;
-  return (
-    SUPPORTED_PROTOCOL_VERSIONS.find((version) => version === requested) ??
-    SUPPORTED_PROTOCOL_VERSIONS[0]
-  );
 }
 
 function formatErrorText(error: unknown): string {
@@ -565,7 +528,7 @@ function handleMcpRequest(
       jsonrpc: "2.0",
       id: request.id,
       result: {
-        protocolVersion: negotiateProtocolVersion(request.params),
+        protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: {} },
         serverInfo: { name: "fleet-mcp", version: VERSION },
         instructions: `Fleet MCP tools scoped to mate "${ctx.mate}". Use fleet_view to inspect cards, fleet_dispatch to delegate to 2ndmates or spawn crewmates, and fleet_close / fleet_snooze / fleet_handoff / fleet_escalate to manage card state.`,
@@ -668,36 +631,42 @@ export interface RunningFleetMcpHttp {
   readonly stop: () => Promise<void>;
 }
 
-async function readJsonBody(
-  req: IncomingMessage,
-): Promise<
+type JsonBodyResult =
   | { readonly ok: true; readonly body: unknown }
-  | { readonly ok: false; readonly status: number; readonly error: string }
-> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of req) {
-    const buf =
-      typeof chunk === "string"
-        ? Buffer.from(chunk)
-        : Buffer.isBuffer(chunk)
-          ? chunk
-          : Buffer.from([]);
-    total += buf.length;
-    if (total > MAX_HTTP_BODY_BYTES) {
-      return { ok: false, status: 413, error: "Request body exceeds 1 MiB limit" };
-    }
-    chunks.push(buf);
-  }
-  const raw = Buffer.concat(chunks).toString("utf8").trim();
-  if (raw.length === 0) {
-    return { ok: false, status: 400, error: "Empty JSON-RPC body" };
-  }
-  try {
-    return { ok: true, body: JSON.parse(raw) };
-  } catch {
-    return { ok: false, status: 400, error: "Invalid JSON" };
-  }
+  | { readonly ok: false; readonly status: number; readonly error: string };
+
+function readJsonBody(req: IncomingMessage): Promise<JsonBodyResult> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const onData = (chunk: Buffer): void => {
+      total += chunk.length;
+      if (total > MAX_HTTP_BODY_BYTES) {
+        req.removeListener("data", onData);
+        req.pause();
+        resolve({ ok: false, status: 413, error: "Request body exceeds 1 MiB limit" });
+        return;
+      }
+      chunks.push(chunk);
+    };
+    req.on("data", onData);
+    req.once("error", reject);
+    req.once("close", () => {
+      if (!req.complete) reject(new Error("Client disconnected before the request body finished"));
+    });
+    req.once("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8").trim();
+      if (raw.length === 0) {
+        resolve({ ok: false, status: 400, error: "Empty JSON-RPC body" });
+        return;
+      }
+      try {
+        resolve({ ok: true, body: JSON.parse(raw) });
+      } catch {
+        resolve({ ok: false, status: 400, error: "Invalid JSON" });
+      }
+    });
+  });
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -728,11 +697,11 @@ async function handleHttpRequest(
   res: ServerResponse,
   options: FleetMcpHttpOptions,
 ): Promise<void> {
-  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
-  if (url.pathname === "/health" && req.method === "GET") {
-    sendJson(res, 200, { ok: true, server: "fleet-mcp", version: VERSION });
+  if (!URL.canParse(req.url ?? "/", "http://localhost")) {
+    sendJson(res, 400, { error: "bad_request", message: "Malformed request target" });
     return;
   }
+  const url = new URL(req.url ?? "/", "http://localhost");
   if (url.pathname !== "/mcp") {
     sendJson(res, 404, { error: "not_found", message: "POST JSON-RPC 2.0 requests to /mcp" });
     return;
@@ -759,6 +728,7 @@ async function handleHttpRequest(
 
   const bodyResult = await readJsonBody(req);
   if (!bodyResult.ok) {
+    if (bodyResult.status === 413) res.setHeader("connection", "close");
     sendJson(res, bodyResult.status, {
       jsonrpc: "2.0",
       id: null,
@@ -792,7 +762,13 @@ export async function startFleetMcpHttpServer(
   options: FleetMcpHttpOptions,
 ): Promise<RunningFleetMcpHttp> {
   const server: Server = createServer((req, res) => {
-    void handleHttpRequest(req, res, options);
+    handleHttpRequest(req, res, options).catch(() => {
+      if (res.destroyed || res.headersSent) {
+        res.destroy();
+        return;
+      }
+      sendJson(res, 500, { error: "internal_error", message: "Request failed" });
+    });
   });
 
   await new Promise<void>((resolve, reject) => {

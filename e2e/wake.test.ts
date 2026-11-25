@@ -1019,6 +1019,7 @@ void test("fleet mcp serves scoped Fleet tools over stdio and exits cleanly on E
     const cardId = strField(dispatchResp["result"]["structuredContent"]["card"], "id");
     assert.ok(cardId.length > 0);
 
+    const snoozeRequestedAt = Date.now();
     rpc({
       jsonrpc: "2.0",
       id: 4,
@@ -1029,12 +1030,17 @@ void test("fleet mcp serves scoped Fleet tools over stdio and exits cleanly on E
       },
     });
     const snoozeResp = await waitForId(4);
+    const snoozeReturnedAt = Date.now();
     assert.ok(
       isRecord(snoozeResp["result"]) &&
         isRecord(snoozeResp["result"]["structuredContent"]) &&
         isRecord(snoozeResp["result"]["structuredContent"]["card"]),
     );
-    assert.equal(typeof snoozeResp["result"]["structuredContent"]["card"]["snoozeUntil"], "number");
+    const snoozeUntil = snoozeResp["result"]["structuredContent"]["card"]["snoozeUntil"];
+    assert.equal(typeof snoozeUntil, "number");
+    assert.ok(typeof snoozeUntil === "number");
+    assert.ok(snoozeUntil >= snoozeRequestedAt + 15 * 60_000);
+    assert.ok(snoozeUntil <= snoozeReturnedAt + 15 * 60_000);
 
     rpc({
       jsonrpc: "2.0",
@@ -1174,6 +1180,13 @@ void test("fleet mcp --http serves Streamable HTTP MCP with per-mate scoping and
       params: { name: "fleet_dispatch", arguments: { mate: "cnp", title: "CNP private MCP card" } },
     });
     assert.equal(createdCnp.status, 200);
+    assert.ok(
+      createdCnp.json !== null &&
+        isRecord(createdCnp.json["result"]) &&
+        isRecord(createdCnp.json["result"]["structuredContent"]) &&
+        isRecord(createdCnp.json["result"]["structuredContent"]["card"]) &&
+        createdCnp.json["result"]["structuredContent"]["card"]["title"] === "CNP private MCP card",
+    );
 
     const cleoCards = await postMcp(
       mcpUrl,
@@ -1196,6 +1209,36 @@ void test("fleet mcp --http serves Streamable HTTP MCP with per-mate scoping and
       .filter((c): c is Record<string, unknown> => isRecord(c))
       .map((c) => strField(c, "title"));
     assert.deepEqual(titles, ["Cleo HTTP MCP card"]);
+
+    const writeCharter = await postMcp(`${mcpUrl}?mate=1stmate`, {
+      jsonrpc: "2.0",
+      id: 5,
+      method: "tools/call",
+      params: { name: "fleet_charter", arguments: { text: "overwrite" } },
+    });
+    assert.ok(
+      writeCharter.json !== null &&
+        isRecord(writeCharter.json["result"]) &&
+        writeCharter.json["result"]["isError"] === true,
+    );
+
+    const oversized = await postMcp(`${mcpUrl}?mate=1stmate`, {
+      jsonrpc: "2.0",
+      id: 6,
+      method: "ping",
+      padding: "x".repeat(2_000_000),
+    });
+    assert.equal(oversized.status, 413);
+
+    const health = await fetch(new URL("/health", mcpUrl));
+    assert.equal(health.status, 404);
+
+    const alive = await postMcp(`${mcpUrl}?mate=1stmate`, {
+      jsonrpc: "2.0",
+      id: 7,
+      method: "ping",
+    });
+    assert.equal(alive.status, 200);
 
     child.kill("SIGTERM");
     assert.equal(await waitForExit(child), 0);

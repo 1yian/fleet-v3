@@ -25,5 +25,5 @@ Read [VISION.md](VISION.md) for the design principles, [SETUP.md](SETUP.md) for 
 2. Follow [SETUP.md](SETUP.md) (or have your agent follow it) to create `~/.fleet/fleet.yaml`, start `fleet serve`, start `fleet run`, verify with `fleet doctor`, and talk to `1stmate`:
    - **Pi / `ypi`:** launch `1stmate` from any directory with `fleet chat` (adapter injected via `-e {adapter}`, zero global or repo hooks); launch `2ndmate`s via `fleet mates up`.
    - **Claude Code:** configure `1stmate` or `2ndmate`s with `--mcp-config {mcpConfig} --dangerously-load-development-channels server:fleet` and launch with `fleet chat` or `fleet mates up` (`mcp.json` is written automatically).
-   - **Grok Bot / Dots / Muse / webhook bots:** set `mode: external` in `fleet.yaml` and run `fleet watch --mate <name> --webhook <url>` (or bare `fleet watch --mate <name>` for NDJSON stdout).
+   - **Grok Bot / Dots / Muse / webhook bots:** set `mode: external` in `fleet.yaml` and run `fleet watch --mate <name> --webhook <url>` (or bare `fleet watch --mate <name>` for NDJSON stdout). Have the bot use the `fleet` CLI (Option A, preferred) and fall back to `fleet mcp --http` (Option B) only when it has no shell access; see [EXTERNAL_BOT.md](EXTERNAL_BOT.md).
 3. Run `fleet` (no args) for a live TOON overview of counts, advertised hosts, and open cards.

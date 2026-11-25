@@ -259,8 +259,8 @@ _(Claude Code Channels are in research preview; Team/Enterprise orgs must allow 
      mode: external
    ```
 2. Finish starting `fleet serve`, `fleet run`, seeding charters/prefs, and verifying `fleet doctor`. If the bot does not have shell access to run the `fleet` CLI (Option A), also start `fleet mcp --http --host <reachable-ip> --port 4102` so the bot can connect over MCP (Option B).
-3. Give the captain this ready-to-paste prompt to send directly to their bot (replacing `<board-url>` with the `BOARD_URL` reachable from the bot, and including the MCP URL if running `fleet mcp --http`):
-   > Read `https://github.com/1yian/fleet-v3/blob/main/EXTERNAL_BOT.md` and create/configure my `1stmate` bot for Fleet (`mate: 1stmate`, `BOARD_URL: <board-url>`). Prefer `fleet` CLI if you have shell access, otherwise connect via MCP (`http://<reachable-ip>:4102/mcp?mate=1stmate`). Return the incoming webhook URL and auth header when ready.
+3. Give the captain this ready-to-paste prompt to send directly to their bot (for a bot with shell access, replace `<board-url>` with the `BOARD_URL` reachable from the bot; for a bot without shell access, give only the MCP URL from `fleet mcp --http` and keep `BOARD_URL` on the Control Host so the raw Card Server is not exposed):
+   > Read `https://github.com/1yian/fleet-v3/blob/main/EXTERNAL_BOT.md` and create/configure my `1stmate` bot for Fleet (`mate: 1stmate`). With shell access, use the `fleet` CLI (Option A, `BOARD_URL: <board-url>`). Without shell access, connect via MCP only (Option B, `http://<reachable-ip>:4102/mcp?mate=1stmate`). Return the incoming webhook URL and auth header when ready.
 4. Once the bot returns its webhook URL (and optional auth header), start `fleet watch` on the Control Host (and add a `launchd`/`systemd` service from Section 6):
 
 ```bash

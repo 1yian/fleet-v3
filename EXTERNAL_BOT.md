@@ -11,13 +11,14 @@ This guide is for non-coding and chat-based agent platforms (such as **Grok Bot*
 Ask the captain only for anything missing from their message:
 
 - **Mate name:** defaults to `1stmate` (or a domain name like `cleo` for a `2ndmate`).
-- **`BOARD_URL`:** the HTTP URL of the captain's Fleet Card Server reachable from your runtime (for example `http://127.0.0.1:4100` on the same machine, or a private Tailscale/tunnel URL).
+- **Option A (shell access):** `BOARD_URL`, the HTTP URL of the captain's Fleet Card Server reachable from your runtime (for example `http://127.0.0.1:4100` on the same machine, or a private Tailscale/tunnel URL).
+- **Option B (no shell access):** the Fleet MCP URL only (for example `http://<reachable-ip>:4102/mcp?mate=<mate>`). You do not need the Card Server URL; `BOARD_URL` stays on the Control Host process that runs `fleet mcp`.
 
 Then create or configure a dedicated bot instance for that mate:
 
 1. **System instructions:** load and follow [`prompts/mate.md`](https://raw.githubusercontent.com/1yian/fleet-v3/main/prompts/mate.md) as the bot's operating prompt.
-2. **Identity & board config:** bind `FLEET_MATE=<mate>` and `BOARD_URL=<url>` in the bot's environment or instructions.
-3. **Domain charter & preferences:** at startup (or when checking context), read your charter and the captain's preferences from Fleet (`fleet charter <mate>` / `fleet prefs` via CLI, or `fleet_charter` / `fleet_prefs` via MCP).
+2. **Identity & board config:** with Option A, bind `FLEET_MATE=<mate>` and `BOARD_URL=<url>` in the bot's environment or instructions. With Option B, attach the MCP URL for `<mate>` instead.
+3. **Domain charter & preferences:** at startup (or when checking context), read your charter and the captain's preferences from Fleet (`fleet charter <mate>` / `fleet prefs` via CLI, or the read-only `fleet_charter` / `fleet_prefs` via MCP).
 
 ---
 
@@ -47,7 +48,7 @@ Run `fleet` commands with `FLEET_MATE=<mate>` and `BOARD_URL=<url>`:
 Connect your bot to Fleet's MCP tool server instead of shelling out:
 
 - **Streamable HTTP MCP (for remote/cloud bots such as Grok Bot, Dots, Muse):**
-  Ask the captain (or their local setup agent) to run `fleet mcp --http --host <reachable-ip> --port 4102` on the Control Host, then attach your bot to:
+  Ask the captain (or their local setup agent) to run `fleet mcp --http --host <reachable-ip> --port 4102` on the Control Host with `BOARD_URL` pointing at the Card Server, then attach your bot to:
   ```text
   http://<reachable-ip>:4102/mcp?mate=<mate>
   ```
@@ -61,7 +62,7 @@ Connect your bot to Fleet's MCP tool server instead of shelling out:
   }
   ```
 
-Both MCP transports expose the exact same scoped tools for `<mate>`: `fleet_overview`, `fleet_cards`, `fleet_view`, `fleet_dispatch`, `fleet_queue`, `fleet_reply`, `fleet_escalate`, `fleet_handoff`, `fleet_answer`, `fleet_snooze`, `fleet_close`, `fleet_cancel`, `fleet_hosts`, `fleet_charter`, and `fleet_prefs`.
+Both MCP transports expose the exact same scoped tools for `<mate>`: `fleet_overview`, `fleet_cards`, `fleet_view`, `fleet_dispatch`, `fleet_queue`, `fleet_reply`, `fleet_escalate`, `fleet_handoff`, `fleet_answer`, `fleet_snooze`, `fleet_close`, `fleet_cancel`, `fleet_hosts`, and the read-only `fleet_charter` and `fleet_prefs`.
 
 ---
 
