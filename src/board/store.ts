@@ -247,6 +247,7 @@ function rowToEvent(raw: unknown): BoardEvent {
 }
 
 const RECENT_DONE_LIMIT = 50;
+const MAX_DATE_TIMESTAMP = 8_640_000_000_000_000;
 
 export interface CardStoreOptions {
   readonly dataDir?: string;
@@ -351,7 +352,7 @@ export class CardStore {
     throw new BoardError(
       403,
       "out_of_scope",
-      `Mate "${actor}" cannot access card #${String(card.id)} (owned by ${card.mate}, held by ${card.holder || "none"})`,
+      `Mate "${actor}" cannot access card #${String(card.id)}`,
     );
   }
 
@@ -1102,7 +1103,7 @@ export class CardStore {
       const by = input.by ?? "captain";
       this.assertScope(by, row, fenced);
       const internal = input.internal === true;
-      if (!internal && by !== row.holder && row.snooze_until !== null) {
+      if (!internal && row.snooze_until !== null) {
         this.db.prepare("UPDATE cards SET snooze_until = NULL WHERE id = ?").run(id);
       }
       const entry = this.insertEntry({
@@ -1314,8 +1315,16 @@ export class CardStore {
           `Card #${String(id)} is ${row.state}; only held cards can be snoozed`,
         );
       }
-      if (!Number.isSafeInteger(input.until) || input.until <= now) {
-        throw new BoardError(400, "invalid_snooze", "snooze until timestamp must be in the future");
+      if (
+        !Number.isSafeInteger(input.until) ||
+        input.until <= now ||
+        input.until > MAX_DATE_TIMESTAMP
+      ) {
+        throw new BoardError(
+          400,
+          "invalid_snooze",
+          "snooze until timestamp must be a representable future time",
+        );
       }
       const actor = input.actor ?? row.holder;
       this.assertScope(actor, row, fenced);
@@ -1547,7 +1556,7 @@ export class CardStore {
   public sweepStale(staleAfterMs: number): BoardEvent[] {
     return this.runTransaction(() => {
       const now = this.nowFn();
-      const events = this.expireLeasesInternal(now);
+      const events: BoardEvent[] = [];
       const cutoff = now - staleAfterMs;
       const staleRows = this.db
         .prepare(
@@ -1586,7 +1595,7 @@ export class CardStore {
 
         if (row.state === "held" && ageMs >= parentThresholdMs) {
           const parent = this.parentOf(row.holder);
-          if (parent !== "captain" && parent !== row.holder) {
+          if (parent !== "captain" && parent !== row.holder && this.isInSubtree(parent, row.mate)) {
             const parentList = grouped.get(parent) ?? [];
             parentList.push({
               id: String(row.id),

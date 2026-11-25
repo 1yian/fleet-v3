@@ -234,7 +234,6 @@ To run any agent harness as a mate (e.g. `jarvis` or `cleo`):
    GET $BOARD_URL/api/events?holder=$FLEET_MATE
    ```
    Pass `Last-Event-ID: <last_id>` on reconnect so zero events are lost. Forward each incoming JSON event (skipping `event.actor === FLEET_MATE` and internal replies) as a short wake message into the harness's ingress (webhook, Discord DM, RPC, or terminal input).
-   - If a harness has no push ingress at all, run a non-LLM host script on cron/launchd that queries `GET $BOARD_URL/api/cards?holder=$FLEET_MATE&state=open`, exits silently if empty, and wakes the agent only when cards are present.
 
 ---
 

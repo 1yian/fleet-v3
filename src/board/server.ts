@@ -688,10 +688,9 @@ export async function startBoardServer(options: BoardServerOptions): Promise<Sta
     })();
   });
 
-  const leaseIntervalMs = Math.min(30_000, options.chaseIntervalMs);
   const leaseTimer = setInterval(() => {
     options.store.expireLeases();
-  }, leaseIntervalMs);
+  }, 30_000);
   leaseTimer.unref();
 
   const chaseTimer = setInterval(() => {

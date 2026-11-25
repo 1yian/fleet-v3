@@ -668,7 +668,7 @@ void test("recent done follows completion time, escalation needs a held card, an
 void test("unified dispatch guards, subtree scoping, parent wake on close/cancel, snooze, and 3x parent chase", async () => {
   let now = 1_700_000_000_000;
   const server = await startTestServer({
-    parents: { jarvis: "captain", cleo: "jarvis", cnp: "jarvis" },
+    parents: { jarvis: "captain", cleo: "jarvis", cnp: "jarvis", ops: "boss", boss: "captain" },
     now: () => now,
     chaseIntervalMs: 40,
     staleAfterMs: 120_000,
@@ -676,6 +676,8 @@ void test("unified dispatch guards, subtree scoping, parent wake on close/cancel
   const { client } = server;
   const jarvisEvents = watchEvents(client, { after: 0, holder: "jarvis" });
   const cleoEvents = watchEvents(client, { after: 0, holder: "cleo" });
+  const opsEvents = watchEvents(client, { after: 0, holder: "ops" });
+  const bossEvents = watchEvents(client, { after: 0, holder: "boss" });
 
   try {
     await assert.rejects(
@@ -713,17 +715,27 @@ void test("unified dispatch guards, subtree scoping, parent wake on close/cancel
       actor: "jarvis",
     });
 
+    const crossed = await client.createCard({
+      mate: "cleo",
+      title: "Handed outside the subtree",
+      actor: "jarvis",
+    });
+    await client.handoffCard(crossed.id, { to: "ops", actor: "captain" });
+
     const cleoScoped = await client.listCards({ scope: "cleo" });
     assert.deepEqual(
       cleoScoped.cards.map((c) => c.id),
-      [delegated.id],
+      [crossed.id, delegated.id].toSorted((a, b) => Number(b) - Number(a)),
       "cleo only sees its own subtree",
     );
     const jarvisScoped = await client.listCards({ scope: "jarvis" });
-    assert.equal(jarvisScoped.total, 2, "jarvis sees its entire subtree");
+    assert.equal(jarvisScoped.total, 3, "jarvis sees its entire subtree");
     await assert.rejects(
       () => client.getThread(cnpCard.id, "cleo"),
-      rejectsWith(403, "out_of_scope"),
+      (err: unknown) =>
+        rejectsWith(403, "out_of_scope")(err) &&
+        err instanceof Error &&
+        err.message === `Mate "cleo" cannot access card #${cnpCard.id}`,
     );
     await assert.rejects(
       () => client.closeCard(cnpCard.id, { actor: "cleo", result: "nope" }),
@@ -736,6 +748,14 @@ void test("unified dispatch guards, subtree scoping, parent wake on close/cancel
       actor: "cleo",
     });
     assert.equal(snoozed.snoozeUntil, now + 300_000);
+    await assert.rejects(
+      () =>
+        client.snoozeCard(delegated.id, {
+          until: 8_640_000_000_000_001,
+          actor: "cleo",
+        }),
+      rejectsWith(400, "invalid_snooze"),
+    );
 
     now += 150_000;
     await new Promise((resolve) => {
@@ -752,25 +772,60 @@ void test("unified dispatch guards, subtree scoping, parent wake on close/cancel
     });
     const woke = await client.getThread(delegated.id);
     assert.equal(woke.card.snoozeUntil, null, "non-internal reply clears snooze");
+    await client.snoozeCard(delegated.id, { until: now + 300_000, actor: "cleo" });
+    await client.postEntry(delegated.id, { text: "Back on it", by: "cleo" });
+    const afterHolderReply = await client.getThread(delegated.id);
+    assert.equal(
+      afterHolderReply.card.snoozeUntil,
+      null,
+      "the holder's own public update also clears snooze",
+    );
 
     now += 250_000;
-    await waitFor(
-      () =>
-        cleoEvents.events.some((ev) => ev.type === "chase.due") &&
-        jarvisEvents.events.some(
-          (ev) =>
-            ev.type === "chase.due" && JSON.stringify(ev.payload).includes('"stalledChild":"cleo"'),
-        ),
-      2000,
+    assert.equal(
+      await waitFor(
+        () =>
+          cleoEvents.events.some(
+            (ev) => ev.type === "chase.due" && JSON.stringify(ev.payload).includes(delegated.id),
+          ) &&
+          jarvisEvents.events.some(
+            (ev) =>
+              ev.type === "chase.due" &&
+              JSON.stringify(ev.payload).includes('"stalledChild":"cleo"') &&
+              JSON.stringify(ev.payload).includes(`"id":"${delegated.id}"`),
+          ) &&
+          opsEvents.events.some(
+            (ev) => ev.type === "chase.due" && JSON.stringify(ev.payload).includes(crossed.id),
+          ),
+        2000,
+      ),
+      true,
+      "the stalled delegated card chases its holder and parent",
+    );
+    await new Promise((resolve) => {
+      setTimeout(resolve, 150);
+    });
+    assert.ok(
+      !bossEvents.events.some((ev) => ev.type === "chase.due"),
+      "a parent outside the card's subtree is not chased about it",
     );
 
     await client.closeCard(delegated.id, { result: "Fixed inline", actor: "cleo" });
     await client.cancelCard(cnpCard.id, { reason: "Superseded", actor: "cnp" });
-    await waitFor(
-      () =>
-        jarvisEvents.events.some((ev) => ev.type === "card.done" && ev.cardId === delegated.id) &&
-        jarvisEvents.events.some((ev) => ev.type === "card.canceled" && ev.cardId === cnpCard.id),
-      2000,
+    assert.equal(
+      await waitFor(
+        () =>
+          jarvisEvents.events.some(
+            (ev) => ev.type === "card.done" && ev.cardId === delegated.id && ev.holder === "jarvis",
+          ) &&
+          jarvisEvents.events.some(
+            (ev) =>
+              ev.type === "card.canceled" && ev.cardId === cnpCard.id && ev.holder === "jarvis",
+          ),
+        2000,
+      ),
+      true,
+      "closing or canceling delegated cards wakes the creator",
     );
     assert.ok(
       cleoEvents.events.some((ev) => ev.type === "card.created" && ev.cardId === delegated.id),
@@ -778,6 +833,8 @@ void test("unified dispatch guards, subtree scoping, parent wake on close/cancel
   } finally {
     await jarvisEvents.stop();
     await cleoEvents.stop();
+    await opsEvents.stop();
+    await bossEvents.stop();
     await server.stop();
   }
 });

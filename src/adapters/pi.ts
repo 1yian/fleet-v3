@@ -196,17 +196,22 @@ async function buildReconciliationNotice(
   client: BoardClient,
   mate: string,
 ): Promise<string | undefined> {
-  const [held, overview] = await Promise.all([
+  const [held, overview, canceledPage] = await Promise.all([
     client.listCards({ holder: mate, state: "open", scope: mate }),
     client.getOverview(mate),
+    client.listCards({ state: "canceled", scope: mate, limit: 50 }),
   ]);
-  const completed = overview.recentDone
-    .filter((card) => card.mate === mate || card.createdBy === mate)
-    .slice(0, 5);
-  if (held.cards.length === 0 && completed.length === 0) return undefined;
+  const involved = (card: { readonly mate: string; readonly createdBy: string }): boolean =>
+    card.mate === mate || card.createdBy === mate;
+  const completed = overview.recentDone.filter(involved).slice(0, 5);
+  const canceled = canceledPage.cards.filter(involved).slice(0, 5);
+  if (held.cards.length === 0 && completed.length === 0 && canceled.length === 0) {
+    return undefined;
+  }
   const lines = [
     ...held.cards.map((card) => `- #${card.id} [${card.state}] in your court: ${card.title}`),
     ...completed.map((card) => `- #${card.id} completed: ${card.title}`),
+    ...canceled.map((card) => `- #${card.id} canceled: ${card.title}`),
   ];
   return `[fleet] The Card Server is reachable again after an outage. Current state for ${mate}:\n${lines.join("\n")}`;
 }

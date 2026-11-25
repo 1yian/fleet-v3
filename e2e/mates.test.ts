@@ -139,6 +139,14 @@ void test("unified Pi mate adapter scopes ambient context and wakes on escalatio
       jarvisMock.delivered.some((text) => text.includes("Shipped Hayward check inline")),
       "closing a card delegated by jarvis wakes jarvis with the result",
     );
+    const completionIndex = jarvisMock.delivered.findIndex((text) =>
+      text.includes("Shipped Hayward check inline"),
+    );
+    assert.equal(
+      jarvisMock.woke[completionIndex],
+      true,
+      "a delegated completion triggers a Pi turn",
+    );
     assert.ok(!jarvisMock.delivered.some((text) => text.includes("Noise in another domain")));
 
     const answerIndex = cleoMock.delivered.findIndex((text) =>
@@ -168,6 +176,12 @@ void test("a mate pane started during a board outage is reconciled once the boar
     title: "Finished during outage",
   });
   await seed.client.closeCard(finished.id, { result: "ok" });
+  const delegated = await seed.client.createCard({
+    mate: "cleo",
+    title: "Delegated then withdrawn",
+    actor: "jarvis",
+  });
+  await seed.client.cancelCard(delegated.id, { reason: "Superseded", actor: "cleo" });
   await seed.stop();
 
   const pane = createMockPi();
@@ -183,7 +197,8 @@ void test("a mate pane started during a board outage is reconciled once the boar
             (text) =>
               text.includes("reachable again") &&
               text.includes("Waiting on Jarvis") &&
-              text.includes("Finished during outage"),
+              text.includes("Finished during outage") &&
+              text.includes("Delegated then withdrawn"),
           ),
         8000,
       ),
