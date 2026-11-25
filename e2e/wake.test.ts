@@ -17,6 +17,10 @@ function sleep(ms: number): Promise<void> {
 
 function waitForExit(child: ChildProcess): Promise<number | null> {
   return new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve(child.exitCode);
+      return;
+    }
     child.once("exit", (code) => {
       resolve(code);
     });
@@ -27,7 +31,11 @@ function runBinOnce(
   args: readonly string[],
   envOverrides: Readonly<Record<string, string>> = {},
   omitKeys: readonly string[] = [],
-): Promise<{ readonly exitCode: number | null; readonly output: string }> {
+): Promise<{
+  readonly exitCode: number | null;
+  readonly output: string;
+  readonly stdout: string;
+}> {
   const omitted = new Set(omitKeys);
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) {
@@ -43,7 +51,11 @@ function runBinOnce(
       { encoding: "utf8", timeout: 15_000, env },
       (error, stdout, stderr) => {
         const code: unknown = error === null ? 0 : Reflect.get(error, "code");
-        resolve({ exitCode: typeof code === "number" ? code : null, output: `${stdout}${stderr}` });
+        resolve({
+          exitCode: typeof code === "number" ? code : null,
+          output: `${stdout}${stderr}`,
+          stdout,
+        });
       },
     );
   });
@@ -99,6 +111,21 @@ void test("fleet watch streams filtered NDJSON wakes and rejects invalid flags",
     );
     assert.equal(badUrl.exitCode, 2);
     assert.match(badUrl.output, /http:\/\/ or https:\/\//u);
+
+    const credentialedUrl = await runBinOnce(
+      ["watch", "--mate", "cleo", "--webhook", "https://user:hunter2@example.com/hook?token=abc"],
+      { BOARD_URL: server.url },
+    );
+    assert.equal(credentialedUrl.exitCode, 2);
+    assert.equal(credentialedUrl.output.includes("hunter2"), false);
+    assert.equal(credentialedUrl.output.includes("token=abc"), false);
+
+    const channelWithoutMate = await runBinOnce(["channel"], { BOARD_URL: server.url }, [
+      "FLEET_MATE",
+    ]);
+    assert.equal(channelWithoutMate.exitCode, 2);
+    assert.equal(channelWithoutMate.stdout, "");
+    assert.match(channelWithoutMate.output, /FLEET_MATE|--mate/u);
 
     const child = spawn(process.execPath, [BIN_PATH, "watch", "--mate", "cleo"], {
       env: { ...process.env, BOARD_URL: server.url },
@@ -295,6 +322,9 @@ void test("fleet channel speaks Claude Code MCP Channel protocol over stdio and 
 
     try {
       child.stdin.write(
+        `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`,
+      );
+      child.stdin.write(
         `${JSON.stringify({
           jsonrpc: "2.0",
           id: 1,
@@ -312,7 +342,10 @@ void test("fleet channel speaks Claude Code MCP Channel protocol over stdio and 
       );
       child.stdin.write(`${JSON.stringify({ jsonrpc: "1.0", id: 5, method: "ping" })}\n`);
       child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" })}\n`);
-      await waitFor(() => [1, 2, 4, 5].every((id) => messages.some((m) => m["id"] === id)));
+      child.stdin.write(
+        `${JSON.stringify({ jsonrpc: "2.0", id: 6, method: "notifications/initialized" })}\n`,
+      );
+      await waitFor(() => [1, 2, 4, 5, 6].every((id) => messages.some((m) => m["id"] === id)));
       const initResp = messages.find((m) => m["id"] === 1);
       assert.ok(initResp !== undefined && isRecord(initResp["result"]));
       assert.equal(initResp["result"]["protocolVersion"], "2025-03-26");
@@ -322,6 +355,9 @@ void test("fleet channel speaks Claude Code MCP Channel protocol over stdio and 
       const invalidResp = messages.find((m) => m["id"] === 5);
       assert.ok(invalidResp !== undefined && isRecord(invalidResp["error"]));
       assert.equal(invalidResp["error"]["code"], -32_600);
+      const idBearingResp = messages.find((m) => m["id"] === 6);
+      assert.ok(idBearingResp !== undefined && isRecord(idBearingResp["error"]));
+      assert.equal(idBearingResp["error"]["code"], -32_601);
       const capabilities = initResp["result"]["capabilities"];
       assert.ok(isRecord(capabilities) && isRecord(capabilities["experimental"]));
       assert.ok(Object.hasOwn(capabilities["experimental"], "claude/channel"));

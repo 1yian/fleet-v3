@@ -76,20 +76,24 @@ function resolveBoardClient(overrides: FleetPiAdapterOptions = {}): {
   };
 }
 
-async function buildAmbientBlock(client: BoardClient, mate: string): Promise<string> {
+async function buildAmbientBlock(
+  client: BoardClient,
+  mate: string,
+  signal: AbortSignal,
+): Promise<string> {
   const [charter, heldCards, domainCards, hosts, prefs, parents] = await Promise.all([
-    client.getCharter(mate).catch(() => ""),
+    client.getCharter(mate, signal).catch(() => ""),
     client
-      .listCards({ holder: mate, state: "open", scope: mate })
+      .listCards({ holder: mate, state: "open", scope: mate }, signal)
       .then((page) => page.cards)
       .catch(() => []),
     client
-      .listCards({ scope: mate, state: "open" })
+      .listCards({ scope: mate, state: "open" }, signal)
       .then((page) => page.cards)
       .catch(() => []),
-    client.listHosts().catch(() => []),
-    client.getPrefs().catch(() => ""),
-    client.getParents().catch((): Record<string, string> => ({})),
+    client.listHosts(signal).catch(() => []),
+    client.getPrefs(signal).catch(() => ""),
+    client.getParents(signal).catch((): Record<string, string> => ({})),
   ]);
 
   const parent = Object.hasOwn(parents, mate) ? (parents[mate] ?? "captain") : "captain";
@@ -131,19 +135,21 @@ export function attachFleetPiAdapter(
   let ambientBlock = "";
 
   pi.on("session_start", async () => {
-    const cursor = await client.latestEventId().catch(() => undefined);
-    ambientBlock = await buildAmbientBlock(client, mate);
-    controller = new AbortController();
+    const sessionController = new AbortController();
+    controller = sessionController;
+    const cursor = await client.latestEventId(sessionController.signal).catch(() => undefined);
+    ambientBlock = await buildAmbientBlock(client, mate, sessionController.signal);
+    if (sessionController.signal.aborted) return;
     void watchMateWakes({
       client,
       mate,
-      signal: controller.signal,
+      signal: sessionController.signal,
       ...(cursor !== undefined ? { initialCursor: cursor } : {}),
       ...(overrides.reconnectDelayMs !== undefined
         ? { reconnectDelayMs: overrides.reconnectDelayMs }
         : {}),
       async onRecovered() {
-        ambientBlock = await buildAmbientBlock(client, mate);
+        ambientBlock = await buildAmbientBlock(client, mate, sessionController.signal);
       },
       onWake(wake) {
         pi.sendMessage(

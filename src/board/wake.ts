@@ -127,10 +127,11 @@ function formatMateEvent(event: BoardEvent, mate: string): string | undefined {
 async function buildReconciliationNotice(
   client: BoardClient,
   mate: string,
+  signal: AbortSignal,
 ): Promise<string | undefined> {
   const [held, overview] = await Promise.all([
-    client.listCards({ holder: mate, state: "open", scope: mate }),
-    client.getOverview(mate),
+    client.listCards({ holder: mate, state: "open", scope: mate }, signal),
+    client.getOverview(mate, signal),
   ]);
   const involved = (card: { readonly mate: string; readonly createdBy: string }): boolean =>
     card.mate === mate || card.createdBy === mate;
@@ -180,8 +181,12 @@ export async function watchMateWakes(options: WatchMateWakesOptions): Promise<vo
   while (!options.signal.aborted) {
     try {
       if (lastEventId === undefined) {
-        const recovered = await options.client.latestEventId();
-        const reconciliation = await buildReconciliationNotice(options.client, options.mate);
+        const recovered = await options.client.latestEventId(options.signal);
+        const reconciliation = await buildReconciliationNotice(
+          options.client,
+          options.mate,
+          options.signal,
+        );
         await options.onRecovered?.();
         lastEventId = recovered;
         if (reconciliation !== undefined) {
@@ -199,7 +204,7 @@ export async function watchMateWakes(options: WatchMateWakesOptions): Promise<vo
         signal: options.signal,
       })) {
         attempt = 0;
-        initialChase = false;
+        if (event.type === "chase.due") initialChase = false;
         if (event.id > 0) lastEventId = Math.max(lastEventId ?? 0, event.id);
         const notice = formatMateEvent(event, options.mate);
         if (notice === undefined) continue;
@@ -226,6 +231,9 @@ export function validateWebhookUrl(raw: string): string {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error("Webhook URL must use http:// or https://");
   }
+  if (parsed.username !== "" || parsed.password !== "") {
+    throw new Error("Webhook URL must not contain credentials; pass them with --header");
+  }
   return parsed.toString();
 }
 
@@ -250,17 +258,22 @@ export async function postWakeWebhook(
   headers: Readonly<Record<string, string>>,
   signal: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...headers,
-    },
-    body: JSON.stringify(wake),
-    redirect: "error",
-    signal: AbortSignal.any([signal, AbortSignal.timeout(WEBHOOK_TIMEOUT_MS)]),
-  });
-  await response.body?.cancel();
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...headers,
+      },
+      body: JSON.stringify(wake),
+      redirect: "error",
+      signal: AbortSignal.any([signal, AbortSignal.timeout(WEBHOOK_TIMEOUT_MS)]),
+    });
+    await response.body?.cancel();
+  } catch {
+    throw new Error("Webhook delivery failed");
+  }
   if (!response.ok) {
     throw new Error(`Webhook delivery failed with HTTP ${String(response.status)}`);
   }

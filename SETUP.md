@@ -120,8 +120,6 @@ mates:
     - "{adapter}"
     - --append-system-prompt
     - "{prompt}"
-  env:
-    YPI_OPTCHAT_CONFIG: "{stateDir}/optchat.json"
   items:
     - name: 1stmate
       parent: captain
@@ -248,7 +246,7 @@ _(If your bot consumes a pipe instead of HTTP, run bare `fleet watch --mate 1stm
 Each `2ndmate` uses `parent: 1stmate` in `~/.fleet/fleet.yaml` and gets its own charter via `fleet charter <name> --set "..."`:
 
 - **`ypi` / `pi` `2ndmate`s in Herdr (launch-command injected):**
-  For each `ypi` `2ndmate`, optionally create `~/.fleet/mates/<name>/optchat.json` with `"memoryHome": "~/.fleet/optchat"` and `"profile": "mate-<name>"`, then run:
+  Run:
   ```bash
   fleet mates up
   fleet mates status
@@ -309,8 +307,7 @@ Create `~/Library/LaunchAgents/dev.fleet.board.plist` (repeat with `run` for `de
   </dict>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/YOU/.local/bin/node</string>
-    <string>/Users/YOU/Projects/fleet-v3/src/bin.ts</string>
+    <string>/Users/YOU/.local/bin/fleet</string>
     <string>serve</string>
   </array>
   <key>RunAtLoad</key><true/>
@@ -321,6 +318,8 @@ Create `~/Library/LaunchAgents/dev.fleet.board.plist` (repeat with `run` for `de
 </dict>
 </plist>
 ```
+
+The `fleet` launcher finds `node` through the `PATH` above, so make sure that `PATH` includes the directory printed by `dirname "$(which node)"`.
 
 Load with `launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/dev.fleet.board.plist` (start `board` before `runner` and `kanban`).
 
@@ -367,8 +366,12 @@ Then wake a mate (`1stmate` or a `2ndmate`) and confirm it handles and closes th
 
 ```bash
 fleet dispatch --mate 1stmate --title "Smoke test: reply ok and close this card"
-fleet cards
-fleet view 1 --full
+```
+
+Read the card id printed by `dispatch`, wait for the mate to handle it, then inspect that exact card and confirm its state is closed:
+
+```bash
+fleet view <card-id> --full
 ```
 
 Finally verify crewmate worktree execution on a local repo:

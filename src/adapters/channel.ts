@@ -78,7 +78,9 @@ export async function runFleetChannel(options: FleetChannelOptions): Promise<voi
   const startWatch = (): void => {
     if (watchPromise !== undefined || controller.signal.aborted) return;
     watchPromise = (async () => {
-      const initialCursor = await options.client.latestEventId().catch(() => undefined);
+      const initialCursor = await options.client
+        .latestEventId(controller.signal)
+        .catch(() => undefined);
       await watchMateWakes({
         client: options.client,
         mate: options.mate,
@@ -105,17 +107,18 @@ export async function runFleetChannel(options: FleetChannelOptions): Promise<voi
     writeJsonLine(output, { jsonrpc: "2.0", id, error: { code, message } });
   };
 
+  let initializeAnswered = false;
+
   const handleRequest = (req: JsonRpcRequest): void => {
     const { id, method } = req;
 
-    if (method === "notifications/initialized") {
-      startWatch();
+    if (id === undefined) {
+      if (method === "notifications/initialized" && initializeAnswered) startWatch();
       return;
     }
 
-    if (id === undefined) return;
-
     if (method === "initialize") {
+      initializeAnswered = true;
       writeJsonLine(output, {
         jsonrpc: "2.0",
         id,

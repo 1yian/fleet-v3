@@ -374,7 +374,7 @@ async function watchCommand(
 
   try {
     const client = ctx.board();
-    const initialCursor = await client.latestEventId().catch(() => undefined);
+    const initialCursor = await client.latestEventId(controller.signal).catch(() => undefined);
     await watchMateWakes({
       client,
       mate,
@@ -452,7 +452,6 @@ export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<voi
     !rest.includes("--help") &&
     !rest.includes("-h")
   ) {
-    const stdout = options.stdout ?? process.stdout;
     try {
       await (first === "watch" ? watchCommand(rest, ctx) : channelCommand(rest, ctx));
     } catch (error) {
@@ -461,12 +460,12 @@ export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<voi
         if (error.suggestions.length > 0) {
           lines.push(...error.suggestions);
         }
-        stdout.write(`${lines.join("\n")}\n`);
+        process.stderr.write(`${lines.join("\n")}\n`);
         process.exitCode = exitCodeForError(error);
         return;
       }
       const message = error instanceof Error ? error.message : String(error);
-      stdout.write(`error: ${message}\ncode: UNKNOWN\n`);
+      process.stderr.write(`error: ${message}\ncode: UNKNOWN\n`);
       process.exitCode = 1;
     }
     return;
