@@ -16,6 +16,7 @@ import {
   type CardState,
   type Delivery,
   type OptionalFenceInput,
+  parseDurationMs,
 } from "../board/types.ts";
 import { loadConfig } from "../config.ts";
 import { runLoop } from "../runner/loop.ts";
@@ -642,26 +643,6 @@ export async function answerCommand(
   return { card: { id: card.id, state: card.state, holder: card.holder } };
 }
 
-const DURATION_UNITS: Readonly<Record<string, number>> = {
-  s: 1000,
-  m: 60_000,
-  h: 3_600_000,
-  d: 86_400_000,
-};
-
-function parseDurationMs(raw: string, helpBlock: string): number {
-  const match = /^([1-9]\d*)(s|m|h|d)$/u.exec(raw.trim());
-  if (match?.[1] === undefined || match[2] === undefined) {
-    throw new AxiError(
-      `invalid --for duration "${raw}" (use e.g. 30s, 15m, 2h, 1d)`,
-      "VALIDATION_ERROR",
-      [helpBlock],
-    );
-  }
-  const unitMs = DURATION_UNITS[match[2]] ?? 0;
-  return Number(match[1]) * unitMs;
-}
-
 export async function snoozeCommand(
   args: string[],
   ctx: FleetAxiContext | undefined,
@@ -681,7 +662,15 @@ export async function snoozeCommand(
   if (id === undefined) {
     throw new AxiError("card <id> is required for `snooze`", "VALIDATION_ERROR", [helpBlock]);
   }
-  const durationMs = parseDurationMs(stringFlag(parsed.values, "for") ?? "", helpBlock);
+  const rawDuration = stringFlag(parsed.values, "for") ?? "";
+  const durationMs = parseDurationMs(rawDuration);
+  if (durationMs === undefined) {
+    throw new AxiError(
+      `invalid --for duration "${rawDuration}" (use e.g. 30s, 15m, 2h, 1d)`,
+      "VALIDATION_ERROR",
+      [helpBlock],
+    );
+  }
   const reason = stringFlag(parsed.values, "reason");
   const until = Date.now() + durationMs;
   const card = await active.board().snoozeCard(id, {

@@ -986,6 +986,7 @@ void test("fleet mcp serves scoped Fleet tools over stdio and exits cleanly on E
     const initResp = await waitForId(1);
     assert.ok(isRecord(initResp["result"]) && isRecord(initResp["result"]["capabilities"]));
     assert.ok(Object.hasOwn(initResp["result"]["capabilities"], "tools"));
+    assert.equal(initResp["result"]["protocolVersion"], "2025-06-18");
 
     rpc({ jsonrpc: "2.0", method: "notifications/initialized" });
     rpc({ jsonrpc: "2.0", id: 2, method: "tools/list" });
@@ -1108,23 +1109,11 @@ void test("fleet mcp --http serves Streamable HTTP MCP with per-mate scoping and
   const server = await startTestServer({
     parents: { "1stmate": "captain", cleo: "1stmate", cnp: "1stmate" },
   });
-  const portProbe = createServer();
-  await new Promise<void>((resolve) => {
-    portProbe.listen(0, "127.0.0.1", () => {
-      resolve();
-    });
-  });
-  const probeAddr = portProbe.address();
-  assert.ok(probeAddr !== null && typeof probeAddr === "object");
-  const mcpPort = probeAddr.port;
-  await new Promise<void>((resolve) => {
-    portProbe.close(() => {
-      resolve();
-    });
-  });
+  await server.client.setCharter("1stmate", "Seeded 1stmate charter.");
+  await server.client.setPrefs("Seeded captain prefs.");
   const child = spawn(
     process.execPath,
-    [BIN_PATH, "mcp", "--http", "--host", "127.0.0.1", "--port", String(mcpPort)],
+    [BIN_PATH, "mcp", "--http", "--host", "127.0.0.1", "--port", "0"],
     {
       env: { ...process.env, BOARD_URL: server.url },
       stdio: ["ignore", "pipe", "pipe"],
@@ -1188,16 +1177,12 @@ void test("fleet mcp --http serves Streamable HTTP MCP with per-mate scoping and
         createdCnp.json["result"]["structuredContent"]["card"]["title"] === "CNP private MCP card",
     );
 
-    const cleoCards = await postMcp(
-      mcpUrl,
-      {
-        jsonrpc: "2.0",
-        id: 4,
-        method: "tools/call",
-        params: { name: "fleet_cards", arguments: { state: "open" } },
-      },
-      { "x-fleet-mate": "cleo" },
-    );
+    const cleoCards = await postMcp(`${mcpUrl}?mate=cleo`, {
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: { name: "fleet_cards", arguments: { state: "open" } },
+    });
     assert.equal(cleoCards.status, 200);
     assert.ok(
       cleoCards.json !== null &&
@@ -1210,17 +1195,58 @@ void test("fleet mcp --http serves Streamable HTTP MCP with per-mate scoping and
       .map((c) => strField(c, "title"));
     assert.deepEqual(titles, ["Cleo HTTP MCP card"]);
 
-    const writeCharter = await postMcp(`${mcpUrl}?mate=1stmate`, {
-      jsonrpc: "2.0",
-      id: 5,
-      method: "tools/call",
-      params: { name: "fleet_charter", arguments: { text: "overwrite" } },
-    });
-    assert.ok(
-      writeCharter.json !== null &&
-        isRecord(writeCharter.json["result"]) &&
-        writeCharter.json["result"]["isError"] === true,
+    const callTool = async (
+      id: number,
+      name: string,
+      args: Record<string, unknown>,
+    ): Promise<Record<string, unknown>> => {
+      const res = await postMcp(`${mcpUrl}?mate=1stmate`, {
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name, arguments: args },
+      });
+      assert.equal(res.status, 200);
+      assert.ok(res.json !== null && isRecord(res.json["result"]));
+      return res.json["result"];
+    };
+    const readSeeded = async (): Promise<void> => {
+      const charter = await callTool(20, "fleet_charter", {});
+      assert.ok(isRecord(charter["structuredContent"]));
+      assert.equal(charter["structuredContent"]["text"], "Seeded 1stmate charter.");
+      const prefs = await callTool(21, "fleet_prefs", {});
+      assert.ok(isRecord(prefs["structuredContent"]));
+      assert.equal(prefs["structuredContent"]["text"], "Seeded captain prefs.");
+    };
+    await readSeeded();
+    const writeCharter = await callTool(5, "fleet_charter", { text: "overwrite" });
+    assert.equal(writeCharter["isError"], true);
+    const writePrefs = await callTool(22, "fleet_prefs", { text: "overwrite" });
+    assert.equal(writePrefs["isError"], true);
+    await readSeeded();
+    assert.equal(await server.client.getCharter("1stmate"), "Seeded 1stmate charter.");
+    assert.equal(await server.client.getPrefs(), "Seeded captain prefs.");
+
+    const staleVersion = await postMcp(
+      `${mcpUrl}?mate=1stmate`,
+      {
+        jsonrpc: "2.0",
+        id: 23,
+        method: "tools/call",
+        params: { name: "fleet_dispatch", arguments: { title: "Stale protocol card" } },
+      },
+      { "mcp-protocol-version": "2025-03-26" },
     );
+    assert.equal(staleVersion.status, 400);
+    const afterStale = await server.client.listCards({ scope: "1stmate", state: "open" });
+    assert.ok(!afterStale.cards.some((c) => c.title === "Stale protocol card"));
+
+    const currentVersion = await postMcp(
+      `${mcpUrl}?mate=1stmate`,
+      { jsonrpc: "2.0", id: 24, method: "ping" },
+      { "mcp-protocol-version": "2025-06-18" },
+    );
+    assert.equal(currentVersion.status, 200);
 
     const oversized = await postMcp(`${mcpUrl}?mate=1stmate`, {
       jsonrpc: "2.0",

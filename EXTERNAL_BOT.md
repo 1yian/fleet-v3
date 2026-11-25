@@ -52,7 +52,6 @@ Connect your bot to Fleet's MCP tool server instead of shelling out:
   ```text
   http://<reachable-ip>:4102/mcp?mate=<mate>
   ```
-  _(You can also pass `X-Fleet-Mate: <mate>` as an HTTP header instead of `?mate=<mate>`, or start the server with `--mate <mate>` as the default.)_
 - **Stdio MCP (for local MCP-capable bots):**
   Configure an MCP server entry running:
   ```json

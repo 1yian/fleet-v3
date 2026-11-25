@@ -135,12 +135,14 @@ function boardContext(options: RunFleetCliOptions): FleetAxiContext {
   };
 }
 
-function parsePort(raw: string, helpBlock: string): number {
+function parsePort(raw: string, helpBlock: string, minPort = 1): number {
   const port = Number(raw);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new AxiError("--port must be an integer between 1 and 65535", "VALIDATION_ERROR", [
-      helpBlock,
-    ]);
+  if (!Number.isInteger(port) || port < minPort || port > 65_535) {
+    throw new AxiError(
+      `--port must be an integer between ${String(minPort)} and 65535`,
+      "VALIDATION_ERROR",
+      [helpBlock],
+    );
   }
   return port;
 }
@@ -312,12 +314,12 @@ Flags:
 const MCP_HELP = `fleet mcp - run a Fleet MCP tool server for external bots without shell access
 Usage:
   fleet mcp [--mate <name>]
-  fleet mcp --http [--host 127.0.0.1] [--port 4102] [--mate <default-mate>]
+  fleet mcp --http [--host 127.0.0.1] [--port 4102]
 Flags:
-  --mate <name>            Mate identity for tool calls (required for stdio; optional default for --http)
-  --http                   Serve Streamable HTTP MCP at POST /mcp instead of stdio
+  --mate <name>            Mate identity for tool calls (stdio only; HTTP clients pass ?mate=<name>)
+  --http                   Serve Streamable HTTP MCP at POST /mcp?mate=<name> instead of stdio
   --host <addr>            HTTP bind host (requires --http, default: 127.0.0.1)
-  --port <port>            HTTP bind port (requires --http, default: 4102)`;
+  --port <port>            HTTP bind port (requires --http, default: 4102, 0 picks a free port)`;
 
 const CHAT_HELP = `fleet chat - launch 1stmate (or any configured mate) interactively in this terminal
 Usage:
@@ -525,26 +527,15 @@ async function mcpCommand(
   }
 
   if (httpMode) {
-    const rawMate = stringFlag(parsed.values, "mate") ?? process.env["FLEET_MATE"];
-    let defaultMate: string | undefined;
-    if (rawMate !== undefined && rawMate.trim().length > 0) {
-      const checked = MateNameSchema.safeParse(rawMate.trim());
-      if (!checked.success) {
-        throw new AxiError(
-          checked.error.issues[0]?.message ?? `Invalid mate name "${rawMate}"`,
-          "VALIDATION_ERROR",
-          [MCP_HELP],
-        );
-      }
-      defaultMate = checked.data;
+    if (stringFlag(parsed.values, "mate") !== undefined) {
+      throw new AxiError("--mate is not accepted with --http", "VALIDATION_ERROR", [MCP_HELP]);
     }
     const host = rawHost ?? "127.0.0.1";
-    const port = parsePort(rawPort ?? "4102", MCP_HELP);
+    const port = parsePort(rawPort ?? "4102", MCP_HELP, 0);
     const { url, stop } = await startFleetMcpHttpServer({
       client: ctx.board(),
       host,
       port,
-      ...(defaultMate !== undefined ? { defaultMate } : {}),
     });
     process.stderr.write(`fleet mcp listening at ${url} (upstream: ${ctx.boardUrl})\n`);
     await new Promise<void>((resolve) => {

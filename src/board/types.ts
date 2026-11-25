@@ -27,6 +27,19 @@ export const EVENT_TYPES = [
 ] as const;
 export type BoardEventType = (typeof EVENT_TYPES)[number];
 
+const DURATION_UNITS_MS: Readonly<Record<string, number>> = {
+  s: 1000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+};
+
+export function parseDurationMs(raw: string): number | undefined {
+  const match = /^([1-9]\d*)(s|m|h|d)$/u.exec(raw.trim());
+  if (match?.[1] === undefined || match[2] === undefined) return undefined;
+  return Number(match[1]) * (DURATION_UNITS_MS[match[2]] ?? 0);
+}
+
 const MATE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
 const EXECUTION_HOLDERS: ReadonlySet<string> = new Set(["runner", "worker"]);
 export const HolderFilterSchema = z.string().regex(MATE_NAME_PATTERN, {

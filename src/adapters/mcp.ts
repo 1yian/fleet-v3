@@ -9,6 +9,7 @@ import {
   HolderFilterSchema,
   HolderNameSchema,
   MateNameSchema,
+  parseDurationMs,
 } from "../board/types.ts";
 import { createLineWriter } from "../board/wake.ts";
 import { VERSION } from "../version.ts";
@@ -19,13 +20,6 @@ const INVALID_REQUEST = -32_600;
 const METHOD_NOT_FOUND = -32_601;
 const INVALID_PARAMS = -32_602;
 const MAX_HTTP_BODY_BYTES = 1_048_576;
-
-const DURATION_UNITS: Readonly<Record<string, number>> = {
-  s: 1000,
-  m: 60_000,
-  h: 3_600_000,
-  d: 86_400_000,
-};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -48,15 +42,6 @@ interface McpToolSpec {
   readonly description: string;
   readonly inputSchema: Readonly<Record<string, unknown>>;
   readonly execute: (args: unknown, ctx: McpToolContext) => Promise<Record<string, unknown>>;
-}
-
-function parseDurationMs(raw: string): number {
-  const match = /^([1-9]\d*)(s|m|h|d)$/u.exec(raw.trim());
-  if (match?.[1] === undefined || match[2] === undefined) {
-    throw new Error(`Invalid duration "${raw}" (use e.g. 30s, 15m, 2h, 1d)`);
-  }
-  const unitMs = DURATION_UNITS[match[2]] ?? 0;
-  return Number(match[1]) * unitMs;
 }
 
 const EmptyArgsSchema = z.object({}).strict();
@@ -358,7 +343,11 @@ const FLEET_MCP_TOOLS: readonly McpToolSpec[] = [
     },
     execute: async (raw, ctx) => {
       const args = SnoozeArgsSchema.parse(raw);
-      const until = Date.now() + parseDurationMs(args.duration);
+      const durationMs = parseDurationMs(args.duration);
+      if (durationMs === undefined) {
+        throw new Error(`Invalid duration "${args.duration}" (use e.g. 30s, 15m, 2h, 1d)`);
+      }
+      const until = Date.now() + durationMs;
       const card = await ctx.client.snoozeCard(args.id, {
         actor: ctx.mate,
         until,
@@ -515,10 +504,6 @@ function handleMcpRequest(
     };
   }
 
-  if (request.method === "notifications/initialized" && request.id === undefined) {
-    return undefined;
-  }
-
   if (request.id === undefined) {
     return undefined;
   }
@@ -623,7 +608,6 @@ export interface FleetMcpHttpOptions {
   readonly client: BoardClient;
   readonly host: string;
   readonly port: number;
-  readonly defaultMate?: string;
 }
 
 export interface RunningFleetMcpHttp {
@@ -677,21 +661,6 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   res.end(JSON.stringify(payload));
 }
 
-function resolveHttpMate(
-  req: IncomingMessage,
-  url: URL,
-  defaultMate: string | undefined,
-): string | undefined {
-  const headerVal = req.headers["x-fleet-mate"];
-  const raw =
-    url.searchParams.get("mate") ??
-    (typeof headerVal === "string" && headerVal.trim().length > 0 ? headerVal.trim() : undefined) ??
-    defaultMate;
-  if (raw === undefined) return undefined;
-  const parsed = MateNameSchema.safeParse(raw);
-  return parsed.success ? parsed.data : undefined;
-}
-
 async function handleHttpRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -717,11 +686,20 @@ async function handleHttpRequest(
     return;
   }
 
-  const mate = resolveHttpMate(req, url, options.defaultMate);
+  const protocolVersion = req.headers["mcp-protocol-version"];
+  if (protocolVersion !== undefined && protocolVersion !== PROTOCOL_VERSION) {
+    sendJson(res, 400, {
+      error: "unsupported_protocol_version",
+      message: `Only MCP protocol version ${PROTOCOL_VERSION} is supported`,
+    });
+    return;
+  }
+
+  const mate = MateNameSchema.safeParse(url.searchParams.get("mate")).data;
   if (mate === undefined) {
     sendJson(res, 400, {
       error: "missing_mate",
-      message: "Pass ?mate=<name>, X-Fleet-Mate header, or start `fleet mcp --http --mate <name>`",
+      message: "Pass ?mate=<name> with a valid mate name",
     });
     return;
   }
@@ -750,6 +728,7 @@ async function handleHttpRequest(
     mate,
     signal: controller.signal,
   });
+  if (res.destroyed || res.writableEnded) return;
   if (response === undefined) {
     res.writeHead(202);
     res.end();
