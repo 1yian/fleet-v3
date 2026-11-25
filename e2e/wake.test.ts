@@ -950,3 +950,260 @@ void test("fleet doctor validates board, charter, external mode, and Claude chan
     await server.stop();
   }
 });
+
+void test("fleet mcp serves scoped Fleet tools over stdio and exits cleanly on EOF", async () => {
+  const server = await startTestServer({
+    parents: { "1stmate": "captain", cleo: "1stmate" },
+  });
+  const child = spawn(process.execPath, [BIN_PATH, "mcp", "--mate", "1stmate"], {
+    env: { ...process.env, BOARD_URL: server.url },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const messages: Record<string, unknown>[] = [];
+  const rl = createInterface({ input: child.stdout });
+  rl.on("line", (line) => {
+    const parsed: unknown = JSON.parse(line);
+    if (isRecord(parsed)) messages.push(parsed);
+  });
+
+  const rpc = (payload: Record<string, unknown>): void => {
+    child.stdin.write(`${JSON.stringify(payload)}\n`);
+  };
+  const waitForId = async (id: number): Promise<Record<string, unknown>> => {
+    await waitFor(() => messages.some((m) => m["id"] === id));
+    const found = messages.find((m) => m["id"] === id);
+    assert.ok(found !== undefined);
+    return found;
+  };
+
+  try {
+    rpc({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {} },
+    });
+    const initResp = await waitForId(1);
+    assert.ok(isRecord(initResp["result"]) && isRecord(initResp["result"]["capabilities"]));
+    assert.ok(Object.hasOwn(initResp["result"]["capabilities"], "tools"));
+
+    rpc({ jsonrpc: "2.0", method: "notifications/initialized" });
+    rpc({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+    const listResp = await waitForId(2);
+    assert.ok(isRecord(listResp["result"]) && Array.isArray(listResp["result"]["tools"]));
+    const toolNames = new Set(
+      listResp["result"]["tools"]
+        .filter((t): t is Record<string, unknown> => isRecord(t))
+        .map((t) => strField(t, "name")),
+    );
+    assert.ok(toolNames.has("fleet_dispatch"));
+    assert.ok(toolNames.has("fleet_view"));
+    assert.ok(toolNames.has("fleet_snooze"));
+    assert.ok(toolNames.has("fleet_close"));
+
+    rpc({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: {
+        name: "fleet_dispatch",
+        arguments: { title: "MCP stdio self card", body: "Spec details" },
+      },
+    });
+    const dispatchResp = await waitForId(3);
+    assert.ok(
+      isRecord(dispatchResp["result"]) &&
+        isRecord(dispatchResp["result"]["structuredContent"]) &&
+        isRecord(dispatchResp["result"]["structuredContent"]["card"]),
+    );
+    const cardId = strField(dispatchResp["result"]["structuredContent"]["card"], "id");
+    assert.ok(cardId.length > 0);
+
+    rpc({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: {
+        name: "fleet_snooze",
+        arguments: { id: cardId, duration: "15m", reason: "waiting" },
+      },
+    });
+    const snoozeResp = await waitForId(4);
+    assert.ok(
+      isRecord(snoozeResp["result"]) &&
+        isRecord(snoozeResp["result"]["structuredContent"]) &&
+        isRecord(snoozeResp["result"]["structuredContent"]["card"]),
+    );
+    assert.equal(typeof snoozeResp["result"]["structuredContent"]["card"]["snoozeUntil"], "number");
+
+    rpc({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "tools/call",
+      params: { name: "fleet_snooze", arguments: { id: cardId, duration: "bogus" } },
+    });
+    const badDurationResp = await waitForId(5);
+    assert.ok(isRecord(badDurationResp["result"]));
+    assert.equal(badDurationResp["result"]["isError"], true);
+
+    rpc({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "tools/call",
+      params: { name: "fleet_close", arguments: { id: cardId, text: "done via mcp" } },
+    });
+    const closeResp = await waitForId(6);
+    assert.ok(
+      isRecord(closeResp["result"]) &&
+        isRecord(closeResp["result"]["structuredContent"]) &&
+        isRecord(closeResp["result"]["structuredContent"]["card"]),
+    );
+    assert.equal(closeResp["result"]["structuredContent"]["card"]["state"], "done");
+
+    rpc({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: { name: "fleet_nonexistent", arguments: {} },
+    });
+    const unknownResp = await waitForId(7);
+    assert.ok(isRecord(unknownResp["error"]));
+    assert.equal(unknownResp["error"]["code"], -32_602);
+
+    child.stdin.end();
+    assert.equal(await waitForExit(child), 0);
+  } finally {
+    rl.close();
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await waitForExit(child);
+    }
+    await server.stop();
+  }
+});
+
+async function postMcp(
+  endpoint: string,
+  body: Record<string, unknown>,
+  extraHeaders: Readonly<Record<string, string>> = {},
+): Promise<{ readonly status: number; readonly json: Record<string, unknown> | null }> {
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...extraHeaders },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (text.trim().length === 0) return { status: res.status, json: null };
+  const parsed: unknown = JSON.parse(text);
+  return { status: res.status, json: isRecord(parsed) ? parsed : null };
+}
+
+void test("fleet mcp --http serves Streamable HTTP MCP with per-mate scoping and ingress guards", async () => {
+  const server = await startTestServer({
+    parents: { "1stmate": "captain", cleo: "1stmate", cnp: "1stmate" },
+  });
+  const portProbe = createServer();
+  await new Promise<void>((resolve) => {
+    portProbe.listen(0, "127.0.0.1", () => {
+      resolve();
+    });
+  });
+  const probeAddr = portProbe.address();
+  assert.ok(probeAddr !== null && typeof probeAddr === "object");
+  const mcpPort = probeAddr.port;
+  await new Promise<void>((resolve) => {
+    portProbe.close(() => {
+      resolve();
+    });
+  });
+  const child = spawn(
+    process.execPath,
+    [BIN_PATH, "mcp", "--http", "--host", "127.0.0.1", "--port", String(mcpPort)],
+    {
+      env: { ...process.env, BOARD_URL: server.url },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let stderrText = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderrText += chunk;
+  });
+
+  try {
+    await waitFor(() => /fleet mcp listening at http:\/\/127\.0\.0\.1:\d+\/mcp/u.test(stderrText));
+    const match = /fleet mcp listening at (http:\/\/127\.0\.0\.1:\d+\/mcp)/u.exec(stderrText);
+    assert.ok(match?.[1] !== undefined);
+    const mcpUrl = match[1];
+
+    const missingMate = await postMcp(mcpUrl, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "ping",
+    });
+    assert.equal(missingMate.status, 400);
+
+    const foreignOrigin = await postMcp(
+      `${mcpUrl}?mate=1stmate`,
+      { jsonrpc: "2.0", id: 1, method: "ping" },
+      { origin: "https://evil.example" },
+    );
+    assert.equal(foreignOrigin.status, 403);
+
+    const badMethod = await fetch(`${mcpUrl}?mate=1stmate`, { method: "GET" });
+    assert.equal(badMethod.status, 405);
+
+    const notif = await postMcp(`${mcpUrl}?mate=1stmate`, {
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+    });
+    assert.equal(notif.status, 202);
+
+    const createdCleo = await postMcp(`${mcpUrl}?mate=1stmate`, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "fleet_dispatch", arguments: { mate: "cleo", title: "Cleo HTTP MCP card" } },
+    });
+    assert.equal(createdCleo.status, 200);
+
+    const createdCnp = await postMcp(`${mcpUrl}?mate=1stmate`, {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "fleet_dispatch", arguments: { mate: "cnp", title: "CNP private MCP card" } },
+    });
+    assert.equal(createdCnp.status, 200);
+
+    const cleoCards = await postMcp(
+      mcpUrl,
+      {
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "fleet_cards", arguments: { state: "open" } },
+      },
+      { "x-fleet-mate": "cleo" },
+    );
+    assert.equal(cleoCards.status, 200);
+    assert.ok(
+      cleoCards.json !== null &&
+        isRecord(cleoCards.json["result"]) &&
+        isRecord(cleoCards.json["result"]["structuredContent"]) &&
+        Array.isArray(cleoCards.json["result"]["structuredContent"]["cards"]),
+    );
+    const titles = cleoCards.json["result"]["structuredContent"]["cards"]
+      .filter((c): c is Record<string, unknown> => isRecord(c))
+      .map((c) => strField(c, "title"));
+    assert.deepEqual(titles, ["Cleo HTTP MCP card"]);
+
+    child.kill("SIGTERM");
+    assert.equal(await waitForExit(child), 0);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await waitForExit(child);
+    }
+    await server.stop();
+  }
+});
