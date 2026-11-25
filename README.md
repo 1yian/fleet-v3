@@ -6,7 +6,7 @@ An Agent eXperience Interface (AXI), minimal 3-table SQLite Card Server, multi-m
 
 > "Read `SETUP.md` in `https://github.com/1yian/fleet-v3` and set up fleet on this machine."
 
-Read [VISION.md](VISION.md) for the design principles, [SETUP.md](SETUP.md) for the agent-executable onboarding and setup guide, and [AGENTS.md](AGENTS.md) before contributing.
+Read [VISION.md](VISION.md) for the design principles, [SETUP.md](SETUP.md) for the agent-executable onboarding and setup guide, [EXTERNAL_BOT.md](EXTERNAL_BOT.md) for external bot (`Grok Bot`, `Dots`, `Muse`) self-setup, and [AGENTS.md](AGENTS.md) before contributing.
 
 ## Layout
 

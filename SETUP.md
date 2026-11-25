@@ -17,7 +17,7 @@ Then inspect the machine (`ls ~/Projects`, check installed tools: `node -v`, `bu
 
 1. **What harness do you want for `1stmate`?**
    - **Coding harness:** `pi` / `ypi` or **Claude Code** (you launch `1stmate` from any directory with one command: `fleet chat`).
-   - **Non-coding / chat harness:** **Grok Bot**, **Dots**, **Muse**, or another webhook-capable bot (set `mode: external` in `fleet.yaml` and wire wakes via `fleet watch --mate 1stmate --webhook <url>`).
+   - **Non-coding / external bot:** **Grok Bot**, **Dots**, **Muse**, or another webhook-capable bot (configured with `mode: external` in `fleet.yaml`; **never download or install Grok Bot, Dots, or Muse** on the machine - instead hand the captain the `EXTERNAL_BOT.md` GitHub link so the bot sets itself up).
 2. **What harness do you want for `crewmates`?**
    - **Coding harnesses only** (`pi` / `ypi` or **Claude Code** for now). Confirm whether local `crewmates` should open interactively in `herdr` panes (`viewport: herdr`, recommended on macOS/desktop) or run `headless`.
 3. **Do you want any optional `2ndmate`s?**
@@ -248,22 +248,26 @@ fleet chat
 
 _(Claude Code Channels are in research preview; Team/Enterprise orgs must allow `channelsEnabled`.)_
 
-### Option C: Non-coding harness (`Grok Bot`, `Dots`, `Muse`, or any webhook bot)
+### Option C: Non-coding / external bot (`Grok Bot`, `Dots`, `Muse`, or any webhook bot)
 
-1. Mark `1stmate` with `mode: external` in `~/.fleet/fleet.yaml` (which sets `autoStart: false` automatically and prevents `fleet chat` or `fleet mates up` from trying to launch a local TUI):
+**Do NOT download, install, or search for installers for Grok Bot, Dots, or Muse.** Those are external bot platforms the captain already uses, and the bot itself can create and configure the `1stmate` bot from [`EXTERNAL_BOT.md`](EXTERNAL_BOT.md).
+
+1. Mark `1stmate` with `mode: external` in `~/.fleet/fleet.yaml` (this sets `autoStart: false` automatically and prevents `fleet chat` or `fleet mates up` from trying to launch a local TUI):
    ```yaml
    - name: 1stmate
      parent: captain
      mode: external
    ```
-2. Give the bot `prompts/mate.md` as its system instructions, `fleet` on `PATH`, `BOARD_URL` set to the Card Server address reachable from the bot (the `boardUrl` in `~/.fleet/fleet.yaml`), and `FLEET_MATE=1stmate`.
-3. Run `fleet watch` to push filtered wakes straight to the bot's HTTP webhook:
+2. Finish starting `fleet serve`, `fleet run`, seeding charters/prefs, and verifying `fleet doctor`.
+3. Give the captain this ready-to-paste prompt to send directly to their bot (replacing `<board-url>` with the `BOARD_URL` reachable from the bot):
+   > Read `https://github.com/1yian/fleet-v3/blob/main/EXTERNAL_BOT.md` and create/configure my `1stmate` bot for Fleet (`mate: 1stmate`, `BOARD_URL: <board-url>`). Return the incoming webhook URL and auth header when ready.
+4. Once the bot returns its webhook URL (and optional auth header), start `fleet watch` on the Control Host (and add a `launchd`/`systemd` service from Section 6):
 
 ```bash
 fleet watch --mate 1stmate --webhook https://bot.example.com/wake --header "Authorization: Bearer <token>"
 ```
 
-_(If your bot consumes a pipe instead of HTTP, run bare `fleet watch --mate 1stmate` for filtered NDJSON lines. Each line, and each webhook POST body, is exactly `{ mate, notice, eventType, cardId?, actor? }`.)_
+_(If the bot consumes a local pipe instead of HTTP, run bare `fleet watch --mate 1stmate` for filtered NDJSON lines. Each line, and each webhook POST body, is exactly `{ mate, notice, eventType, cardId?, actor? }`.)_
 
 ---
 
@@ -293,7 +297,7 @@ Each `2ndmate` uses `parent: 1stmate` in `~/.fleet/fleet.yaml` and gets its own 
       - "{prompt}"
   ```
 - **Non-coding `2ndmate`s (e.g. multiple Grok Bot instances):**
-  Add each bot to `mates.items` in `~/.fleet/fleet.yaml` with `mode: external` so `fleet mates up` skips it, then run one `fleet watch --mate <name> --webhook <bot-webhook-url>` service per `2ndmate` bot instance.
+  Do not install any bot app locally. Add each bot to `mates.items` in `~/.fleet/fleet.yaml` with `mode: external` so `fleet mates up` skips it, give the captain the `https://github.com/1yian/fleet-v3/blob/main/EXTERNAL_BOT.md` link to create each `2ndmate` bot, and run one `fleet watch --mate <name> --webhook <bot-webhook-url>` service per `2ndmate` bot instance.
 
 ---
 
