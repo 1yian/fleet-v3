@@ -302,7 +302,7 @@ async function runClaim(
       epoch: claim.epoch,
       token: claim.token,
       outcome: "needs_mate",
-      summary: `Stopped after ${String(claim.card.attempts - 1)} failed or expired attempts on ${config.host}. Re-queueing cannot start another worker on this card; review the thread, then escalate, replace it with a new card, or cancel.`,
+      summary: `Stopped after ${String(claim.card.attempts - 1)} failed or expired attempts on ${config.host}. Review the thread, fix the blocker and run \`fleet queue ${cardId}\` to reset attempts and retry, or close/escalate.`,
       actor: runnerActor(config.host),
     });
     return;

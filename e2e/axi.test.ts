@@ -298,3 +298,54 @@ void test("fleet serve refuses an explicit --config that does not exist", async 
   assert.match(result.output, /not found/iu);
   assert.ok(result.output.includes(missing), "the diagnostic names the missing explicit path");
 });
+
+void test("mate CLI defaults dispatch --mate to self, scopes reads to subtree, and supports snooze", async () => {
+  const server = await startTestServer({
+    parents: { jarvis: "captain", cleo: "jarvis", cnp: "jarvis" },
+  });
+  const { url } = server;
+
+  try {
+    const delegated = await captureCli(
+      ["dispatch", "--mate", "cleo", "--title", "Cleo inline task"],
+      url,
+      "jarvis",
+    );
+    assert.equal(delegated.exitCode, 0);
+
+    const selfWorker = await captureCli(
+      ["dispatch", "--project", "Cleo", "--host", "p620", "--title", "Self worker task"],
+      url,
+      "cleo",
+    );
+    assert.equal(selfWorker.exitCode, 0);
+    assert.match(selfWorker.out, /mate: cleo/u);
+    assert.match(selfWorker.out, /state: queued/u);
+
+    const cnpTask = await captureCli(
+      ["dispatch", "--mate", "cnp", "--title", "CNP private task"],
+      url,
+      "jarvis",
+    );
+    assert.equal(cnpTask.exitCode, 0);
+
+    const cleoCards = await captureCli(["cards"], url, "cleo");
+    assert.equal(cleoCards.exitCode, 0);
+    assert.match(cleoCards.out, /Cleo inline task/u);
+    assert.ok(!cleoCards.out.includes("CNP private task"), "cleo CLI never sees cnp cards");
+
+    const snoozed = await captureCli(
+      ["snooze", "1", "--for", "15m", "--reason", "Waiting on external review"],
+      url,
+      "cleo",
+    );
+    assert.equal(snoozed.exitCode, 0);
+    assert.match(snoozed.out, /snoozeUntil:/u);
+
+    const viewed = await captureCli(["view", "1"], url, "cleo");
+    assert.equal(viewed.exitCode, 0);
+    assert.match(viewed.out, /snoozeUntil:/u);
+  } finally {
+    await server.stop();
+  }
+});

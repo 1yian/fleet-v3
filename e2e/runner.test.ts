@@ -500,9 +500,24 @@ void test("returns card to mate once crashed or expired attempts exceed maxAttem
     const thread = await client.getThread(flaky.id);
     assert.equal(thread.card.state, "held");
     assert.equal(thread.card.holder, "cleo");
+    const epochBeforeRetry = thread.card.epoch;
     assert.ok(
-      thread.entries.some((entry) => /cannot start another worker/u.test(entry.text)),
-      "the retry cap summary must not advertise re-queueing as recovery",
+      thread.entries.some((entry) => /fleet queue/u.test(entry.text)),
+      "the retry cap summary points to fleet queue after fixing the blocker",
+    );
+
+    const requeued = await client.queueCard(flaky.id, { actor: "cleo" });
+    assert.equal(requeued.state, "queued");
+    assert.equal(requeued.attempts, 0, "re-queuing a held card resets retry attempts");
+    assert.equal(requeued.epoch, epochBeforeRetry, "re-queuing preserves monotonic epoch");
+
+    await runLoop(client, workerConfig, { once: true });
+    assert.equal(existsSync(ranMarker), true, "the retried card runs after attempts reset");
+    const finished = await client.getThread(flaky.id);
+    assert.equal(finished.card.state, "done");
+    assert.ok(
+      finished.card.epoch > epochBeforeRetry,
+      "the retry claim strictly increments the fencing epoch",
     );
   } finally {
     await server.stop();

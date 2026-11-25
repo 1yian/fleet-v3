@@ -664,3 +664,120 @@ void test("recent done follows completion time, escalation needs a held card, an
     await server.stop();
   }
 });
+
+void test("unified dispatch guards, subtree scoping, parent wake on close/cancel, snooze, and 3x parent chase", async () => {
+  let now = 1_700_000_000_000;
+  const server = await startTestServer({
+    parents: { jarvis: "captain", cleo: "jarvis", cnp: "jarvis" },
+    now: () => now,
+    chaseIntervalMs: 40,
+    staleAfterMs: 120_000,
+  });
+  const { client } = server;
+  const jarvisEvents = watchEvents(client, { after: 0, holder: "jarvis" });
+  const cleoEvents = watchEvents(client, { after: 0, holder: "cleo" });
+
+  try {
+    await assert.rejects(
+      () =>
+        client.createCard({ mate: "cleo", title: "Half target", project: "Cleo", actor: "cleo" }),
+      rejectsWith(400, "missing_target"),
+    );
+    await assert.rejects(
+      () =>
+        client.createCard({
+          mate: "cleo",
+          title: "Cross-domain worker",
+          project: "Cleo",
+          host: "p620",
+          actor: "jarvis",
+        }),
+      rejectsWith(400, "invalid_dispatch"),
+    );
+    await assert.rejects(
+      () => client.createCard({ mate: "cnp", title: "Sibling hijack", actor: "cleo" }),
+      rejectsWith(403, "out_of_scope"),
+    );
+
+    const delegated = await client.createCard({
+      mate: "cleo",
+      title: "Check Hayward Kia transfer",
+      actor: "jarvis",
+    });
+    assert.equal(delegated.state, "held");
+    assert.equal(delegated.holder, "cleo");
+
+    const cnpCard = await client.createCard({
+      mate: "cnp",
+      title: "CNP terraform audit",
+      actor: "jarvis",
+    });
+
+    const cleoScoped = await client.listCards({ scope: "cleo" });
+    assert.deepEqual(
+      cleoScoped.cards.map((c) => c.id),
+      [delegated.id],
+      "cleo only sees its own subtree",
+    );
+    const jarvisScoped = await client.listCards({ scope: "jarvis" });
+    assert.equal(jarvisScoped.total, 2, "jarvis sees its entire subtree");
+    await assert.rejects(
+      () => client.getThread(cnpCard.id, "cleo"),
+      rejectsWith(403, "out_of_scope"),
+    );
+    await assert.rejects(
+      () => client.closeCard(cnpCard.id, { actor: "cleo", result: "nope" }),
+      rejectsWith(403, "out_of_scope"),
+    );
+
+    const snoozed = await client.snoozeCard(delegated.id, {
+      until: now + 300_000,
+      reason: "Waiting on Stripe support",
+      actor: "cleo",
+    });
+    assert.equal(snoozed.snoozeUntil, now + 300_000);
+
+    now += 150_000;
+    await new Promise((resolve) => {
+      setTimeout(resolve, 120);
+    });
+    assert.ok(
+      !cleoEvents.events.some((ev) => ev.type === "chase.due"),
+      "snoozed card suppresses chase.due until snooze expires",
+    );
+
+    await client.postEntry(delegated.id, {
+      text: "Support replied",
+      by: "jarvis",
+    });
+    const woke = await client.getThread(delegated.id);
+    assert.equal(woke.card.snoozeUntil, null, "non-internal reply clears snooze");
+
+    now += 250_000;
+    await waitFor(
+      () =>
+        cleoEvents.events.some((ev) => ev.type === "chase.due") &&
+        jarvisEvents.events.some(
+          (ev) =>
+            ev.type === "chase.due" && JSON.stringify(ev.payload).includes('"stalledChild":"cleo"'),
+        ),
+      2000,
+    );
+
+    await client.closeCard(delegated.id, { result: "Fixed inline", actor: "cleo" });
+    await client.cancelCard(cnpCard.id, { reason: "Superseded", actor: "cnp" });
+    await waitFor(
+      () =>
+        jarvisEvents.events.some((ev) => ev.type === "card.done" && ev.cardId === delegated.id) &&
+        jarvisEvents.events.some((ev) => ev.type === "card.canceled" && ev.cardId === cnpCard.id),
+      2000,
+    );
+    assert.ok(
+      cleoEvents.events.some((ev) => ev.type === "card.created" && ev.cardId === delegated.id),
+    );
+  } finally {
+    await jarvisEvents.stop();
+    await cleoEvents.stop();
+    await server.stop();
+  }
+});

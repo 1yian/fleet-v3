@@ -20,6 +20,7 @@ import {
   replyCommand,
   runCommand,
   setupCommand,
+  snoozeCommand,
   viewCommand,
   type FleetAxiContext,
 } from "./axi/commands.ts";
@@ -41,12 +42,13 @@ Usage:
   fleet serve [flags]          Run the minimal 3-table SQLite Card Server
   fleet cards [flags]          List cards across mates and holders
   fleet view <id> [--full]     Inspect a card and its thread
-  fleet dispatch [flags]       Create a card on the Card Server
+  fleet dispatch [flags]       Delegate a card to a child mate or spawn a worker
   fleet queue <id> [flags]     Put a held card into the runner queue for a worker
   fleet reply <id> [flags]     Post an entry on a card thread
   fleet escalate <id> [flags]  Escalate a card to the parent mate (or captain)
   fleet handoff <id> [flags]   Pass a card to a mate (default: home mate)
   fleet answer <id> [flags]    Answer an escalated card and hand it back to its mate
+  fleet snooze <id> [flags]    Defer stale-card chases while waiting externally
   fleet close <id> [flags]     Mark a card done and unblock waiting dependents
   fleet cancel <id> [flags]    Cancel an open or obsolete card
   fleet hosts                  List runner hosts advertised on the Card Server
@@ -153,8 +155,8 @@ function resolveServeOptions(
     host,
     port,
     parents: extractMateParents(cfg),
-    chaseIntervalMs: (serverCfg?.chaseIntervalSeconds ?? 60) * 1000,
-    staleAfterMs: (serverCfg?.staleAfterSeconds ?? 600) * 1000,
+    chaseIntervalMs: (serverCfg?.chaseIntervalSeconds ?? 120) * 1000,
+    staleAfterMs: (serverCfg?.staleAfterSeconds ?? 120) * 1000,
   };
 }
 
@@ -300,6 +302,7 @@ export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<voi
       escalate: escalateCommand,
       handoff: handoffCommand,
       answer: answerCommand,
+      snooze: snoozeCommand,
       close: closeCommand,
       cancel: cancelCommand,
       hosts: hostsCommand,

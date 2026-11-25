@@ -38,6 +38,7 @@ import {
   type OptionalFenceInput,
   type PostEntryInput,
   type QueueCardInput,
+  type SnoozeCardInput,
 } from "./types.ts";
 
 const SCHEMA_SQL = `
@@ -59,6 +60,7 @@ CREATE TABLE IF NOT EXISTS cards (
   worker_token_hash TEXT,
   claim_by TEXT,
   lease_until INTEGER,
+  snooze_until INTEGER,
   created_by TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -113,6 +115,7 @@ const CardRowSchema = z.object({
   worker_token_hash: z.string().nullable(),
   claim_by: z.string().nullable(),
   lease_until: z.number().int().nullable(),
+  snooze_until: z.number().int().nullable(),
   created_by: z.string(),
   created_at: z.number().int(),
   updated_at: z.number().int(),
@@ -180,6 +183,17 @@ function parseMateName(mate: string): string {
   return parsed.data;
 }
 
+function isMateActor(actor: string): boolean {
+  return (
+    actor !== "captain" &&
+    actor !== SERVER_ACTOR &&
+    actor !== "runner" &&
+    actor !== "worker" &&
+    !actor.startsWith("runner:") &&
+    !actor.startsWith("worker:")
+  );
+}
+
 function rowToCard(row: CardRow): Card {
   return {
     id: String(row.id),
@@ -197,6 +211,7 @@ function rowToCard(row: CardRow): Card {
     attempts: row.attempts,
     claimBy: row.claim_by,
     leaseUntil: row.lease_until,
+    snoozeUntil: row.snooze_until,
     createdBy: row.created_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -273,6 +288,15 @@ export class CardStore {
     }
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA_SQL);
+    this.ensureSnoozeColumn();
+  }
+
+  private ensureSnoozeColumn(): void {
+    const cols = this.db.prepare("PRAGMA table_info(cards)").all();
+    const hasSnooze = cols.some((col) => Reflect.get(col, "name") === "snooze_until");
+    if (!hasSnooze) {
+      this.db.exec("ALTER TABLE cards ADD COLUMN snooze_until INTEGER;");
+    }
   }
 
   public close(): void {
@@ -294,6 +318,77 @@ export class CardStore {
   public parentOf(holder: string): string {
     if (holder === "captain") return "captain";
     return Object.hasOwn(this.parents, holder) ? (this.parents[holder] ?? "captain") : "captain";
+  }
+
+  public isInSubtree(actor: string, mate: string): boolean {
+    if (!isMateActor(actor)) return true;
+    const seen = new Set<string>();
+    let cur = mate;
+    while (!seen.has(cur)) {
+      if (cur === actor) return true;
+      if (cur === "captain") return false;
+      seen.add(cur);
+      cur = this.parentOf(cur);
+    }
+    return false;
+  }
+
+  private subtreeMates(actor: string): string[] {
+    const mates = new Set<string>([actor]);
+    for (const mate of Object.keys(this.parents)) {
+      if (this.isInSubtree(actor, mate)) mates.add(mate);
+    }
+    return [...mates];
+  }
+
+  private assertScope(
+    actor: string,
+    card: { readonly id: number; readonly mate: string; readonly holder: string },
+    fenced: boolean,
+  ): void {
+    if (fenced || !isMateActor(actor)) return;
+    if (card.holder === actor || this.isInSubtree(actor, card.mate)) return;
+    throw new BoardError(
+      403,
+      "out_of_scope",
+      `Mate "${actor}" cannot access card #${String(card.id)} (owned by ${card.mate}, held by ${card.holder || "none"})`,
+    );
+  }
+
+  private scopePredicate(scope: string | undefined): {
+    readonly clause: string | undefined;
+    readonly params: string[];
+  } {
+    if (scope === undefined || !isMateActor(scope)) {
+      return { clause: undefined, params: [] };
+    }
+    const mates = this.subtreeMates(scope);
+    const placeholders = mates.map(() => "?").join(", ");
+    return {
+      clause: `(c.holder = ? OR c.mate IN (${placeholders}))`,
+      params: [scope, ...mates],
+    };
+  }
+
+  private appendCreatorNotice(
+    card: Card,
+    type: "card.done" | "card.canceled",
+    actor: string,
+    payload: Record<string, unknown>,
+    now: number,
+  ): BoardEvent[] {
+    if (card.createdBy === card.mate || !isMateActor(card.createdBy)) return [];
+    return [
+      this.appendEvent({
+        type,
+        cardId: Number(card.id),
+        mate: card.mate,
+        holder: card.createdBy,
+        actor,
+        payload,
+        createdAt: now,
+      }),
+    ];
   }
 
   private publish(events: readonly BoardEvent[]): void {
@@ -572,7 +667,10 @@ export class CardStore {
     return events;
   }
 
-  private validateNeeds(needs: readonly string[]): {
+  private validateNeeds(
+    needs: readonly string[],
+    actor?: string,
+  ): {
     readonly ids: string[];
     readonly allDone: boolean;
   } {
@@ -585,6 +683,7 @@ export class CardStore {
       if (seen.has(id)) continue;
       seen.add(id);
       const row = this.getCardRow(num);
+      if (actor !== undefined) this.assertScope(actor, row, false);
       if (row.state === "canceled") {
         throw new BoardError(
           400,
@@ -598,6 +697,35 @@ export class CardStore {
     return { ids: unique, allDone };
   }
 
+  private assertDispatchRules(actor: string, mate: string, input: CreateCardInput): void {
+    const hasProject = input.project !== undefined;
+    const hasHost = input.host !== undefined;
+    if (hasProject !== hasHost) {
+      throw new BoardError(
+        400,
+        "missing_target",
+        "Both project and host are required to dispatch a worker",
+      );
+    }
+    if (!isMateActor(actor)) return;
+    if (mate !== actor) {
+      if (this.parentOf(mate) !== actor) {
+        throw new BoardError(
+          403,
+          "out_of_scope",
+          `Mate "${actor}" can only dispatch cards to itself or its direct children`,
+        );
+      }
+      if (hasProject || hasHost) {
+        throw new BoardError(
+          400,
+          "invalid_dispatch",
+          `Delegate to child mate "${mate}" without --project/--host; each mate spawns its own workers`,
+        );
+      }
+    }
+  }
+
   public createCard(input: CreateCardInput): Card {
     const mate = input.mate.trim();
     const title = input.title.trim();
@@ -607,7 +735,8 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const actor = input.actor ?? mate;
-      const needsCheck = this.validateNeeds(input.needs ?? []);
+      this.assertDispatchRules(actor, mate, input);
+      const needsCheck = this.validateNeeds(input.needs ?? [], actor);
       const hasRunnerTarget = input.host !== undefined && input.project !== undefined;
       const state: CardState =
         needsCheck.ids.length > 0 && !needsCheck.allDone
@@ -659,13 +788,15 @@ export class CardStore {
     });
   }
 
-  public getThread(rawId: string): CardThread {
+  public getThread(rawId: string, scope?: string): CardThread {
     const id = parseCardId(rawId);
-    const card = rowToCard(this.getCardRow(id));
+    const row = this.getCardRow(id);
+    if (scope !== undefined) this.assertScope(scope, row, false);
+    const card = rowToCard(row);
     const entries = this.db
       .prepare("SELECT * FROM entries WHERE card_id = ? ORDER BY id ASC")
       .all(id)
-      .map((row) => rowToEntry(row));
+      .map((entryRow) => rowToEntry(entryRow));
     return { card, entries };
   }
 
@@ -688,6 +819,11 @@ export class CardStore {
       conditions.push("c.state = ?");
       params.push(stateFilter);
     }
+    const scopeCheck = this.scopePredicate(query.scope);
+    if (scopeCheck.clause !== undefined) {
+      conditions.push(scopeCheck.clause);
+      params.push(...scopeCheck.params);
+    }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const limitClause = query.limit === undefined ? "" : "LIMIT ?";
@@ -709,7 +845,17 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
+      const fenced = input.epoch !== undefined || input.token !== undefined;
       CardStore.guardFence(row, input, now);
+      const actor = input.actor ?? row.mate;
+      this.assertScope(actor, row, fenced);
+      if (!fenced && isMateActor(actor) && actor !== row.mate) {
+        throw new BoardError(
+          403,
+          "out_of_scope",
+          `Only ${row.mate} (or captain) can queue a worker for card #${String(id)}`,
+        );
+      }
       if (row.state === "done" || row.state === "canceled") {
         throw new BoardError(409, "card_terminal", `Card #${String(id)} is ${row.state}`);
       }
@@ -734,15 +880,15 @@ export class CardStore {
           "Both host and project are required to queue a card",
         );
       }
-      const actor = input.actor ?? row.mate;
+      const nextAttempts = row.state === "held" ? 0 : row.attempts;
       this.db
         .prepare(
           `UPDATE cards
            SET state = 'queued', holder = 'runner', host = ?, project = ?, delivery = ?,
-               updated_at = ?
+               attempts = ?, snooze_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
-        .run(host, project, delivery, now, id);
+        .run(host, project, delivery, nextAttempts, now, id);
       const card = rowToCard(this.getCardRow(id));
       const event = this.appendEvent({
         type: "card.queued",
@@ -887,11 +1033,12 @@ export class CardStore {
           .prepare(
             `UPDATE cards
              SET state = 'done', holder = '', result = ?, claim_token_hash = NULL, worker_token_hash = NULL,
-                 claim_by = NULL, lease_until = NULL, updated_at = ?
+                 claim_by = NULL, lease_until = NULL, snooze_until = NULL, updated_at = ?
              WHERE id = ?`,
           )
           .run(input.summary, now, id);
         const card = rowToCard(this.getCardRow(id));
+        const donePayload = { id: card.id, title: card.title, result: input.summary };
         events.push(
           this.appendEvent({
             type: "card.done",
@@ -899,9 +1046,10 @@ export class CardStore {
             mate: card.mate,
             holder: card.mate,
             actor,
-            payload: { id: card.id, title: card.title, result: input.summary },
+            payload: donePayload,
             createdAt: now,
           }),
+          ...this.appendCreatorNotice(card, "card.done", actor, donePayload, now),
           ...this.unblockDependentsInternal(card.id, now),
         );
         return { result: card, events };
@@ -911,7 +1059,7 @@ export class CardStore {
         .prepare(
           `UPDATE cards
            SET state = 'held', holder = ?, result = ?, claim_token_hash = NULL, worker_token_hash = NULL,
-               claim_by = NULL, lease_until = NULL, updated_at = ?
+               claim_by = NULL, lease_until = NULL, snooze_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
         .run(row.mate, input.summary, now, id);
@@ -949,9 +1097,14 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
+      const fenced = input.epoch !== undefined || input.token !== undefined;
       CardStore.guardFence(row, input, now);
       const by = input.by ?? "captain";
+      this.assertScope(by, row, fenced);
       const internal = input.internal === true;
+      if (!internal && by !== row.holder && row.snooze_until !== null) {
+        this.db.prepare("UPDATE cards SET snooze_until = NULL WHERE id = ?").run(id);
+      }
       const entry = this.insertEntry({
         cardId: id,
         by,
@@ -988,6 +1141,7 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
+      const fenced = input.epoch !== undefined || input.token !== undefined;
       CardStore.guardFence(row, input, now);
       if (row.state === "done" || row.state === "canceled") {
         throw new BoardError(409, "card_terminal", `Card #${String(id)} is ${row.state}`);
@@ -1000,6 +1154,7 @@ export class CardStore {
         );
       }
       const actor = input.actor ?? row.holder;
+      this.assertScope(actor, row, fenced);
       if (actor !== "captain" && actor !== row.holder) {
         throw new BoardError(
           409,
@@ -1017,7 +1172,7 @@ export class CardStore {
           `UPDATE cards
            SET state = 'held', holder = ?, result = ?,
                claim_token_hash = NULL, worker_token_hash = NULL, claim_by = NULL, lease_until = NULL,
-               updated_at = ?
+               snooze_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
         .run(targetHolder, reason, now, id);
@@ -1048,6 +1203,7 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
+      const fenced = input.epoch !== undefined || input.token !== undefined;
       CardStore.guardFence(row, input, now);
       if (row.state === "done" || row.state === "canceled") {
         throw new BoardError(409, "card_terminal", `Card #${String(id)} is ${row.state}`);
@@ -1062,13 +1218,14 @@ export class CardStore {
       }
       const target = trimmedTo.length > 0 ? trimmedTo : row.mate;
       const actor = input.actor ?? row.holder;
+      this.assertScope(actor, row, fenced);
       const text = input.text?.trim() ?? "";
       this.db
         .prepare(
           `UPDATE cards
            SET state = 'held', holder = ?, result = ?,
                claim_token_hash = NULL, worker_token_hash = NULL, claim_by = NULL, lease_until = NULL,
-               updated_at = ?
+               snooze_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
         .run(target, text.length > 0 ? text : row.result, now, id);
@@ -1104,18 +1261,20 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
+      const fenced = input.epoch !== undefined || input.token !== undefined;
       CardStore.guardFence(row, input, now);
       if (row.state === "done" || row.state === "canceled") {
         throw new BoardError(409, "card_terminal", `Card #${String(id)} is ${row.state}`);
       }
       const actor = input.actor ?? "captain";
+      this.assertScope(actor, row, fenced);
       const target = row.mate;
       this.db
         .prepare(
           `UPDATE cards
            SET state = 'held', holder = ?, result = ?,
                claim_token_hash = NULL, worker_token_hash = NULL, claim_by = NULL, lease_until = NULL,
-               updated_at = ?
+               snooze_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
         .run(target, text, now, id);
@@ -1141,6 +1300,64 @@ export class CardStore {
     });
   }
 
+  public snoozeCard(rawId: string, input: SnoozeCardInput): Card {
+    const id = parseCardId(rawId);
+    return this.runTransaction(() => {
+      const now = this.nowFn();
+      const row = this.getCardRow(id);
+      const fenced = input.epoch !== undefined || input.token !== undefined;
+      CardStore.guardFence(row, input, now);
+      if (row.state !== "held") {
+        throw new BoardError(
+          409,
+          "invalid_state",
+          `Card #${String(id)} is ${row.state}; only held cards can be snoozed`,
+        );
+      }
+      if (!Number.isSafeInteger(input.until) || input.until <= now) {
+        throw new BoardError(400, "invalid_snooze", "snooze until timestamp must be in the future");
+      }
+      const actor = input.actor ?? row.holder;
+      this.assertScope(actor, row, fenced);
+      if (actor !== "captain" && actor !== row.holder) {
+        throw new BoardError(
+          409,
+          "holder_changed",
+          `Card #${String(id)} is held by ${row.holder}, not ${actor}`,
+        );
+      }
+      const reason = input.reason?.trim() ?? "";
+      this.db.prepare("UPDATE cards SET snooze_until = ? WHERE id = ?").run(input.until, id);
+      const untilIso = new Date(input.until).toISOString();
+      const note =
+        reason.length > 0 ? `Snoozed until ${untilIso}: ${reason}` : `Snoozed until ${untilIso}`;
+      this.insertEntry({
+        cardId: id,
+        by: actor,
+        kind: "status",
+        text: note,
+        internal: false,
+        createdAt: now,
+      });
+      const card = rowToCard(this.getCardRow(id));
+      const event = this.appendEvent({
+        type: "card.snoozed",
+        cardId: id,
+        mate: card.mate,
+        holder: card.holder,
+        actor,
+        payload: {
+          id: card.id,
+          title: card.title,
+          snoozeUntil: input.until,
+          reason,
+        },
+        createdAt: now,
+      });
+      return { result: card, events: [event] };
+    });
+  }
+
   public closeCard(rawId: string, input: CloseCardInput): Card {
     const id = parseCardId(rawId);
     return this.runTransaction(() => {
@@ -1153,18 +1370,19 @@ export class CardStore {
           "Workers finish by exiting cleanly so the runner can verify; use handoff when stuck",
         );
       }
+      const actor = input.actor ?? row.mate;
+      this.assertScope(actor, row, false);
       if (row.state === "done") return { result: rowToCard(row), events: [] };
       if (row.state === "canceled") {
         throw new BoardError(409, "card_canceled", `Card #${String(id)} is canceled`);
       }
-      const actor = input.actor ?? row.mate;
       const result = input.result?.trim() ?? "";
       this.db
         .prepare(
           `UPDATE cards
            SET state = 'done', holder = '', result = ?,
                claim_token_hash = NULL, worker_token_hash = NULL, claim_by = NULL, lease_until = NULL,
-               updated_at = ?
+               snooze_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
         .run(result.length > 0 ? result : row.result, now, id);
@@ -1179,6 +1397,7 @@ export class CardStore {
         });
       }
       const card = rowToCard(this.getCardRow(id));
+      const donePayload = { id: card.id, title: card.title, result: card.result };
       const events: BoardEvent[] = [
         this.appendEvent({
           type: "card.done",
@@ -1186,9 +1405,10 @@ export class CardStore {
           mate: card.mate,
           holder: card.mate,
           actor,
-          payload: { id: card.id, title: card.title, result: card.result },
+          payload: donePayload,
           createdAt: now,
         }),
+        ...this.appendCreatorNotice(card, "card.done", actor, donePayload, now),
         ...this.unblockDependentsInternal(card.id, now),
       ];
       return { result: card, events };
@@ -1203,18 +1423,20 @@ export class CardStore {
     return this.runTransaction(() => {
       const now = this.nowFn();
       const row = this.getCardRow(id);
+      const fenced = input.epoch !== undefined || input.token !== undefined;
       CardStore.guardFence(row, input, now);
+      const actor = input.actor ?? row.mate;
+      this.assertScope(actor, row, fenced);
       if (row.state === "canceled") return { result: rowToCard(row), events: [] };
       if (row.state === "done") {
         throw new BoardError(409, "card_done", `Card #${String(id)} is already done`);
       }
-      const actor = input.actor ?? row.mate;
       this.db
         .prepare(
           `UPDATE cards
            SET state = 'canceled', holder = '', result = ?,
                claim_token_hash = NULL, worker_token_hash = NULL, claim_by = NULL, lease_until = NULL,
-               updated_at = ?
+               snooze_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
         .run(reason, now, id);
@@ -1227,6 +1449,7 @@ export class CardStore {
         createdAt: now,
       });
       const card = rowToCard(this.getCardRow(id));
+      const cancelPayload = { id: card.id, title: card.title, reason };
       const events: BoardEvent[] = [
         this.appendEvent({
           type: "card.canceled",
@@ -1234,9 +1457,10 @@ export class CardStore {
           mate: card.mate,
           holder: card.mate,
           actor,
-          payload: { id: card.id, title: card.title, reason },
+          payload: cancelPayload,
           createdAt: now,
         }),
+        ...this.appendCreatorNotice(card, "card.canceled", actor, cancelPayload, now),
         ...this.holdDependentsOfCanceled(card.id, now),
       ];
       return { result: card, events };
@@ -1313,6 +1537,13 @@ export class CardStore {
     return typeof val === "number" ? val : 0;
   }
 
+  public expireLeases(): BoardEvent[] {
+    return this.runTransaction(() => {
+      const events = this.expireLeasesInternal(this.nowFn());
+      return { result: events, events };
+    });
+  }
+
   public sweepStale(staleAfterMs: number): BoardEvent[] {
     return this.runTransaction(() => {
       const now = this.nowFn();
@@ -1323,9 +1554,10 @@ export class CardStore {
           `${CARD_SELECT}
            WHERE ((c.state = 'held' AND c.holder != 'captain') OR c.state = 'queued')
            AND c.updated_at <= ?
+           AND (c.snooze_until IS NULL OR c.snooze_until <= ?)
            ORDER BY c.updated_at ASC`,
         )
-        .all(cutoff);
+        .all(cutoff, now);
 
       const grouped = new Map<
         string,
@@ -1334,20 +1566,38 @@ export class CardStore {
           readonly title: string;
           readonly state: CardState;
           readonly ageMs: number;
+          readonly stalledChild?: string;
         }[]
       >();
 
+      const parentThresholdMs = staleAfterMs * 3;
       for (const raw of staleRows) {
         const row = CardRowSchema.parse(raw);
+        const ageMs = Math.max(0, now - row.updated_at);
         const targetHolder = row.state === "queued" ? row.mate : row.holder;
         const list = grouped.get(targetHolder) ?? [];
         list.push({
           id: String(row.id),
           title: row.title,
           state: row.state,
-          ageMs: Math.max(0, now - row.updated_at),
+          ageMs,
         });
         grouped.set(targetHolder, list);
+
+        if (row.state === "held" && ageMs >= parentThresholdMs) {
+          const parent = this.parentOf(row.holder);
+          if (parent !== "captain" && parent !== row.holder) {
+            const parentList = grouped.get(parent) ?? [];
+            parentList.push({
+              id: String(row.id),
+              title: row.title,
+              state: row.state,
+              ageMs,
+              stalledChild: row.holder,
+            });
+            grouped.set(parent, parentList);
+          }
+        }
       }
 
       for (const [holder, cards] of grouped) {
@@ -1368,7 +1618,7 @@ export class CardStore {
     });
   }
 
-  public getOverview(): BoardOverview {
+  public getOverview(scope?: string): BoardOverview {
     const counts = {
       total: 0,
       open: 0,
@@ -1380,11 +1630,14 @@ export class CardStore {
       done: 0,
       canceled: 0,
     };
+    const scopeCheck = this.scopePredicate(scope);
+    const scopeWhere = scopeCheck.clause === undefined ? "" : `WHERE ${scopeCheck.clause}`;
     const grouped = this.db
       .prepare(
-        "SELECT state, holder = 'captain' AS captain, COUNT(*) AS n FROM cards GROUP BY state, captain",
+        `SELECT c.state, c.holder = 'captain' AS captain, COUNT(*) AS n
+         FROM cards c ${scopeWhere} GROUP BY c.state, captain`,
       )
-      .all();
+      .all(...scopeCheck.params);
     for (const raw of grouped) {
       const state = CardStateSchema.parse(Reflect.get(raw, "state"));
       const n = z.number().int().parse(Reflect.get(raw, "n"));
@@ -1393,18 +1646,29 @@ export class CardStore {
       if (state !== "done" && state !== "canceled") counts.open += n;
       if (state === "held" && Reflect.get(raw, "captain") === 1) counts.needsCaptain += n;
     }
+    const doneWhere =
+      scopeCheck.clause === undefined
+        ? "WHERE c.state = 'done'"
+        : `WHERE c.state = 'done' AND ${scopeCheck.clause}`;
     return {
       counts,
       hosts: this.listHosts(),
-      cards: this.listCards({ state: "open" }).cards,
+      cards: this.listCards({
+        state: "open",
+        ...(scope !== undefined ? { scope } : {}),
+      }).cards,
       recentDone: this.db
         .prepare(
-          `${CARD_SELECT} WHERE c.state = 'done'
-           ORDER BY COALESCE(
-             (SELECT MAX(e.id) FROM events e WHERE e.card_id = c.id AND e.type = 'card.done'), 0
-           ) DESC, c.id DESC LIMIT ?`,
+          `SELECT c.*, (SELECT COUNT(*) FROM entries e WHERE e.card_id = c.id) AS entry_count
+           FROM cards c
+           LEFT JOIN (
+             SELECT card_id, MAX(id) AS done_event_id
+             FROM events WHERE type = 'card.done' GROUP BY card_id
+           ) de ON de.card_id = c.id
+           ${doneWhere}
+           ORDER BY COALESCE(de.done_event_id, 0) DESC, c.id DESC LIMIT ?`,
         )
-        .all(RECENT_DONE_LIMIT)
+        .all(...scopeCheck.params, RECENT_DONE_LIMIT)
         .map((raw) => rowToCard(CardRowSchema.parse(raw))),
     };
   }

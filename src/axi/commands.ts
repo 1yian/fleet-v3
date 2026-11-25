@@ -69,27 +69,35 @@ Flags:
 Examples:
   fleet view 42
   fleet view 42 --full`,
-  dispatch: `fleet dispatch - create a card on the Card Server
+  dispatch: `fleet dispatch - delegate a card to a child mate or spawn a worker for yourself
 Usage:
-  fleet dispatch --mate <name> --title "<text>" [--body "<spec>"] [--project <repo>] [--host <host>] [--delivery <mode>] [--needs <ids>]
+  fleet dispatch [--mate <name>] --title "<text>" [--body "<spec>"] [--project <repo>] [--host <host>] [--delivery <mode>] [--needs <ids>]
 Flags:
-  --mate <name>      Required home mate owning the card (e.g. cleo, jarvis)
+  --mate <name>      Target mate (defaults to $FLEET_MATE; omit --project/--host when delegating to a child mate)
   --title <text>     Required card title or intent
   --body <spec>      Optional additional spec text
-  --project <repo>   Repository name for fleet-runner
-  --host <host>      Execution host name (e.g. maverick, p620)
+  --project <repo>   Repository name for fleet-runner (requires --host; mates spawn workers only for themselves)
+  --host <host>      Execution host name (e.g. maverick, p620; requires --project)
   --delivery <mode>  ${DELIVERIES.join(" | ")}
   --needs <ids>      Comma-separated prerequisite card IDs
 Examples:
-  fleet dispatch --mate cleo --project Cleo --host p620 --title "Fix webhook timeout"
-  fleet dispatch --mate cleo --title "Audit recent conversion drop"`,
-  queue: `fleet queue - put a held card in the runner queue for a worker
+  fleet dispatch --mate cleo --title "Investigate recent conversion drop"
+  fleet dispatch --project Cleo --host p620 --title "Fix webhook timeout"`,
+  queue: `fleet queue - put a held card in the runner queue for a worker (resets retry attempts on held cards)
 Usage:
   fleet queue <id> [--project <repo>] [--host <host>] [--delivery <mode>]
 Flags:
   --project <repo>   Repository name for fleet-runner
   --host <host>      Execution host name
   --delivery <mode>  ${DELIVERIES.join(" | ")}`,
+  snooze: `fleet snooze - defer stale-card chases on a held card while waiting on an external event
+Usage:
+  fleet snooze <id> --for <duration> [--reason "<why>"]
+Flags:
+  --for <duration>   Duration such as 30s, 15m, 2h, or 1d
+  --reason <text>    Optional reason (e.g. waiting on external PR review)
+Examples:
+  fleet snooze 42 --for 2h --reason "Waiting for Stripe support reply"`,
   reply: `fleet reply - post an entry on a card thread
 Usage:
   fleet reply <id> --text "<message>" [--internal]
@@ -186,13 +194,18 @@ function formatCardRow(card: Card, extraFields: readonly OptionalField[]): Recor
   return row;
 }
 
+function scopeOf(active: FleetAxiContext): string | undefined {
+  if (active.fence.epoch !== undefined) return undefined;
+  return active.actor === "captain" ? undefined : active.actor;
+}
+
 export async function homeCommand(
   args: string[],
   ctx: FleetAxiContext | undefined,
 ): Promise<Record<string, unknown>> {
   const active = requireBoard(ctx);
   parseStrictFlags("fleet", args, {}, "Run `fleet --help` for commands.");
-  const overview = await active.board().getOverview();
+  const overview = await active.board().getOverview(scopeOf(active));
 
   const summaryParts: string[] = [];
   if (overview.counts.needsCaptain > 0) {
@@ -293,9 +306,11 @@ export async function cardsCommand(
 
   const mate = stringFlag(parsed.values, "mate");
   const holder = stringFlag(parsed.values, "holder");
+  const scope = scopeOf(active);
   const page = await active.board().listCards({
     ...(mate !== undefined ? { mate } : {}),
     ...(holder !== undefined ? { holder } : {}),
+    ...(scope !== undefined ? { scope } : {}),
     state,
     limit,
   });
@@ -342,7 +357,7 @@ export async function viewCommand(
     throw new AxiError("card <id> is required for `view`", "VALIDATION_ERROR", [helpBlock]);
   }
   const full = boolFlag(parsed.values, "full");
-  const { card, entries } = await active.board().getThread(id);
+  const { card, entries } = await active.board().getThread(id, scopeOf(active));
 
   let truncated = false;
   const body =
@@ -384,6 +399,9 @@ export async function viewCommand(
       ...(card.delivery !== null ? { delivery: card.delivery } : {}),
       ...(card.needs.length > 0 ? { needs: card.needs } : {}),
       epoch: card.epoch,
+      ...(card.snoozeUntil !== null
+        ? { snoozeUntil: new Date(card.snoozeUntil).toISOString() }
+        : {}),
       ...(card.result.length > 0 ? { result: card.result } : {}),
     },
     entries: formattedEntries.length > 0 ? formattedEntries : "0 entries",
@@ -413,7 +431,7 @@ export async function dispatchCommand(
     "dispatch",
     args,
     {
-      mate: { type: "string", required: true },
+      mate: { type: "string" },
       title: { type: "string", required: true },
       body: { type: "string" },
       project: { type: "string" },
@@ -424,7 +442,14 @@ export async function dispatchCommand(
     helpBlock,
   );
 
-  const mate = stringFlag(parsed.values, "mate") ?? "";
+  const explicitMate = stringFlag(parsed.values, "mate");
+  const inferredMate = scopeOf(active);
+  const mate = explicitMate ?? inferredMate ?? "";
+  if (mate.length === 0) {
+    throw new AxiError("--mate is required when dispatching as captain", "VALIDATION_ERROR", [
+      helpBlock,
+    ]);
+  }
   const title = stringFlag(parsed.values, "title") ?? "";
   const body = stringFlag(parsed.values, "body");
   const project = stringFlag(parsed.values, "project");
@@ -615,6 +640,64 @@ export async function answerCommand(
     actor: active.actor,
   });
   return { card: { id: card.id, state: card.state, holder: card.holder } };
+}
+
+const DURATION_UNITS: Readonly<Record<string, number>> = {
+  s: 1000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+};
+
+function parseDurationMs(raw: string, helpBlock: string): number {
+  const match = /^([1-9]\d*)(s|m|h|d)$/u.exec(raw.trim());
+  if (match?.[1] === undefined || match[2] === undefined) {
+    throw new AxiError(
+      `invalid --for duration "${raw}" (use e.g. 30s, 15m, 2h, 1d)`,
+      "VALIDATION_ERROR",
+      [helpBlock],
+    );
+  }
+  const unitMs = DURATION_UNITS[match[2]] ?? 0;
+  return Number(match[1]) * unitMs;
+}
+
+export async function snoozeCommand(
+  args: string[],
+  ctx: FleetAxiContext | undefined,
+): Promise<Record<string, unknown>> {
+  const active = requireBoard(ctx);
+  const helpBlock = COMMAND_HELP["snooze"] ?? "";
+  const parsed = parseStrictFlags(
+    "snooze",
+    args,
+    {
+      for: { type: "string", required: true },
+      reason: { type: "string" },
+    },
+    helpBlock,
+  );
+  const [id] = parsed.positionals;
+  if (id === undefined) {
+    throw new AxiError("card <id> is required for `snooze`", "VALIDATION_ERROR", [helpBlock]);
+  }
+  const durationMs = parseDurationMs(stringFlag(parsed.values, "for") ?? "", helpBlock);
+  const reason = stringFlag(parsed.values, "reason");
+  const until = Date.now() + durationMs;
+  const card = await active.board().snoozeCard(id, {
+    ...active.fence,
+    until,
+    ...(reason !== undefined ? { reason } : {}),
+    actor: active.actor,
+  });
+  return {
+    card: {
+      id: card.id,
+      state: card.state,
+      holder: card.holder,
+      snoozeUntil: card.snoozeUntil !== null ? new Date(card.snoozeUntil).toISOString() : null,
+    },
+  };
 }
 
 export async function closeCommand(

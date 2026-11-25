@@ -30,18 +30,20 @@ import {
   type ListCardsQuery,
   type PostEntryInput,
   type QueueCardInput,
+  type SnoozeCardInput,
 } from "./types.ts";
 
 export interface BoardClient {
-  readonly getOverview: () => Promise<BoardOverview>;
+  readonly getOverview: (scope?: string) => Promise<BoardOverview>;
   readonly listCards: (query?: ListCardsQuery) => Promise<CardPage>;
   readonly createCard: (input: CreateCardInput) => Promise<Card>;
-  readonly getThread: (id: string) => Promise<CardThread>;
+  readonly getThread: (id: string, scope?: string) => Promise<CardThread>;
   readonly postEntry: (id: string, input: PostEntryInput) => Promise<Entry>;
   readonly queueCard: (id: string, input: QueueCardInput) => Promise<Card>;
   readonly escalateCard: (id: string, input: EscalateCardInput) => Promise<Card>;
   readonly handoffCard: (id: string, input: HandoffCardInput) => Promise<Card>;
   readonly answerCard: (id: string, input: AnswerCardInput) => Promise<Card>;
+  readonly snoozeCard: (id: string, input: SnoozeCardInput) => Promise<Card>;
   readonly closeCard: (id: string, input: CloseCardInput) => Promise<Card>;
   readonly cancelCard: (id: string, input: CancelCardInput) => Promise<Card>;
   readonly claimNext: (
@@ -158,13 +160,17 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
   const cleanBase = baseUrl.replace(/\/+$/u, "");
 
   return {
-    getOverview: () => requestJson(cleanBase, "/api/overview", OverviewSchema),
+    getOverview: (scope) => {
+      const qs = scope !== undefined ? `?scope=${encodeURIComponent(scope)}` : "";
+      return requestJson(cleanBase, `/api/overview${qs}`, OverviewSchema);
+    },
     listCards: (query = {}) => {
       const params = new URLSearchParams();
       if (query.mate !== undefined) params.set("mate", query.mate);
       if (query.holder !== undefined) params.set("holder", query.holder);
       if (query.state !== undefined) params.set("state", query.state);
       if (query.limit !== undefined) params.set("limit", String(query.limit));
+      if (query.scope !== undefined) params.set("scope", query.scope);
       const qs = params.toString();
       return requestJson(cleanBase, `/api/cards${qs.length > 0 ? `?${qs}` : ""}`, CardPageSchema);
     },
@@ -175,8 +181,10 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
       });
       return res.card;
     },
-    getThread: (id) =>
-      requestJson(cleanBase, `/api/cards/${encodeURIComponent(id)}`, CardThreadSchema),
+    getThread: (id, scope) => {
+      const qs = scope !== undefined ? `?scope=${encodeURIComponent(scope)}` : "";
+      return requestJson(cleanBase, `/api/cards/${encodeURIComponent(id)}${qs}`, CardThreadSchema);
+    },
     postEntry: async (id, input) => {
       const res = await requestJson(
         cleanBase,
@@ -217,6 +225,15 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
       const res = await requestJson(
         cleanBase,
         `/api/cards/${encodeURIComponent(id)}/answer`,
+        CardWrapSchema,
+        { method: "POST", body: input },
+      );
+      return res.card;
+    },
+    snoozeCard: async (id, input) => {
+      const res = await requestJson(
+        cleanBase,
+        `/api/cards/${encodeURIComponent(id)}/snooze`,
         CardWrapSchema,
         { method: "POST", body: input },
       );

@@ -20,6 +20,7 @@ export const EVENT_TYPES = [
   "card.answered",
   "card.done",
   "card.canceled",
+  "card.snoozed",
   "entry.posted",
   "chase.due",
   "host.seen",
@@ -60,6 +61,7 @@ export const CardSchema = z.object({
   attempts: z.number().int(),
   claimBy: z.string().nullable(),
   leaseUntil: z.number().int().nullable(),
+  snoozeUntil: z.number().int().nullable(),
   createdBy: z.string(),
   createdAt: z.number().int(),
   updatedAt: z.number().int(),
@@ -166,6 +168,7 @@ export interface ListCardsQuery {
   readonly holder?: string;
   readonly state?: CardState | "open" | "all";
   readonly limit?: number;
+  readonly scope?: string;
 }
 
 export interface QueueCardInput extends OptionalFenceInput {
@@ -229,6 +232,12 @@ export interface CloseCardInput extends OptionalFenceInput {
 
 export interface CancelCardInput extends OptionalFenceInput {
   readonly reason: string;
+  readonly actor?: string;
+}
+
+export interface SnoozeCardInput extends OptionalFenceInput {
+  readonly until: number;
+  readonly reason?: string;
   readonly actor?: string;
 }
 

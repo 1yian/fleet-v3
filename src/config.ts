@@ -59,8 +59,8 @@ const ServerConfigSchema = z.object({
   host: z.string().min(1).default("127.0.0.1"),
   port: z.number().int().min(1).max(65_535).default(4100),
   dataDir: z.string().min(1).default("~/.fleet-v3/board"),
-  chaseIntervalSeconds: z.number().int().min(1).default(60),
-  staleAfterSeconds: z.number().int().min(10).default(600),
+  chaseIntervalSeconds: z.number().int().min(1).default(120),
+  staleAfterSeconds: z.number().int().min(10).default(120),
 });
 
 const SpawnConfigSchema = z.object({

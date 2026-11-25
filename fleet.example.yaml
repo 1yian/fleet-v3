@@ -13,8 +13,8 @@ server:
   host: 127.0.0.1
   port: 4100
   dataDir: ~/.fleet-v3/board
-  chaseIntervalSeconds: 60
-  staleAfterSeconds: 600
+  chaseIntervalSeconds: 120
+  staleAfterSeconds: 120
 
 spawn:
   mode: local

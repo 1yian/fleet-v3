@@ -56,7 +56,6 @@ void test("kanban proxy exposes the card server API so a held captain card is an
     const created = await postJson(`${kanban.url}/api/cards`, {
       mate: "cleo",
       title: "Kanban smoke card",
-      project: "Cleo",
     });
     assert.equal(created.status, 201);
     const card = CardResponseSchema.parse(await created.json()).card;

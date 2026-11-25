@@ -106,6 +106,13 @@ const CancelBodySchema = z.object({
   actor: z.string().min(1).optional(),
 });
 
+const SnoozeBodySchema = z.object({
+  ...FenceFields,
+  until: z.number().int().positive(),
+  reason: z.string().optional(),
+  actor: z.string().min(1).optional(),
+});
+
 const HostBodySchema = z.object({
   host: z.string().min(1),
   mode: z.string().min(1),
@@ -365,6 +372,23 @@ async function handleAnswerCard(
   });
 }
 
+async function handleSnoozeCard(
+  store: CardStore,
+  cardId: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const body = SnoozeBodySchema.parse(await readJsonBody(req));
+  sendJson(res, 200, {
+    card: store.snoozeCard(cardId, {
+      ...fenceOf(body),
+      until: body.until,
+      ...(body.reason !== undefined ? { reason: body.reason } : {}),
+      ...(body.actor !== undefined ? { actor: body.actor } : {}),
+    }),
+  });
+}
+
 async function routeCardLifecycleAction(
   store: CardStore,
   cardId: string,
@@ -390,6 +414,10 @@ async function routeCardLifecycleAction(
   }
   if (action === "answer") {
     await handleAnswerCard(store, cardId, req, res);
+    return true;
+  }
+  if (action === "snooze") {
+    await handleSnoozeCard(store, cardId, req, res);
     return true;
   }
   return false;
@@ -471,6 +499,7 @@ async function routeCardsCollection(
   if (method === "GET") {
     const mate = parseNameFilter(url.searchParams.get("mate"), MateNameSchema);
     const holder = parseNameFilter(url.searchParams.get("holder"), HolderFilterSchema);
+    const scope = parseNameFilter(url.searchParams.get("scope"), HolderNameSchema);
     const state = parseStateFilter(url.searchParams.get("state"));
     const limitRaw = url.searchParams.get("limit");
     if (limitRaw !== null && !/^[1-9]\d*$/u.test(limitRaw)) {
@@ -482,6 +511,7 @@ async function routeCardsCollection(
       store.listCards({
         ...(mate !== null ? { mate } : {}),
         ...(holder !== null ? { holder } : {}),
+        ...(scope !== null ? { scope } : {}),
         state,
         ...(limitRaw !== null ? { limit: Number(limitRaw) } : {}),
       }),
@@ -523,7 +553,8 @@ async function routeCollectionRequest(
     return true;
   }
   if (method === "GET" && path === "/api/overview") {
-    sendJson(res, 200, store.getOverview());
+    const scope = parseNameFilter(url.searchParams.get("scope"), HolderNameSchema);
+    sendJson(res, 200, store.getOverview(scope ?? undefined));
     return true;
   }
   if (method === "GET" && path === "/api/events") {
@@ -556,12 +587,14 @@ async function routeResourceRequest(
   store: CardStore,
   method: string,
   path: string,
+  url: URL,
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<boolean> {
   const cardGetMatch = /^\/api\/cards\/([^/]+)$/u.exec(path);
   if (method === "GET" && cardGetMatch?.[1] !== undefined) {
-    sendJson(res, 200, store.getThread(decodeURIComponent(cardGetMatch[1])));
+    const scope = parseNameFilter(url.searchParams.get("scope"), HolderNameSchema);
+    sendJson(res, 200, store.getThread(decodeURIComponent(cardGetMatch[1]), scope ?? undefined));
     return true;
   }
   const cardActionMatch = /^\/api\/cards\/([^/]+)\/([a-z-]+)$/u.exec(path);
@@ -610,7 +643,7 @@ async function routeApiRequest(
   const method = req.method ?? "GET";
   const path = url.pathname;
   if (await routeCollectionRequest(store, method, path, url, req, res)) return;
-  if (await routeResourceRequest(store, method, path, req, res)) return;
+  if (await routeResourceRequest(store, method, path, url, req, res)) return;
   sendJson(res, 404, { error: "not_found", message: `No route for ${method} ${path}` });
 }
 
@@ -655,6 +688,12 @@ export async function startBoardServer(options: BoardServerOptions): Promise<Sta
     })();
   });
 
+  const leaseIntervalMs = Math.min(30_000, options.chaseIntervalMs);
+  const leaseTimer = setInterval(() => {
+    options.store.expireLeases();
+  }, leaseIntervalMs);
+  leaseTimer.unref();
+
   const chaseTimer = setInterval(() => {
     options.store.sweepStale(options.staleAfterMs);
   }, options.chaseIntervalMs);
@@ -676,6 +715,7 @@ export async function startBoardServer(options: BoardServerOptions): Promise<Sta
     server,
     url,
     stop: async () => {
+      clearInterval(leaseTimer);
       clearInterval(chaseTimer);
       const closed = new Promise<void>((resolve) => {
         server.close(() => {

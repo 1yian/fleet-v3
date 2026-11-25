@@ -71,13 +71,11 @@ void test("unified Pi mate adapter scopes ambient context and wakes on escalatio
     const cleoCard = await client.createCard({
       mate: "cleo",
       title: "Check Hayward transfer rate",
-      project: "Cleo",
       actor: "captain",
     });
     const otherCard = await client.createCard({
       mate: "other",
       title: "Unrelated domain card",
-      project: "other",
       actor: "captain",
     });
 
@@ -114,17 +112,21 @@ void test("unified Pi mate adapter scopes ambient context and wakes on escalatio
     const secondCard = await client.createCard({
       mate: "cleo",
       title: "Second Hayward check",
-      project: "Cleo",
-      actor: "captain",
+      actor: "jarvis",
     });
     await client.escalateCard(secondCard.id, { reason: "Approve the plan?", actor: "cleo" });
     await client.answerCard(secondCard.id, { text: "Go ahead with the plan", actor: "jarvis" });
+    await client.closeCard(secondCard.id, {
+      result: "Shipped Hayward check inline",
+      actor: "cleo",
+    });
 
     now += 650_000;
 
     await waitFor(
       () =>
-        jarvisMock.delivered.some((text) => text.includes("Cards waiting in your court")) &&
+        jarvisMock.delivered.some((text) => text.includes("Cards needing attention")) &&
+        jarvisMock.delivered.some((text) => text.includes("Shipped Hayward check inline")) &&
         cleoMock.delivered.some((text) => text.includes("Go ahead with the plan")),
       5000,
     );
@@ -132,7 +134,11 @@ void test("unified Pi mate adapter scopes ambient context and wakes on escalatio
     await jarvisMock.emitShutdown();
 
     assert.ok(jarvisMock.delivered.some((text) => text.includes("Need Jarvis decision")));
-    assert.ok(jarvisMock.delivered.some((text) => text.includes("Cards waiting in your court")));
+    assert.ok(jarvisMock.delivered.some((text) => text.includes("Cards needing attention")));
+    assert.ok(
+      jarvisMock.delivered.some((text) => text.includes("Shipped Hayward check inline")),
+      "closing a card delegated by jarvis wakes jarvis with the result",
+    );
     assert.ok(!jarvisMock.delivered.some((text) => text.includes("Noise in another domain")));
 
     const answerIndex = cleoMock.delivered.findIndex((text) =>

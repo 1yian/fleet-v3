@@ -37,6 +37,7 @@ const ChaseItemSchema = z.object({
   title: z.string(),
   state: z.string(),
   ageMs: z.number(),
+  stalledChild: z.string().optional(),
 });
 const ChasePayloadSchema = z.object({
   holder: z.string(),
@@ -80,9 +81,11 @@ function formatChaseNotice(event: BoardEvent): string | undefined {
   if (!parsed.success || parsed.data.cards.length === 0) return undefined;
   const lines = parsed.data.cards.map((card) => {
     const mins = Math.max(1, Math.round(card.ageMs / 60_000));
-    return `- #${card.id} [${card.state}, ${String(mins)}m]: ${card.title}`;
+    const status =
+      card.stalledChild !== undefined ? `stalled with ${card.stalledChild}` : card.state;
+    return `- #${card.id} [${status}, ${String(mins)}m]: ${card.title}`;
   });
-  return `[fleet] Cards waiting in your court:\n${lines.join("\n")}\nReview each with \`fleet view <id> --full\` and close, queue, hand off, or escalate.`;
+  return `[fleet] Cards needing attention:\n${lines.join("\n")}\nReview each with \`fleet view <id> --full\` and close, queue, snooze, hand off, or escalate.`;
 }
 
 function formatHolderTransition(
@@ -134,9 +137,13 @@ function formatMateEvent(event: BoardEvent, mate: string): string | undefined {
   }
   const cardId = event.cardId ?? payloadString(event.payload, "id");
   const title = payloadString(event.payload, "title");
-  if (event.type === "card.done" && event.mate === mate) {
+  if (event.type === "card.done" && event.holder === mate) {
     const result = payloadString(event.payload, "result");
     return `[fleet] Card #${cardId} completed: ${title}${result.length > 0 ? ` (${result})` : ""}`;
+  }
+  if (event.type === "card.canceled" && event.holder === mate) {
+    const reason = payloadString(event.payload, "reason");
+    return `[fleet] Card #${cardId} canceled: ${title}${reason.length > 0 ? ` (${reason})` : ""}`;
   }
   if (event.type === "entry.posted") {
     return formatEntryNotice(event, mate, cardId, title);
@@ -148,11 +155,11 @@ async function buildAmbientBlock(client: BoardClient, mate: string): Promise<str
   const [charter, heldCards, domainCards, hosts, prefs, parents] = await Promise.all([
     client.getCharter(mate).catch(() => ""),
     client
-      .listCards({ holder: mate, state: "open" })
+      .listCards({ holder: mate, state: "open", scope: mate })
       .then((page) => page.cards)
       .catch(() => []),
     client
-      .listCards({ mate, state: "open" })
+      .listCards({ scope: mate, state: "open" })
       .then((page) => page.cards)
       .catch(() => []),
     client.listHosts().catch(() => []),
@@ -190,10 +197,12 @@ async function buildReconciliationNotice(
   mate: string,
 ): Promise<string | undefined> {
   const [held, overview] = await Promise.all([
-    client.listCards({ holder: mate, state: "open" }),
-    client.getOverview(),
+    client.listCards({ holder: mate, state: "open", scope: mate }),
+    client.getOverview(mate),
   ]);
-  const completed = overview.recentDone.filter((card) => card.mate === mate).slice(0, 5);
+  const completed = overview.recentDone
+    .filter((card) => card.mate === mate || card.createdBy === mate)
+    .slice(0, 5);
   if (held.cards.length === 0 && completed.length === 0) return undefined;
   const lines = [
     ...held.cards.map((card) => `- #${card.id} [${card.state}] in your court: ${card.title}`),

@@ -395,6 +395,10 @@ function renderBoard() {
           const cls = c.holder === "captain" ? "captain" : c.state;
           const chips = [];
           if (c.state === "waiting") chips.push('<span class="chip waiting">Waiting</span>');
+          if (c.state === "held" && c.snoozeUntil && c.snoozeUntil > Date.now()) {
+            const remMin = Math.max(1, Math.ceil((c.snoozeUntil - Date.now()) / 60000));
+            chips.push('<span class="chip waiting">snoozed ' + remMin + 'm</span>');
+          }
           if (c.holder) chips.push('<span class="chip holder">ball: ' + esc(c.holder) + '</span>');
           if (c.project) chips.push('<span class="chip">' + esc(c.project) + '</span>');
           if (c.host) chips.push('<span class="chip">' + esc(c.host) + '</span>');
@@ -581,7 +585,7 @@ $("new-form").addEventListener("submit", async e => {
 function connectEvents() {
   const es = new EventSource(API + "/events");
   es.onmessage = () => { refresh(); };
-  for (const type of ["card.created","card.queued","card.claimed","card.expired","card.returned","card.escalated","card.handed_off","card.answered","card.done","card.canceled","entry.posted","host.seen"]) {
+  for (const type of ["card.created","card.queued","card.claimed","card.expired","card.returned","card.escalated","card.handed_off","card.answered","card.snoozed","card.done","card.canceled","entry.posted","host.seen"]) {
     es.addEventListener(type, () => { refresh(); });
   }
   es.onerror = () => {
