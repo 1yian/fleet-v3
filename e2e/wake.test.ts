@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -1001,6 +1001,13 @@ void test("fleet mcp serves scoped Fleet tools over stdio and exits cleanly on E
     assert.ok(toolNames.has("fleet_view"));
     assert.ok(toolNames.has("fleet_snooze"));
     assert.ok(toolNames.has("fleet_close"));
+    const dispatchTool: unknown = listResp["result"]["tools"].find(
+      (t: unknown) => isRecord(t) && t["name"] === "fleet_dispatch",
+    );
+    assert.ok(isRecord(dispatchTool) && isRecord(dispatchTool["inputSchema"]));
+    assert.ok(isRecord(dispatchTool["inputSchema"]["properties"]));
+    assert.ok(isRecord(dispatchTool["inputSchema"]["properties"]["title"]));
+    assert.equal(dispatchTool["inputSchema"]["properties"]["title"]["minLength"], 1);
 
     rpc({
       jsonrpc: "2.0",
@@ -1077,8 +1084,20 @@ void test("fleet mcp serves scoped Fleet tools over stdio and exits cleanly on E
     assert.ok(isRecord(unknownResp["error"]));
     assert.equal(unknownResp["error"]["code"], -32_602);
 
+    rpc({
+      jsonrpc: "2.0",
+      id: 8,
+      method: "tools/call",
+      params: { name: "fleet_dispatch", arguments: { title: "MCP half-closed stdin card" } },
+    });
     child.stdin.end();
+    const halfClosedResp = await waitForId(8);
+    assert.ok(
+      isRecord(halfClosedResp["result"]) && isRecord(halfClosedResp["result"]["structuredContent"]),
+    );
     assert.equal(await waitForExit(child), 0);
+    const afterHalfClose = await server.client.listCards({ scope: "1stmate", state: "open" });
+    assert.ok(afterHalfClose.cards.some((c) => c.title === "MCP half-closed stdin card"));
   } finally {
     rl.close();
     if (child.exitCode === null && child.signalCode === null) {
@@ -1265,6 +1284,36 @@ void test("fleet mcp --http serves Streamable HTTP MCP with per-mate scoping and
       method: "ping",
     });
     assert.equal(alive.status, 200);
+
+    const mcpPort = new URL(mcpUrl).port;
+    const rawPing = (hostHeader: string, origin?: string): Promise<number> =>
+      new Promise((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: "127.0.0.1",
+            port: Number(mcpPort),
+            path: "/mcp?mate=1stmate",
+            method: "POST",
+            headers: {
+              host: hostHeader,
+              "content-type": "application/json",
+              ...(origin !== undefined ? { origin } : {}),
+            },
+          },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.on("error", reject);
+        req.end(JSON.stringify({ jsonrpc: "2.0", id: 30, method: "ping" }));
+      });
+    assert.equal(
+      await rawPing(`rebound.example:${mcpPort}`, `http://rebound.example:${mcpPort}`),
+      403,
+    );
+    assert.equal(await rawPing(`rebound.example:${mcpPort}`), 403);
+    assert.equal(await rawPing(`localhost:${mcpPort}`, `http://localhost:${mcpPort}`), 200);
 
     child.kill("SIGTERM");
     assert.equal(await waitForExit(child), 0);

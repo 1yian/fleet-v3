@@ -19,6 +19,7 @@ const PARSE_ERROR = -32_700;
 const INVALID_REQUEST = -32_600;
 const METHOD_NOT_FOUND = -32_601;
 const INVALID_PARAMS = -32_602;
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "::1", "localhost"]);
 const MAX_HTTP_BODY_BYTES = 1_048_576;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -44,170 +45,89 @@ interface McpToolSpec {
   readonly execute: (args: unknown, ctx: McpToolContext) => Promise<Record<string, unknown>>;
 }
 
-const EmptyArgsSchema = z.object({}).strict();
+function defineTool<S extends z.ZodType>(
+  name: string,
+  description: string,
+  schema: S,
+  run: (args: z.infer<S>, ctx: McpToolContext) => Promise<Record<string, unknown>>,
+): McpToolSpec {
+  const { $schema: _draft, ...inputSchema } = z.toJSONSchema(schema);
+  return {
+    name,
+    description,
+    inputSchema,
+    execute: (raw, ctx) => run(schema.parse(raw ?? {}), ctx),
+  };
+}
 
-const CardsArgsSchema = z
-  .object({
-    mate: MateNameSchema.optional(),
-    holder: HolderFilterSchema.optional(),
-    state: z.enum(["open", ...CARD_STATES]).optional(),
-    limit: z.number().int().min(1).max(200).optional(),
-  })
-  .strict();
+const CARDS_DEFAULT_LIMIT = 50;
 
-const ViewArgsSchema = z.object({ id: z.string().min(1) }).strict();
-
-const DispatchArgsSchema = z
-  .object({
-    title: z.string().min(1),
-    body: z.string().optional(),
-    mate: MateNameSchema.optional(),
-    project: z.string().min(1).optional(),
-    host: z.string().min(1).optional(),
-    delivery: z.enum(DELIVERIES).optional(),
-    needs: z.array(z.string().min(1)).optional(),
-  })
-  .strict();
-
-const QueueArgsSchema = z
-  .object({
-    id: z.string().min(1),
-    project: z.string().min(1).optional(),
-    host: z.string().min(1).optional(),
-    delivery: z.enum(DELIVERIES).optional(),
-  })
-  .strict();
-
-const ReplyArgsSchema = z
-  .object({
-    id: z.string().min(1),
-    text: z.string().min(1),
-  })
-  .strict();
-
-const EscalateArgsSchema = z
-  .object({
-    id: z.string().min(1),
-    reason: z.string().min(1),
-  })
-  .strict();
-
-const HandoffArgsSchema = z
-  .object({
-    id: z.string().min(1),
-    to: HolderNameSchema.optional(),
-    text: z.string().optional(),
-  })
-  .strict();
-
-const AnswerArgsSchema = z
-  .object({
-    id: z.string().min(1),
-    text: z.string().min(1),
-  })
-  .strict();
-
-const SnoozeArgsSchema = z
-  .object({
-    id: z.string().min(1),
-    duration: z.string().min(1),
-    reason: z.string().optional(),
-  })
-  .strict();
-
-const CloseArgsSchema = z
-  .object({
-    id: z.string().min(1),
-    text: z.string().optional(),
-  })
-  .strict();
-
-const CancelArgsSchema = z
-  .object({
-    id: z.string().min(1),
-    reason: z.string().min(1),
-  })
-  .strict();
+const nonEmptyString = z.string().min(1);
+const cardId = z.string().min(1).describe("Card ID");
 
 const FLEET_MCP_TOOLS: readonly McpToolSpec[] = [
-  {
-    name: "fleet_overview",
-    description: "Read a scoped overview of open cards, counts, and advertised runner hosts.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    execute: async (raw, ctx) => {
-      EmptyArgsSchema.parse(raw ?? {});
-      const overview = await ctx.client.getOverview(ctx.mate, ctx.signal);
-      return { overview };
-    },
-  },
-  {
-    name: "fleet_cards",
-    description:
-      "List cards in this mate's subtree with optional mate, holder, state, and limit filters.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        mate: { type: "string", description: "Filter by owning mate name" },
-        holder: { type: "string", description: "Filter by current holder" },
-        state: {
-          type: "string",
-          enum: ["open", ...CARD_STATES],
-          description: "Filter by card state or open",
-        },
-        limit: { type: "integer", minimum: 1, maximum: 200 },
-      },
-      additionalProperties: false,
-    },
-    execute: async (raw, ctx) => {
-      const args = CardsArgsSchema.parse(raw ?? {});
+  defineTool(
+    "fleet_overview",
+    "Read a scoped overview of open cards, counts, and advertised runner hosts.",
+    z.object({}).strict(),
+    async (_args, ctx) => ({ overview: await ctx.client.getOverview(ctx.mate, ctx.signal) }),
+  ),
+  defineTool(
+    "fleet_cards",
+    `List cards in this mate's subtree with optional mate, holder, state, and limit filters (default limit ${String(CARDS_DEFAULT_LIMIT)}).`,
+    z
+      .object({
+        mate: MateNameSchema.optional().describe("Filter by owning mate name"),
+        holder: HolderFilterSchema.optional().describe("Filter by current holder"),
+        state: z
+          .enum(["open", ...CARD_STATES])
+          .optional()
+          .describe("Filter by card state or open"),
+        limit: z.number().int().min(1).max(200).optional(),
+      })
+      .strict(),
+    async (args, ctx) => {
       const page = await ctx.client.listCards(
         {
           scope: ctx.mate,
+          limit: args.limit ?? CARDS_DEFAULT_LIMIT,
           ...(args.mate !== undefined ? { mate: args.mate } : {}),
           ...(args.holder !== undefined ? { holder: args.holder } : {}),
           ...(args.state !== undefined ? { state: args.state } : {}),
-          ...(args.limit !== undefined ? { limit: args.limit } : {}),
         },
         ctx.signal,
       );
       return { total: page.total, cards: page.cards };
     },
-  },
-  {
-    name: "fleet_view",
-    description: "Inspect a single card and its full entry thread.",
-    inputSchema: {
-      type: "object",
-      properties: { id: { type: "string", description: "Card ID" } },
-      required: ["id"],
-      additionalProperties: false,
-    },
-    execute: async (raw, ctx) => {
-      const args = ViewArgsSchema.parse(raw);
+  ),
+  defineTool(
+    "fleet_view",
+    "Inspect a single card and its full entry thread.",
+    z.object({ id: cardId }).strict(),
+    async (args, ctx) => {
       const thread = await ctx.client.getThread(args.id, ctx.mate);
       return { card: thread.card, entries: thread.entries };
     },
-  },
-  {
-    name: "fleet_dispatch",
-    description:
-      "Create a card for yourself or a direct child 2ndmate, or pass both project and host to spawn an isolated crewmate.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        title: { type: "string", description: "Short imperative card title" },
-        body: { type: "string", description: "Full specification and acceptance criteria" },
-        mate: { type: "string", description: "Target mate (defaults to this mate)" },
-        project: { type: "string", description: "Repo key from runner config (requires host)" },
-        host: { type: "string", description: "Advertised runner host (requires project)" },
-        delivery: { type: "string", enum: [...DELIVERIES] },
-        needs: { type: "array", items: { type: "string" } },
-      },
-      required: ["title"],
-      additionalProperties: false,
-    },
-    execute: async (raw, ctx) => {
-      const args = DispatchArgsSchema.parse(raw);
+  ),
+  defineTool(
+    "fleet_dispatch",
+    "Create a card for yourself or a direct child 2ndmate, or pass both project and host to spawn an isolated crewmate.",
+    z
+      .object({
+        title: z.string().min(1).describe("Short imperative card title"),
+        body: z.string().optional().describe("Full specification and acceptance criteria"),
+        mate: MateNameSchema.optional().describe("Target mate (defaults to this mate)"),
+        project: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Repo key from runner config (requires host)"),
+        host: z.string().min(1).optional().describe("Advertised runner host (requires project)"),
+        delivery: z.enum(DELIVERIES).optional(),
+        needs: z.array(nonEmptyString).optional(),
+      })
+      .strict(),
+    async (args, ctx) => {
       const card = await ctx.client.createCard({
         mate: args.mate ?? ctx.mate,
         title: args.title,
@@ -220,23 +140,19 @@ const FLEET_MCP_TOOLS: readonly McpToolSpec[] = [
       });
       return { card };
     },
-  },
-  {
-    name: "fleet_queue",
-    description: "Queue an existing held card to a runner host and project for a crewmate.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: { type: "string", description: "Card ID" },
-        project: { type: "string" },
-        host: { type: "string" },
-        delivery: { type: "string", enum: [...DELIVERIES] },
-      },
-      required: ["id"],
-      additionalProperties: false,
-    },
-    execute: async (raw, ctx) => {
-      const args = QueueArgsSchema.parse(raw);
+  ),
+  defineTool(
+    "fleet_queue",
+    "Queue an existing held card to a runner host and project for a crewmate.",
+    z
+      .object({
+        id: cardId,
+        project: z.string().min(1).optional(),
+        host: z.string().min(1).optional(),
+        delivery: z.enum(DELIVERIES).optional(),
+      })
+      .strict(),
+    async (args, ctx) => {
       const card = await ctx.client.queueCard(args.id, {
         actor: ctx.mate,
         ...(args.project !== undefined ? { project: args.project } : {}),
@@ -245,62 +161,51 @@ const FLEET_MCP_TOOLS: readonly McpToolSpec[] = [
       });
       return { card };
     },
-  },
-  {
-    name: "fleet_reply",
-    description: "Post a visible reply entry on a card thread.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: { type: "string", description: "Card ID" },
-        text: { type: "string", description: "Reply text" },
-      },
-      required: ["id", "text"],
-      additionalProperties: false,
-    },
-    execute: async (raw, ctx) => {
-      const args = ReplyArgsSchema.parse(raw);
-      const entry = await ctx.client.postEntry(args.id, { by: ctx.mate, text: args.text });
+  ),
+  defineTool(
+    "fleet_reply",
+    "Post a reply entry on a card thread (visible by default; set internal for a quiet note that does not wake the holder).",
+    z
+      .object({
+        id: cardId,
+        text: z.string().min(1).describe("Reply text"),
+        internal: z.boolean().optional().describe("Post a quiet internal note"),
+      })
+      .strict(),
+    async (args, ctx) => {
+      const entry = await ctx.client.postEntry(args.id, {
+        by: ctx.mate,
+        text: args.text,
+        ...(args.internal !== undefined ? { internal: args.internal } : {}),
+      });
       return { entry };
     },
-  },
-  {
-    name: "fleet_escalate",
-    description: "Escalate a held card up to this mate's parent (or captain).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: { type: "string", description: "Card ID" },
-        reason: { type: "string", description: "Why escalation is needed" },
-      },
-      required: ["id", "reason"],
-      additionalProperties: false,
-    },
-    execute: async (raw, ctx) => {
-      const args = EscalateArgsSchema.parse(raw);
+  ),
+  defineTool(
+    "fleet_escalate",
+    "Escalate a held card up to this mate's parent (or captain).",
+    z
+      .object({ id: cardId, reason: z.string().min(1).describe("Why escalation is needed") })
+      .strict(),
+    async (args, ctx) => {
       const card = await ctx.client.escalateCard(args.id, {
         actor: ctx.mate,
         reason: args.reason,
       });
       return { card };
     },
-  },
-  {
-    name: "fleet_handoff",
-    description:
-      "Pass a held card to another mate or the captain (or back to its owning mate if `to` is omitted).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: { type: "string", description: "Card ID" },
-        to: { type: "string", description: "Target mate name or captain" },
-        text: { type: "string", description: "Optional handoff summary" },
-      },
-      required: ["id"],
-      additionalProperties: false,
-    },
-    execute: async (raw, ctx) => {
-      const args = HandoffArgsSchema.parse(raw);
+  ),
+  defineTool(
+    "fleet_handoff",
+    "Pass a held card to another mate or the captain (or back to its owning mate if `to` is omitted).",
+    z
+      .object({
+        id: cardId,
+        to: HolderNameSchema.optional().describe("Target mate name or captain"),
+        text: z.string().optional().describe("Optional handoff summary"),
+      })
+      .strict(),
+    async (args, ctx) => {
       const card = await ctx.client.handoffCard(args.id, {
         actor: ctx.mate,
         ...(args.to !== undefined ? { to: args.to } : {}),
@@ -308,126 +213,88 @@ const FLEET_MCP_TOOLS: readonly McpToolSpec[] = [
       });
       return { card };
     },
-  },
-  {
-    name: "fleet_answer",
-    description: "Answer an escalated card and return it to its owning mate.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: { type: "string", description: "Card ID" },
-        text: { type: "string", description: "Decision or answer text" },
-      },
-      required: ["id", "text"],
-      additionalProperties: false,
-    },
-    execute: async (raw, ctx) => {
-      const args = AnswerArgsSchema.parse(raw);
+  ),
+  defineTool(
+    "fleet_answer",
+    "Answer an escalated card and return it to its owning mate.",
+    z.object({ id: cardId, text: z.string().min(1).describe("Decision or answer text") }).strict(),
+    async (args, ctx) => {
       const card = await ctx.client.answerCard(args.id, { actor: ctx.mate, text: args.text });
       return { card };
     },
-  },
-  {
-    name: "fleet_snooze",
-    description:
-      "Defer stale-card chases while waiting on an external event (e.g. duration '30m').",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: { type: "string", description: "Card ID" },
-        duration: { type: "string", description: "Duration such as 30s, 15m, 2h, 1d" },
-        reason: { type: "string", description: "Optional reason for waiting" },
-      },
-      required: ["id", "duration"],
-      additionalProperties: false,
-    },
-    execute: async (raw, ctx) => {
-      const args = SnoozeArgsSchema.parse(raw);
+  ),
+  defineTool(
+    "fleet_snooze",
+    "Defer stale-card chases while waiting on an external event (e.g. duration '30m').",
+    z
+      .object({
+        id: cardId,
+        duration: z.string().min(1).describe("Duration such as 30s, 15m, 2h, 1d"),
+        reason: z.string().optional().describe("Optional reason for waiting"),
+      })
+      .strict(),
+    async (args, ctx) => {
       const durationMs = parseDurationMs(args.duration);
       if (durationMs === undefined) {
         throw new Error(`Invalid duration "${args.duration}" (use e.g. 30s, 15m, 2h, 1d)`);
       }
-      const until = Date.now() + durationMs;
       const card = await ctx.client.snoozeCard(args.id, {
         actor: ctx.mate,
-        until,
+        until: Date.now() + durationMs,
         ...(args.reason !== undefined ? { reason: args.reason } : {}),
       });
       return { card };
     },
-  },
-  {
-    name: "fleet_close",
-    description: "Mark a card done and unblock any waiting dependent cards.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: { type: "string", description: "Card ID" },
-        text: { type: "string", description: "Optional final outcome note" },
-      },
-      required: ["id"],
-      additionalProperties: false,
-    },
-    execute: async (raw, ctx) => {
-      const args = CloseArgsSchema.parse(raw);
+  ),
+  defineTool(
+    "fleet_close",
+    "Mark a card done and unblock any waiting dependent cards.",
+    z
+      .object({ id: cardId, text: z.string().optional().describe("Optional final outcome note") })
+      .strict(),
+    async (args, ctx) => {
       const card = await ctx.client.closeCard(args.id, {
         actor: ctx.mate,
         ...(args.text !== undefined ? { text: args.text } : {}),
       });
       return { card };
     },
-  },
-  {
-    name: "fleet_cancel",
-    description: "Cancel an open or obsolete card with a reason.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: { type: "string", description: "Card ID" },
-        reason: { type: "string", description: "Reason for cancellation" },
-      },
-      required: ["id", "reason"],
-      additionalProperties: false,
-    },
-    execute: async (raw, ctx) => {
-      const args = CancelArgsSchema.parse(raw);
+  ),
+  defineTool(
+    "fleet_cancel",
+    "Cancel an open or obsolete card with a reason.",
+    z
+      .object({ id: cardId, reason: z.string().min(1).describe("Reason for cancellation") })
+      .strict(),
+    async (args, ctx) => {
       const card = await ctx.client.cancelCard(args.id, {
         actor: ctx.mate,
         reason: args.reason,
       });
       return { card };
     },
-  },
-  {
-    name: "fleet_hosts",
-    description: "List runner hosts currently advertised on the Card Server.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    execute: async (raw, ctx) => {
-      EmptyArgsSchema.parse(raw ?? {});
-      const hosts = await ctx.client.listHosts(ctx.signal);
-      return { hosts };
-    },
-  },
-  {
-    name: "fleet_charter",
-    description: "Read this mate's Markdown charter.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    execute: async (raw, ctx) => {
-      EmptyArgsSchema.parse(raw ?? {});
-      const text = await ctx.client.getCharter(ctx.mate, ctx.signal);
-      return { mate: ctx.mate, text };
-    },
-  },
-  {
-    name: "fleet_prefs",
-    description: "Read captain-wide preferences.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    execute: async (raw, ctx) => {
-      EmptyArgsSchema.parse(raw ?? {});
-      const text = await ctx.client.getPrefs(ctx.signal);
-      return { text };
-    },
-  },
+  ),
+  defineTool(
+    "fleet_hosts",
+    "List runner hosts currently advertised on the Card Server.",
+    z.object({}).strict(),
+    async (_args, ctx) => ({ hosts: await ctx.client.listHosts(ctx.signal) }),
+  ),
+  defineTool(
+    "fleet_charter",
+    "Read this mate's Markdown charter.",
+    z.object({}).strict(),
+    async (_args, ctx) => ({
+      mate: ctx.mate,
+      text: await ctx.client.getCharter(ctx.mate, ctx.signal),
+    }),
+  ),
+  defineTool(
+    "fleet_prefs",
+    "Read captain-wide preferences.",
+    z.object({}).strict(),
+    async (_args, ctx) => ({ text: await ctx.client.getPrefs(ctx.signal) }),
+  ),
 ];
 
 const TOOL_BY_NAME = new Map<string, McpToolSpec>(FLEET_MCP_TOOLS.map((tool) => [tool.name, tool]));
@@ -560,15 +427,9 @@ export async function runFleetMcpStdio(options: FleetMcpStdioOptions): Promise<v
   const { client, mate, controller } = options;
   const send = createLineWriter(process.stdout, controller);
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
-  const abort = (): void => {
-    controller.abort();
-    rl.close();
-  };
   controller.signal.addEventListener("abort", () => {
     rl.close();
   });
-  process.stdin.once("end", abort);
-  process.stdin.once("close", abort);
 
   try {
     for await (const line of rl) {
@@ -598,8 +459,6 @@ export async function runFleetMcpStdio(options: FleetMcpStdioOptions): Promise<v
       }
     }
   } finally {
-    process.stdin.removeListener("end", abort);
-    process.stdin.removeListener("close", abort);
     rl.close();
   }
 }
@@ -665,7 +524,12 @@ async function handleHttpRequest(
   req: IncomingMessage,
   res: ServerResponse,
   options: FleetMcpHttpOptions,
+  allowedHosts: ReadonlySet<string>,
 ): Promise<void> {
+  if (!allowedHosts.has((req.headers.host ?? "").toLowerCase())) {
+    sendJson(res, 403, { error: "forbidden_host", message: "Host is not served by this listener" });
+    return;
+  }
   if (!URL.canParse(req.url ?? "/", "http://localhost")) {
     sendJson(res, 400, { error: "bad_request", message: "Malformed request target" });
     return;
@@ -740,8 +604,9 @@ async function handleHttpRequest(
 export async function startFleetMcpHttpServer(
   options: FleetMcpHttpOptions,
 ): Promise<RunningFleetMcpHttp> {
+  const allowedHosts = new Set<string>();
   const server: Server = createServer((req, res) => {
-    handleHttpRequest(req, res, options).catch(() => {
+    handleHttpRequest(req, res, options, allowedHosts).catch(() => {
       if (res.destroyed || res.headersSent) {
         res.destroy();
         return;
@@ -761,6 +626,10 @@ export async function startFleetMcpHttpServer(
   const addr = server.address();
   const actualPort = addr !== null && typeof addr === "object" ? addr.port : options.port;
   const displayHost = options.host.includes(":") ? `[${options.host}]` : options.host;
+  const authorities = LOOPBACK_HOSTS.has(options.host)
+    ? ["localhost", "127.0.0.1", "[::1]"]
+    : [displayHost.toLowerCase()];
+  for (const authority of authorities) allowedHosts.add(`${authority}:${String(actualPort)}`);
   return {
     url: `http://${displayHost}:${String(actualPort)}/mcp`,
     stop: async () => {
