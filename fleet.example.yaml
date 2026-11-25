@@ -1,7 +1,7 @@
 host: macbook
 boardUrl: http://127.0.0.1:4100
 matesFilter: []
-workspacesRoot: ~/fleet-workspaces
+workspacesRoot: ./workspaces
 concurrency: 4
 leaseSeconds: 900
 idleTimeoutSeconds: 1800
@@ -12,7 +12,7 @@ maxReviewRounds: 4
 server:
   host: 127.0.0.1
   port: 4100
-  dataDir: ~/.fleet-v3/board
+  dataDir: ./board
   chaseIntervalSeconds: 120
   staleAfterSeconds: 120
 
@@ -47,7 +47,7 @@ spawn:
 
 mates:
   workspace: mates
-  stateDir: ~/.fleet-v3/mates
+  stateDir: ./mates
   command:
     - ypi
     - --model
@@ -62,15 +62,15 @@ mates:
     - name: jarvis
       parent: captain
       workspace: jarvis
-      cwd: ~/.fleet-v3
+      cwd: ./jarvis
       autoStart: true
     - name: example
       parent: jarvis
-      cwd: ~/fleet-workspaces/personal/example-app/main
+      cwd: ~/Projects/example-app
       autoStart: true
 
 repos:
   example-app:
-    path: ~/fleet-workspaces/personal/example-app/main
+    path: ~/Projects/example-app
     baseBranch: main
     delivery: no-mistakes

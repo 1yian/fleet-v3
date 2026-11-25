@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { DELIVERIES, HolderNameSchema, MateNameSchema } from "./board/types.ts";
@@ -45,7 +45,7 @@ const MateItemConfigSchema = z.object({
 const MatesConfigSchema = z.object({
   workspace: z.string().min(1).default("mates"),
   session: z.string().min(1).optional(),
-  stateDir: z.string().min(1).default("~/.fleet-v3/mates"),
+  stateDir: z.string().min(1).default("~/.fleet/mates"),
   promptPath: z.string().min(1).optional(),
   env: z.record(z.string().min(1), z.string()).default({}),
   command: z
@@ -58,7 +58,7 @@ const MatesConfigSchema = z.object({
 const ServerConfigSchema = z.object({
   host: z.string().min(1).default("127.0.0.1"),
   port: z.number().int().min(1).max(65_535).default(4100),
-  dataDir: z.string().min(1).default("~/.fleet-v3/board"),
+  dataDir: z.string().min(1).default("~/.fleet/board"),
   chaseIntervalSeconds: z.number().int().min(1).default(120),
   staleAfterSeconds: z.number().int().min(10).default(120),
 });
@@ -83,7 +83,7 @@ const VerifyConfigSchema = z.object({
 
 const FleetConfigObjectSchema = z.object({
   boardUrl: z.url().default("http://127.0.0.1:4100"),
-  workspacesRoot: z.string().min(1).default("~/fleet-workspaces"),
+  workspacesRoot: z.string().min(1).default("~/.fleet/workspaces"),
   server: ServerConfigSchema.optional(),
   mates: MatesConfigSchema.optional(),
 });
@@ -172,13 +172,16 @@ function expandPath(input: string, baseDir: string = process.cwd()): string {
   return isAbsolute(expanded) ? expanded : resolve(baseDir, expanded);
 }
 
-export function expandMountSpec(mount: string): string {
+export function expandMountSpec(mount: string, baseDir?: string): string {
   const firstColon = mount.indexOf(":");
   if (firstColon <= 0) return mount;
   const source = mount.slice(0, firstColon);
   const rest = mount.slice(firstColon);
   if (source === "~") return `${homedir()}${rest}`;
   if (source.startsWith("~/")) return `${resolve(homedir(), source.slice(2))}${rest}`;
+  if (baseDir !== undefined && (source.startsWith("./") || source.startsWith("../"))) {
+    return `${resolve(baseDir, source)}${rest}`;
+  }
   return mount;
 }
 
@@ -202,74 +205,98 @@ export function extractMateParents(config: FleetConfig | undefined): Record<stri
   return parents;
 }
 
-function normalizeContainerConfig(cfg: ContainerConfig | undefined): ContainerConfig | undefined {
+function normalizeContainerConfig(
+  cfg: ContainerConfig | undefined,
+  baseDir: string,
+): ContainerConfig | undefined {
   if (cfg === undefined) return undefined;
   return {
     ...cfg,
-    mounts: cfg.mounts.map(expandMountSpec),
+    mounts: cfg.mounts.map((mount) => expandMountSpec(mount, baseDir)),
   };
 }
 
-function normalizeMatesConfig(cfg: MatesConfig | undefined): MatesConfig | undefined {
+function normalizeMatesConfig(
+  cfg: MatesConfig | undefined,
+  baseDir: string,
+): MatesConfig | undefined {
   if (cfg === undefined) return undefined;
-  const stateDir = expandPath(cfg.stateDir);
+  const stateDir = expandPath(cfg.stateDir, baseDir);
   return {
     ...cfg,
     stateDir,
-    ...(cfg.promptPath !== undefined ? { promptPath: expandPath(cfg.promptPath) } : {}),
+    ...(cfg.promptPath !== undefined ? { promptPath: expandPath(cfg.promptPath, baseDir) } : {}),
     items: cfg.items.map((item) => ({
       ...item,
-      ...(item.cwd !== undefined ? { cwd: expandPath(item.cwd) } : {}),
-      ...(item.promptPath !== undefined ? { promptPath: expandPath(item.promptPath) } : {}),
+      ...(item.cwd !== undefined ? { cwd: expandPath(item.cwd, baseDir) } : {}),
+      ...(item.promptPath !== undefined
+        ? { promptPath: expandPath(item.promptPath, baseDir) }
+        : {}),
     })),
   };
 }
 
-function normalizeServerConfig(cfg: ServerConfig | undefined): ServerConfig | undefined {
+function normalizeServerConfig(
+  cfg: ServerConfig | undefined,
+  baseDir: string,
+): ServerConfig | undefined {
   if (cfg === undefined) return undefined;
   return {
     ...cfg,
-    dataDir: expandPath(cfg.dataDir),
+    dataDir: expandPath(cfg.dataDir, baseDir),
   };
 }
 
-function readConfigFile(configPath: string | undefined): unknown {
+function readConfigFile(configPath: string | undefined): {
+  readonly data: unknown;
+  readonly baseDir: string;
+} {
   const resolved = expandPath(configPath ?? process.env["FLEET_CONFIG"] ?? "fleet.yaml");
   if (!existsSync(resolved)) {
     throw new Error(
       `Config file not found at ${resolved}. Copy fleet.example.yaml to fleet.yaml or pass --config <path>.`,
     );
   }
-  return parseYaml(readFileSync(resolved, "utf8"));
+  return {
+    data: parseYaml(readFileSync(resolved, "utf8")),
+    baseDir: dirname(resolved),
+  };
 }
 
-function normalizeFleetConfig(parsed: FleetConfig): FleetConfig {
-  const mates = normalizeMatesConfig(parsed.mates);
-  const server = normalizeServerConfig(parsed.server);
+function normalizeFleetConfig(parsed: FleetConfig, baseDir: string): FleetConfig {
+  const mates = normalizeMatesConfig(parsed.mates, baseDir);
+  const server = normalizeServerConfig(parsed.server, baseDir);
   return {
     boardUrl: process.env["BOARD_URL"] ?? parsed.boardUrl,
-    workspacesRoot: expandPath(parsed.workspacesRoot),
+    workspacesRoot: expandPath(parsed.workspacesRoot, baseDir),
     ...(server !== undefined ? { server } : {}),
     ...(mates !== undefined ? { mates } : {}),
   };
 }
 
 export function loadFleetConfig(configPath?: string): FleetConfig {
-  return normalizeFleetConfig(FleetConfigSchema.parse(readConfigFile(configPath)));
+  const { data, baseDir } = readConfigFile(configPath);
+  return normalizeFleetConfig(FleetConfigSchema.parse(data), baseDir);
 }
 
 export function loadConfig(configPath?: string): RunnerConfig {
-  const parsed = RunnerConfigSchema.parse(readConfigFile(configPath));
+  const { data, baseDir } = readConfigFile(configPath);
+  const parsed = RunnerConfigSchema.parse(data);
   const repos: Record<string, RepoConfig> = {};
   for (const [name, repo] of Object.entries(parsed.repos)) {
-    repos[name] = { ...repo, path: expandPath(repo.path) };
+    repos[name] = { ...repo, path: expandPath(repo.path, baseDir) };
   }
-  const container = normalizeContainerConfig(parsed.spawn.container ?? parsed.spawn.docker);
+  const container = normalizeContainerConfig(
+    parsed.spawn.container ?? parsed.spawn.docker,
+    baseDir,
+  );
   return {
     ...parsed,
-    ...normalizeFleetConfig(parsed),
+    ...normalizeFleetConfig(parsed, baseDir),
     workerPromptPath:
-      parsed.workerPromptPath === undefined ? undefined : expandPath(parsed.workerPromptPath),
+      parsed.workerPromptPath === undefined
+        ? undefined
+        : expandPath(parsed.workerPromptPath, baseDir),
     spawn: {
       ...parsed.spawn,
       ...(container !== undefined ? { container } : {}),

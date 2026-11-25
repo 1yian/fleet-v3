@@ -39,7 +39,7 @@ Verify `node -v` is >= 24 and `~/.local/bin` is on `PATH`.
 
 ## 2. Set up the Control Host (Card Server + Kanban)
 
-Create `~/.fleet-v3/fleet.yaml` (start from `fleet.example.yaml` via `fleet init --config ~/.fleet-v3/fleet.yaml`, which creates the parent directory).
+Create `~/.fleet/fleet.yaml` (start from `fleet.example.yaml` via `fleet init --config ~/.fleet/fleet.yaml`, which creates the parent directory). Relative paths in `fleet.yaml` resolve against the directory containing `fleet.yaml`.
 `fleet serve` only needs `server` and `mates` (it does not require runner `host`/`spawn`/`repos`):
 
 ```yaml
@@ -48,7 +48,7 @@ boardUrl: http://127.0.0.1:4100
 server:
   host: 127.0.0.1
   port: 4100
-  dataDir: ~/.fleet-v3/board
+  dataDir: ./board
   chaseIntervalSeconds: 120
   staleAfterSeconds: 120
 
@@ -56,7 +56,7 @@ mates:
   items:
     - name: jarvis
       parent: captain
-      cwd: ~/.fleet-v3
+      cwd: ./jarvis
       autoStart: true
     - name: cleo
       parent: jarvis
@@ -71,7 +71,7 @@ mates:
 Start the Card Server and Kanban UI (in foreground for testing, or via `launchd` on macOS / `systemd` on Linux):
 
 ```bash
-fleet serve --config ~/.fleet-v3/fleet.yaml
+fleet serve --config ~/.fleet/fleet.yaml
 fleet web --host 127.0.0.1 --port 4101
 ```
 
@@ -96,12 +96,12 @@ fleet charter cleo --set "You own Cleo. Handle fast ops/fixes inline; use fleet 
 
 ## 3. Set up a Local Execution Runner
 
-Add `host`, `spawn`, `repos`, and limits to `~/.fleet-v3/fleet.yaml` (one file can serve `serve`, `mates`, and `run`, or keep them separate):
+Add `host`, `spawn`, `repos`, and limits to `~/.fleet/fleet.yaml` (one file can serve `serve`, `mates`, and `run`, or keep them separate):
 
 ```yaml
 host: macbook
 boardUrl: http://127.0.0.1:4100
-workspacesRoot: ~/fleet-workspaces
+workspacesRoot: ./workspaces
 concurrency: 4
 leaseSeconds: 900
 idleTimeoutSeconds: 1800
@@ -134,7 +134,7 @@ repos:
 Start the runner and verify it advertises its host and repos:
 
 ```bash
-fleet run --config ~/.fleet-v3/fleet.yaml
+fleet run --config ~/.fleet/fleet.yaml
 fleet hosts
 ```
 
@@ -159,9 +159,9 @@ _(Or expose the Card Server directly over your private Tailscale IP and point `b
 ### Step B: Configure and start `fleet run` on the remote host
 
 1. Install `fleet` on the remote host (Section 1) and verify `curl -sf http://127.0.0.1:4100/api/health`.
-2. Create `~/.fleet-v3/fleet.yaml` on the remote host with its unique `host:` name (e.g. `p620` or `cnp-devvm`), `boardUrl: http://127.0.0.1:4100`, `spawn.viewport: headless` (or `herdr` if Herdr runs there), and its local `repos:` paths.
+2. Create `~/.fleet/fleet.yaml` on the remote host with its unique `host:` name (e.g. `p620` or `cnp-devvm`), `boardUrl: http://127.0.0.1:4100`, `spawn.viewport: headless` (or `herdr` if Herdr runs there), and its local `repos:` paths.
    - Optional: set `matesFilter: [cnp]` if this host should only execute cards for specific mates.
-3. Run `fleet run --config ~/.fleet-v3/fleet.yaml` (under `systemd --user` on Linux or `launchd` on macOS).
+3. Run `fleet run --config ~/.fleet/fleet.yaml` (under `systemd --user` on Linux or `launchd` on macOS).
 4. Back on any machine, verify `fleet hosts` now lists the remote host and its repos.
 
 ---
@@ -172,12 +172,12 @@ Every mate in the hierarchy uses the exact same contract. You can mix harnesses 
 
 ### Option A: Interactive Herdr panes via `fleet mates up` (recommended for Pi / ypi)
 
-Configure `mates:` in `~/.fleet-v3/fleet.yaml`:
+Configure `mates:` in `~/.fleet/fleet.yaml`:
 
 ```yaml
 mates:
   workspace: mates
-  stateDir: ~/.fleet-v3/mates
+  stateDir: ./mates
   command:
     - ypi
     - --model
@@ -192,7 +192,7 @@ mates:
     - name: jarvis
       parent: captain
       workspace: jarvis
-      cwd: ~/.fleet-v3
+      cwd: ./jarvis
       autoStart: true
     - name: cleo
       parent: jarvis
@@ -209,14 +209,14 @@ mates:
 Start or check mates idempotently:
 
 ```bash
-fleet mates up --config ~/.fleet-v3/fleet.yaml
-fleet mates status --config ~/.fleet-v3/fleet.yaml
+fleet mates up --config ~/.fleet/fleet.yaml
+fleet mates status --config ~/.fleet/fleet.yaml
 ```
 
 Start an on-demand mate (`autoStart: false`) by name:
 
 ```bash
-fleet mates up personal --config ~/.fleet-v3/fleet.yaml
+fleet mates up personal --config ~/.fleet/fleet.yaml
 ```
 
 ### Option B: Any BYO harness (Grok Bot, Claude Code, Codex, Dots, OpenClaw)
@@ -265,9 +265,9 @@ FLEET_MATE=cleo fleet dispatch --project Cleo --host macbook --delivery local --
 ## 7. Keep Services Running Across Reboots
 
 - **macOS (`launchd`)**: create user agents under `~/Library/LaunchAgents/` for:
-  - `fleet serve --config ~/.fleet-v3/fleet.yaml`
+  - `fleet serve --config ~/.fleet/fleet.yaml`
   - `fleet web --host 127.0.0.1 --port 4101`
-  - `fleet run --config ~/.fleet-v3/fleet.yaml`
+  - `fleet run --config ~/.fleet/fleet.yaml`
   - any SSH `-R` tunnels to remote execution hosts
 - **Linux (`systemd --user`)**: create user services under `~/.config/systemd/user/` with `Restart=always` and enable lingering (`loginctl enable-linger "$USER"`).
-- **Mates**: run `fleet mates up --config ~/.fleet-v3/fleet.yaml` on startup or anytime; it is idempotent and skips already-running panes.
+- **Mates**: run `fleet mates up --config ~/.fleet/fleet.yaml` on startup or anytime; it is idempotent and skips already-running panes.

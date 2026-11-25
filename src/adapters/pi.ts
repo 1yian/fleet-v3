@@ -52,8 +52,8 @@ function resolveBoardClient(overrides: FleetPiAdapterOptions = {}): {
   const candidates = [
     process.env["FLEET_CONFIG"],
     resolvePath(process.cwd(), "fleet.yaml"),
+    resolvePath(homedir(), ".fleet", "fleet.yaml"),
     resolvePath(homedir(), ".config", "fleet", "fleet.yaml"),
-    resolvePath(homedir(), ".fleet-v3", "fleet.yaml"),
   ];
   const cfgPath = candidates.find((p): p is string => p !== undefined && existsSync(p));
   if (boardUrl === undefined && cfgPath !== undefined) {

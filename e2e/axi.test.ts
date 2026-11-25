@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runFleetCli } from "../src/cli.ts";
+import { loadConfig } from "../src/config.ts";
 import { VERSION } from "../src/version.ts";
 import { startTestServer } from "./support.ts";
 
@@ -454,5 +455,52 @@ void test("mate CLI defaults dispatch --mate to self, scopes reads to subtree, a
     assert.match(viewed.out, /snoozeUntil:/u);
   } finally {
     await server.stop();
+  }
+});
+
+void test("fleet.yaml resolves relative paths against its own directory regardless of cwd", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "fleet-relcfg-"));
+  const otherCwd = mkdtempSync(join(tmpdir(), "fleet-othercwd-"));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(otherCwd, { recursive: true, force: true });
+  });
+
+  const cfgPath = join(root, "fleet.yaml");
+  writeFileSync(
+    cfgPath,
+    [
+      "host: maverick",
+      "boardUrl: http://127.0.0.1:4100",
+      "workspacesRoot: ./workspaces",
+      "server:",
+      "  dataDir: ./board",
+      "spawn:",
+      "  command: ['echo', 'ok']",
+      "mates:",
+      "  stateDir: ./mates",
+      "  items:",
+      "    - name: jarvis",
+      "      parent: captain",
+      "      cwd: ./jarvis",
+      "      autoStart: false",
+      "repos:",
+      "  demo:",
+      "    path: ./repos/demo",
+      "",
+    ].join("\n"),
+  );
+
+  const prevCwd = process.cwd();
+  process.chdir(otherCwd);
+  try {
+    const loaded = loadConfig(cfgPath);
+    assert.equal(loaded.workspacesRoot, join(root, "workspaces"));
+    assert.equal(loaded.server?.dataDir, join(root, "board"));
+    assert.equal(loaded.mates?.stateDir, join(root, "mates"));
+    assert.equal(loaded.mates?.items[0]?.cwd, join(root, "jarvis"));
+    assert.equal(loaded.repos["demo"]?.path, join(root, "repos", "demo"));
+  } finally {
+    process.chdir(prevCwd);
   }
 });

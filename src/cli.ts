@@ -73,8 +73,8 @@ function findDefaultConfig(): string | undefined {
   const candidates = [
     process.env["FLEET_CONFIG"],
     resolvePath(process.cwd(), "fleet.yaml"),
+    resolvePath(homedir(), ".fleet", "fleet.yaml"),
     resolvePath(homedir(), ".config", "fleet", "fleet.yaml"),
-    resolvePath(homedir(), ".fleet-v3", "fleet.yaml"),
   ];
   return candidates.find((path): path is string => path !== undefined && existsSync(path));
 }
@@ -147,7 +147,7 @@ function resolveServeOptions(
     configPath === undefined ? undefined : loadFleetConfig(configPath);
   const serverCfg = cfg?.server;
   const dataDir =
-    stringFlag(values, "dir") ?? serverCfg?.dataDir ?? resolvePath(homedir(), ".fleet-v3", "board");
+    stringFlag(values, "dir") ?? serverCfg?.dataDir ?? resolvePath(homedir(), ".fleet", "board");
   const host = stringFlag(values, "host") ?? serverCfg?.host ?? "127.0.0.1";
   const port = parsePort(stringFlag(values, "port") ?? String(serverCfg?.port ?? 4100), helpBlock);
   return {
