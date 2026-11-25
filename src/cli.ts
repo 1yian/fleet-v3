@@ -38,7 +38,7 @@ import {
   createLineWriter,
 } from "./board/wake.ts";
 import { extractMateParents, loadFleetConfig, type FleetConfig } from "./config.ts";
-import { ensureMatesUp, listMates, stopMates } from "./mates.ts";
+import { diagnoseMate, ensureMatesUp, listMates, runMateChat, stopMates } from "./mates.ts";
 import { VERSION } from "./version.ts";
 
 const DESCRIPTION = "Coordinate parallel multi-machine mates and workers on a minimal Card Server";
@@ -47,6 +47,8 @@ const TOP_LEVEL_HELP = `fleet - ${DESCRIPTION}
 
 Usage:
   fleet                        Live overview of open cards, counts, and advertised hosts
+  fleet chat [mate] [-- ...]   Launch 1stmate (or any mate) interactively in this terminal
+  fleet doctor [mate] [flags]  Verify config, Card Server, charter, and harness wiring
   fleet serve [flags]          Run the minimal 3-table SQLite Card Server
   fleet cards [flags]          List cards across mates and holders
   fleet view <id> [--full]     Inspect a card and its thread
@@ -305,6 +307,39 @@ Usage:
 Flags:
   --mate <name>            Mate name to watch (defaults to FLEET_MATE)`;
 
+const CHAT_HELP = `fleet chat - launch 1stmate (or any configured mate) interactively in this terminal
+Usage:
+  fleet chat [mate] [--config <path>] [-- <extra-harness-args...>]
+Flags:
+  --config <path>          Path to fleet.yaml (default: FLEET_CONFIG, ./fleet.yaml, ~/.fleet/fleet.yaml)
+Notes:
+  Defaults to the top-level mate (parent: captain).
+  Injects FLEET_MATE, BOARD_URL, cwd, and harness hooks at launch with zero global or repo hooks.
+  For external/webhook mates (mode: external), prints status and \`fleet watch\` guidance instead of spawning a TUI.`;
+
+const DOCTOR_HELP = `fleet doctor - verify fleet.yaml, Card Server health, mate charter, and harness launch wiring
+Usage:
+  fleet doctor [mate] [--mate <name>] [--config <path>]
+Flags:
+  --mate <name>            Mate to inspect (defaults to the top-level parent: captain mate)
+  --config <path>          Path to fleet.yaml`;
+
+function splitPassthroughArgs(args: readonly string[]): {
+  readonly head: readonly string[];
+  readonly extraArgs: readonly string[];
+} {
+  const separator = args.indexOf("--");
+  if (separator === -1) return { head: args, extraArgs: [] };
+  return {
+    head: args.slice(0, separator),
+    extraArgs: args.slice(separator + 1),
+  };
+}
+
+function hasHelpFlag(args: readonly string[]): boolean {
+  return args.includes("--help") || args.includes("-h");
+}
+
 function resolveRequiredMate(flagMate: string | undefined, help: string): string {
   const raw = flagMate ?? process.env["FLEET_MATE"];
   if (raw === undefined || raw.trim().length === 0) {
@@ -444,18 +479,98 @@ async function channelCommand(
   return "";
 }
 
+async function chatCommand(args: readonly string[], options: RunFleetCliOptions): Promise<string> {
+  const { head, extraArgs } = splitPassthroughArgs(args);
+  const parsed = parseStrictFlags("fleet chat", head, { config: { type: "string" } }, CHAT_HELP);
+  if (boolFlag(parsed.values, "help")) return CHAT_HELP;
+  if (parsed.positionals.length > 1) {
+    throw new AxiError(
+      `unexpected positional argument "${parsed.positionals[1] ?? ""}" for \`fleet chat\``,
+      "VALIDATION_ERROR",
+      [CHAT_HELP],
+    );
+  }
+  const mate = parsed.positionals[0];
+  let config: FleetConfig;
+  try {
+    config = loadFleetConfig(stringFlag(parsed.values, "config") ?? findDefaultConfig());
+  } catch (error) {
+    throw new AxiError(error instanceof Error ? error.message : String(error), "VALIDATION_ERROR", [
+      CHAT_HELP,
+    ]);
+  }
+  const effectiveConfig =
+    options.boardUrl === undefined ? config : { ...config, boardUrl: options.boardUrl };
+  const result = await runMateChat({
+    config: effectiveConfig,
+    ...(mate !== undefined ? { mate } : {}),
+    extraArgs,
+    ...(options.stdout !== undefined ? { stdout: options.stdout } : {}),
+  });
+  if (result.exitCode !== 0) {
+    process.exitCode = result.exitCode;
+  }
+  return "";
+}
+
+async function doctorCommand(
+  args: readonly string[],
+  options: RunFleetCliOptions,
+): Promise<Record<string, unknown>> {
+  const parsed = parseStrictFlags(
+    "fleet doctor",
+    args,
+    {
+      mate: { type: "string" },
+      config: { type: "string" },
+    },
+    DOCTOR_HELP,
+  );
+  if (boolFlag(parsed.values, "help")) return { help: DOCTOR_HELP };
+  if (parsed.positionals.length > 1) {
+    throw new AxiError(
+      `unexpected positional argument "${parsed.positionals[1] ?? ""}" for \`fleet doctor\``,
+      "VALIDATION_ERROR",
+      [DOCTOR_HELP],
+    );
+  }
+  const flagMate = stringFlag(parsed.values, "mate");
+  const posMate = parsed.positionals[0];
+  if (flagMate !== undefined && posMate !== undefined && flagMate !== posMate) {
+    throw new AxiError(
+      `conflicting mate names "${posMate}" and --mate "${flagMate}"`,
+      "VALIDATION_ERROR",
+      [DOCTOR_HELP],
+    );
+  }
+  const mate = flagMate ?? posMate;
+  const configPath = stringFlag(parsed.values, "config") ?? findDefaultConfig();
+  const report = await diagnoseMate({
+    ...(configPath !== undefined ? { configPath } : {}),
+    ...(options.boardUrl !== undefined ? { boardUrlOverride: options.boardUrl } : {}),
+    ...(mate !== undefined ? { mate } : {}),
+  });
+  if (!report.ok) {
+    process.exitCode = 1;
+  }
+  return { doctor: report };
+}
+
 export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<void> {
-  const ctx = boardContext(options);
   const argv = options.argv ?? process.argv.slice(2);
   const first = argv[0];
   const rest = argv.slice(1);
-  if (
-    (first === "watch" || first === "channel") &&
-    !rest.includes("--help") &&
-    !rest.includes("-h")
-  ) {
+  const bypassesAxi =
+    ((first === "watch" || first === "channel") && !hasHelpFlag(rest)) ||
+    (first === "chat" && !hasHelpFlag(splitPassthroughArgs(rest).head));
+  if (bypassesAxi) {
     try {
-      await (first === "watch" ? watchCommand(rest, ctx) : channelCommand(rest, ctx));
+      if (first === "chat") {
+        await chatCommand(rest, options);
+      } else {
+        const ctx = boardContext(options);
+        await (first === "watch" ? watchCommand(rest, ctx) : channelCommand(rest, ctx));
+      }
     } catch (error) {
       if (error instanceof AxiError) {
         const lines = [`error: ${error.message}`, `code: ${error.code}`];
@@ -483,9 +598,22 @@ export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<voi
       if (cmd === "mates") return MATES_HELP;
       if (cmd === "watch") return WATCH_HELP;
       if (cmd === "channel") return CHANNEL_HELP;
+      if (cmd === "chat") return CHAT_HELP;
+      if (cmd === "doctor") return DOCTOR_HELP;
       return COMMAND_HELP[cmd];
     },
-    resolveContext: () => ctx,
+    resolveContext: ({ command }) => {
+      if (command === "doctor") {
+        const fallbackUrl = options.boardUrl ?? process.env["BOARD_URL"] ?? "http://127.0.0.1:4100";
+        return {
+          board: () => createHttpBoardClient(fallbackUrl),
+          boardUrl: fallbackUrl,
+          actor: options.actor ?? "captain",
+          fence: {},
+        };
+      }
+      return boardContext(options);
+    },
     home: homeCommand,
     commands: {
       serve: serveCommand,
@@ -507,6 +635,8 @@ export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<voi
       setup: setupCommand,
       run: runCommand,
       mates: matesCommand,
+      chat: (args) => chatCommand(args, options),
+      doctor: (args) => doctorCommand(args, options),
       watch: watchCommand,
       channel: channelCommand,
       web: webCommand,

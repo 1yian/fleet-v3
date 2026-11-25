@@ -31,16 +31,31 @@ const HerdrConfigSchema = z.object({
   keepPane: z.enum(["never", "on-failure", "always"]).default("on-failure"),
 });
 
-const MateItemConfigSchema = z.object({
-  name: MateNameSchema,
-  parent: HolderNameSchema.default("captain"),
-  cwd: z.string().min(1).optional(),
-  workspace: z.string().min(1).optional(),
-  promptPath: z.string().min(1).optional(),
-  autoStart: z.boolean().default(true),
-  env: z.record(z.string().min(1), z.string()).default({}),
-  command: z.array(z.string().min(1)).min(1).optional(),
-});
+const MateItemConfigSchema = z
+  .object({
+    name: MateNameSchema,
+    parent: HolderNameSchema.default("captain"),
+    mode: z.enum(["local", "external"]).default("local"),
+    cwd: z.string().min(1).optional(),
+    workspace: z.string().min(1).optional(),
+    promptPath: z.string().min(1).optional(),
+    autoStart: z.boolean().optional(),
+    env: z.record(z.string().min(1), z.string()).default({}),
+    command: z.array(z.string().min(1)).min(1).optional(),
+  })
+  .superRefine((item, ctx) => {
+    if (item.mode === "external" && item.autoStart === true) {
+      ctx.addIssue({
+        code: "custom",
+        message: `mate "${item.name}" has mode "external" and cannot set autoStart: true`,
+        path: ["autoStart"],
+      });
+    }
+  })
+  .transform((item) => ({
+    ...item,
+    autoStart: item.autoStart ?? item.mode !== "external",
+  }));
 
 const MatesConfigSchema = z.object({
   workspace: z.string().min(1).default("mates"),

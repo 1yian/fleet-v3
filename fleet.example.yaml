@@ -50,8 +50,6 @@ mates:
   stateDir: ./mates
   command:
     - ypi
-    - --model
-    - tier/orchestrator
     - -e
     - "{adapter}"
     - --append-system-prompt
@@ -62,7 +60,7 @@ mates:
     - name: 1stmate
       parent: captain
       workspace: 1stmate
-      cwd: ~/Projects/fleet-v3
+      cwd: ./1stmate
       autoStart: false
     - name: example
       parent: 1stmate

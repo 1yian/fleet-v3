@@ -305,6 +305,7 @@ setInterval(() => {}, 1000);`;
         {
           name: "cleo",
           parent: "jarvis",
+          mode: "local",
           cwd: join(root, "cleo-dir"),
           autoStart: true,
           env: {},
@@ -312,6 +313,7 @@ setInterval(() => {}, 1000);`;
         {
           name: "quiet",
           parent: "jarvis",
+          mode: "local",
           cwd: join(root, "quiet-dir"),
           autoStart: false,
           env: {},
