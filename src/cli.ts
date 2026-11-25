@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
-import { AxiError, runAxiCli } from "axi-sdk-js";
+import { AxiError, exitCodeForError, runAxiCli } from "axi-sdk-js";
+import { runFleetChannel } from "./adapters/channel.ts";
 import {
   answerCommand,
   cancelCommand,
@@ -28,7 +29,13 @@ import { boolFlag, parseStrictFlags, stringFlag } from "./axi/parse.ts";
 import { createHttpBoardClient } from "./board/client.ts";
 import { startBoardServer } from "./board/server.ts";
 import { CardStore } from "./board/store.ts";
-import type { OptionalFenceInput } from "./board/types.ts";
+import { MateNameSchema, type OptionalFenceInput } from "./board/types.ts";
+import {
+  parseHeaderFlag,
+  postWakeWebhook,
+  validateWebhookUrl,
+  watchMateWakes,
+} from "./board/wake.ts";
 import { extractMateParents, loadFleetConfig, type FleetConfig } from "./config.ts";
 import { ensureMatesUp, listMates, stopMates } from "./mates.ts";
 import { VERSION } from "./version.ts";
@@ -56,6 +63,8 @@ Usage:
   fleet prefs [flags]          Read or update captain-wide preferences
   fleet run [flags]            Run fleet-runner for this host
   fleet mates [subcommand]     Manage permanent interactive mate panes in Herdr
+  fleet watch [flags]          Stream filtered mate wakes as NDJSON or POST to a webhook
+  fleet channel [flags]        Run a stdio Claude Code Channel MCP server for a mate
   fleet web [flags]            Serve a standalone Kanban viewport proxying to the Card Server
   fleet init [flags]           Create fleet.yaml from fleet.example.yaml
   fleet setup hooks [flags]    Install or check session-start hooks
@@ -280,8 +289,187 @@ async function matesCommand(args: string[]): Promise<Record<string, unknown>> {
   throw new AxiError(`Unknown mates subcommand "${sub}"`, "VALIDATION_ERROR", [MATES_HELP]);
 }
 
+const WATCH_HELP = `fleet watch - stream filtered mate wake events as NDJSON or POST them to an HTTP webhook
+Usage:
+  fleet watch [--mate <name>] [--webhook <url>] [--header <Name: Value>]
+Flags:
+  --mate <name>            Mate name to watch (defaults to FLEET_MATE)
+  --webhook <url>          HTTP/HTTPS URL to receive JSON POST { mate, notice, event }
+  --header <Name: Value>   Optional HTTP header for webhook requests (e.g. Authorization)`;
+
+const CHANNEL_HELP = `fleet channel - run a stdio MCP server speaking Claude Code's native Channel protocol
+Usage:
+  fleet channel [--mate <name>]
+Flags:
+  --mate <name>            Mate name to watch (defaults to FLEET_MATE)`;
+
+function resolveRequiredMate(flagMate: string | undefined, help: string): string {
+  const raw = flagMate ?? process.env["FLEET_MATE"];
+  if (raw === undefined || raw.trim().length === 0) {
+    throw new AxiError("Specify --mate <name> or set FLEET_MATE", "VALIDATION_ERROR", [help]);
+  }
+  const parsed = MateNameSchema.safeParse(raw.trim());
+  if (!parsed.success) {
+    throw new AxiError(
+      parsed.error.issues[0]?.message ?? `Invalid mate name "${raw}"`,
+      "VALIDATION_ERROR",
+      [help],
+    );
+  }
+  return parsed.data;
+}
+
+async function watchCommand(
+  args: readonly string[],
+  ctx: FleetAxiContext | undefined,
+): Promise<string> {
+  const parsed = parseStrictFlags(
+    "fleet watch",
+    args,
+    {
+      mate: { type: "string" },
+      webhook: { type: "string" },
+      header: { type: "string" },
+    },
+    WATCH_HELP,
+  );
+  if (boolFlag(parsed.values, "help")) return WATCH_HELP;
+  if (parsed.positionals.length > 0) {
+    throw new AxiError(
+      `unexpected positional argument "${parsed.positionals[0] ?? ""}" for \`fleet watch\``,
+      "VALIDATION_ERROR",
+      [WATCH_HELP],
+    );
+  }
+  const mate = resolveRequiredMate(stringFlag(parsed.values, "mate"), WATCH_HELP);
+  const rawWebhook = stringFlag(parsed.values, "webhook");
+  const rawHeader = stringFlag(parsed.values, "header");
+  if (rawHeader !== undefined && rawWebhook === undefined) {
+    throw new AxiError("--header requires --webhook <url>", "VALIDATION_ERROR", [WATCH_HELP]);
+  }
+  let webhookUrl: string | undefined;
+  const headers: Record<string, string> = {};
+  try {
+    if (rawWebhook !== undefined) webhookUrl = validateWebhookUrl(rawWebhook);
+    if (rawHeader !== undefined) {
+      const [name, value] = parseHeaderFlag(rawHeader);
+      headers[name] = value;
+    }
+  } catch (error) {
+    throw new AxiError(error instanceof Error ? error.message : String(error), "VALIDATION_ERROR", [
+      WATCH_HELP,
+    ]);
+  }
+
+  if (ctx === undefined) {
+    throw new AxiError("Fleet context not initialized", "INTERNAL_ERROR");
+  }
+  const controller = new AbortController();
+  const stop = (): void => {
+    controller.abort();
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+
+  try {
+    const client = ctx.board();
+    const initialCursor = await client.latestEventId().catch(() => undefined);
+    await watchMateWakes({
+      client,
+      mate,
+      signal: controller.signal,
+      ...(initialCursor !== undefined ? { initialCursor } : {}),
+      async onWake(wake) {
+        if (webhookUrl !== undefined) {
+          await postWakeWebhook(webhookUrl, wake, headers, controller.signal);
+          return;
+        }
+        process.stdout.write(`${JSON.stringify(wake)}\n`);
+      },
+      onError(error) {
+        process.stderr.write(
+          `fleet watch (${mate}): ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      },
+    });
+  } finally {
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
+  }
+  return "";
+}
+
+async function channelCommand(
+  args: readonly string[],
+  ctx: FleetAxiContext | undefined,
+): Promise<string> {
+  const parsed = parseStrictFlags(
+    "fleet channel",
+    args,
+    { mate: { type: "string" } },
+    CHANNEL_HELP,
+  );
+  if (boolFlag(parsed.values, "help")) return CHANNEL_HELP;
+  if (parsed.positionals.length > 0) {
+    throw new AxiError(
+      `unexpected positional argument "${parsed.positionals[0] ?? ""}" for \`fleet channel\``,
+      "VALIDATION_ERROR",
+      [CHANNEL_HELP],
+    );
+  }
+  const mate = resolveRequiredMate(stringFlag(parsed.values, "mate"), CHANNEL_HELP);
+  if (ctx === undefined) {
+    throw new AxiError("Fleet context not initialized", "INTERNAL_ERROR");
+  }
+  const controller = new AbortController();
+  const stop = (): void => {
+    controller.abort();
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+
+  try {
+    await runFleetChannel({
+      client: ctx.board(),
+      mate,
+      signal: controller.signal,
+    });
+  } finally {
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
+  }
+  return "";
+}
+
 export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<void> {
   const ctx = boardContext(options);
+  const argv = options.argv ?? process.argv.slice(2);
+  const first = argv[0];
+  const rest = argv.slice(1);
+  if (
+    (first === "watch" || first === "channel") &&
+    !rest.includes("--help") &&
+    !rest.includes("-h")
+  ) {
+    const stdout = options.stdout ?? process.stdout;
+    try {
+      await (first === "watch" ? watchCommand(rest, ctx) : channelCommand(rest, ctx));
+    } catch (error) {
+      if (error instanceof AxiError) {
+        const lines = [`error: ${error.message}`, `code: ${error.code}`];
+        if (error.suggestions.length > 0) {
+          lines.push(...error.suggestions);
+        }
+        stdout.write(`${lines.join("\n")}\n`);
+        process.exitCode = exitCodeForError(error);
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      stdout.write(`error: ${message}\ncode: UNKNOWN\n`);
+      process.exitCode = 1;
+    }
+    return;
+  }
 
   await runAxiCli<FleetAxiContext>({
     description: DESCRIPTION,
@@ -289,7 +477,12 @@ export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<voi
     ...(options.argv !== undefined ? { argv: options.argv } : {}),
     ...(options.stdout !== undefined ? { stdout: options.stdout } : {}),
     topLevelHelp: TOP_LEVEL_HELP,
-    getCommandHelp: (cmd) => (cmd === "mates" ? MATES_HELP : COMMAND_HELP[cmd]),
+    getCommandHelp: (cmd) => {
+      if (cmd === "mates") return MATES_HELP;
+      if (cmd === "watch") return WATCH_HELP;
+      if (cmd === "channel") return CHANNEL_HELP;
+      return COMMAND_HELP[cmd];
+    },
     resolveContext: () => ctx,
     home: homeCommand,
     commands: {
@@ -312,6 +505,8 @@ export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<voi
       setup: setupCommand,
       run: runCommand,
       mates: matesCommand,
+      watch: watchCommand,
+      channel: channelCommand,
       web: webCommand,
     },
   });

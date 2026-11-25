@@ -52,8 +52,8 @@ export const COMMAND_HELP: Readonly<Record<string, string>> = {
 Usage:
   fleet cards [--mate <name>] [--holder <name>] [--state <state>] [--fields <cols>] [--limit <n>]
 Flags:
-  --mate <name>      Filter to cards owned by one mate (e.g. cleo, jarvis)
-  --holder <name>    Filter to cards currently held by one actor (e.g. captain, jarvis, cleo)
+  --mate <name>      Filter to cards owned by one mate (e.g. 1stmate, cleo)
+  --holder <name>    Filter to cards currently held by one actor (e.g. captain, 1stmate, cleo)
   --state <state>    open (default), all, waiting, queued, running, held, done, canceled
   --fields <cols>    Extra columns: ${OPTIONAL_FIELDS.join(", ")}
   --limit <n>        Max rows to show (default: ${String(LIST_DEFAULT_LIMIT)})
