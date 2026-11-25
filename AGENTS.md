@@ -1,5 +1,7 @@
 # fleet-v3
 
+If the user asks to set up or onboard Fleet on a machine, read and follow [SETUP.md](SETUP.md).
+
 Read [VISION.md](VISION.md) before designing or changing anything.
 If a request conflicts with `VISION.md`, stop and propose an aligned alternative instead of building it.
 
