@@ -4,4 +4,7 @@ fleet.yaml
 .env
 .board/
 .lavish/
+.pi/
+.mcp.json
+.claude/settings.local.json
 *.log

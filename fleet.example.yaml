@@ -59,13 +59,13 @@ mates:
   env:
     YPI_OPTCHAT_CONFIG: "{stateDir}/optchat.json"
   items:
-    - name: jarvis
+    - name: 1stmate
       parent: captain
-      workspace: jarvis
-      cwd: ./jarvis
-      autoStart: true
+      workspace: 1stmate
+      cwd: ~/Projects/fleet-v3
+      autoStart: false
     - name: example
-      parent: jarvis
+      parent: 1stmate
       cwd: ~/Projects/example-app
       autoStart: true
 

@@ -34,8 +34,8 @@ import {
 } from "./types.ts";
 
 export interface BoardClient {
-  readonly getOverview: (scope?: string) => Promise<BoardOverview>;
-  readonly listCards: (query?: ListCardsQuery) => Promise<CardPage>;
+  readonly getOverview: (scope?: string, signal?: AbortSignal) => Promise<BoardOverview>;
+  readonly listCards: (query?: ListCardsQuery, signal?: AbortSignal) => Promise<CardPage>;
   readonly createCard: (input: CreateCardInput) => Promise<Card>;
   readonly getThread: (id: string, scope?: string) => Promise<CardThread>;
   readonly postEntry: (id: string, input: PostEntryInput) => Promise<Entry>;
@@ -57,13 +57,13 @@ export interface BoardClient {
   readonly releaseClaim: (id: string, input: ClaimFenceInput) => Promise<Card>;
   readonly finishClaim: (id: string, input: FinishClaimInput) => Promise<Card>;
   readonly advertiseHost: (input: AdvertiseHostInput) => Promise<HostInfo>;
-  readonly listHosts: () => Promise<HostInfo[]>;
-  readonly getCharter: (mate: string) => Promise<string>;
+  readonly listHosts: (signal?: AbortSignal) => Promise<HostInfo[]>;
+  readonly getCharter: (mate: string, signal?: AbortSignal) => Promise<string>;
   readonly setCharter: (mate: string, text: string) => Promise<string>;
-  readonly getPrefs: () => Promise<string>;
+  readonly getPrefs: (signal?: AbortSignal) => Promise<string>;
   readonly setPrefs: (text: string) => Promise<string>;
-  readonly getParents: () => Promise<Record<string, string>>;
-  readonly latestEventId: () => Promise<number>;
+  readonly getParents: (signal?: AbortSignal) => Promise<Record<string, string>>;
+  readonly latestEventId: (signal?: AbortSignal) => Promise<number>;
   readonly events: (options?: {
     readonly after?: number;
     readonly holder?: string;
@@ -85,6 +85,10 @@ const HostWrapSchema = z.object({ host: HostInfoSchema });
 const HostsWrapSchema = z.object({ hosts: z.array(HostInfoSchema) });
 const TextWrapSchema = z.object({ text: z.string() });
 const ParentsWrapSchema = z.object({ parents: z.record(z.string(), z.string()) });
+
+function requestOptions(signal: AbortSignal | undefined): { readonly signal?: AbortSignal } {
+  return signal !== undefined ? { signal } : {};
+}
 
 async function requestJson<T>(
   baseUrl: string,
@@ -161,19 +165,25 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
   const cleanBase = baseUrl.replace(/\/+$/u, "");
 
   return {
-    getOverview: (scope) => {
+    getOverview: (scope, signal) => {
       const qs = scope !== undefined ? `?scope=${encodeURIComponent(scope)}` : "";
-      return requestJson(cleanBase, `/api/overview${qs}`, OverviewSchema);
+      return requestJson(cleanBase, `/api/overview${qs}`, OverviewSchema, requestOptions(signal));
     },
-    listCards: (query = {}) => {
+    listCards: (query, signal) => {
+      const filters = query ?? {};
       const params = new URLSearchParams();
-      if (query.mate !== undefined) params.set("mate", query.mate);
-      if (query.holder !== undefined) params.set("holder", query.holder);
-      if (query.state !== undefined) params.set("state", query.state);
-      if (query.limit !== undefined) params.set("limit", String(query.limit));
-      if (query.scope !== undefined) params.set("scope", query.scope);
+      if (filters.mate !== undefined) params.set("mate", filters.mate);
+      if (filters.holder !== undefined) params.set("holder", filters.holder);
+      if (filters.state !== undefined) params.set("state", filters.state);
+      if (filters.limit !== undefined) params.set("limit", String(filters.limit));
+      if (filters.scope !== undefined) params.set("scope", filters.scope);
       const qs = params.toString();
-      return requestJson(cleanBase, `/api/cards${qs.length > 0 ? `?${qs}` : ""}`, CardPageSchema);
+      return requestJson(
+        cleanBase,
+        `/api/cards${qs.length > 0 ? `?${qs}` : ""}`,
+        CardPageSchema,
+        requestOptions(signal),
+      );
     },
     createCard: async (input) => {
       const res = await requestJson(cleanBase, "/api/cards", CardWrapSchema, {
@@ -296,15 +306,21 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
       });
       return res.host;
     },
-    listHosts: async () => {
-      const res = await requestJson(cleanBase, "/api/hosts", HostsWrapSchema);
+    listHosts: async (signal) => {
+      const res = await requestJson(
+        cleanBase,
+        "/api/hosts",
+        HostsWrapSchema,
+        requestOptions(signal),
+      );
       return res.hosts;
     },
-    getCharter: async (mate) => {
+    getCharter: async (mate, signal) => {
       const res = await requestJson(
         cleanBase,
         `/api/charters/${encodeURIComponent(mate)}`,
         TextWrapSchema,
+        requestOptions(signal),
       );
       return res.text;
     },
@@ -317,8 +333,13 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
       );
       return res.text;
     },
-    getPrefs: async () => {
-      const res = await requestJson(cleanBase, "/api/prefs", TextWrapSchema);
+    getPrefs: async (signal) => {
+      const res = await requestJson(
+        cleanBase,
+        "/api/prefs",
+        TextWrapSchema,
+        requestOptions(signal),
+      );
       return res.text;
     },
     setPrefs: async (text) => {
@@ -328,12 +349,17 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
       });
       return res.text;
     },
-    latestEventId: async () => {
-      const res = await requestJson(cleanBase, "/api/health", HealthSchema);
+    latestEventId: async (signal) => {
+      const res = await requestJson(cleanBase, "/api/health", HealthSchema, requestOptions(signal));
       return res.latestEventId;
     },
-    getParents: async () => {
-      const res = await requestJson(cleanBase, "/api/mates", ParentsWrapSchema);
+    getParents: async (signal) => {
+      const res = await requestJson(
+        cleanBase,
+        "/api/mates",
+        ParentsWrapSchema,
+        requestOptions(signal),
+      );
       return res.parents;
     },
     events(options = {}) {

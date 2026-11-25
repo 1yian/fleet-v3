@@ -1,9 +1,9 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
-import { z } from "zod";
+import { fileURLToPath } from "node:url";
 import { createHttpBoardClient, type BoardClient } from "../board/client.ts";
-import type { BoardEvent } from "../board/types.ts";
+import { watchMateWakes } from "../board/wake.ts";
 import { loadFleetConfig } from "../config.ts";
 
 interface BeforeAgentStartEvent {
@@ -32,17 +32,22 @@ export interface FleetPiAdapterOptions {
   readonly reconnectDelayMs?: number;
 }
 
-const ChaseItemSchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  state: z.string(),
-  ageMs: z.number(),
-  stalledChild: z.string().optional(),
-});
-const ChasePayloadSchema = z.object({
-  holder: z.string(),
-  cards: z.array(ChaseItemSchema),
-});
+const DEFAULT_MATE_PROMPT_PATH = fileURLToPath(new URL("../../prompts/mate.md", import.meta.url));
+const ATTACHED_KEY = Symbol.for("fleet.piAdapterAttached");
+
+function getAttachedSet(): WeakSet<PiExtensionApi> {
+  const holder = globalThis as Record<PropertyKey, unknown>;
+  const existing = holder[ATTACHED_KEY];
+  if (existing instanceof WeakSet) return existing;
+  const created = new WeakSet<PiExtensionApi>();
+  holder[ATTACHED_KEY] = created;
+  return created;
+}
+
+function loadDefaultMatePrompt(): string {
+  if (!existsSync(DEFAULT_MATE_PROMPT_PATH)) return "";
+  return readFileSync(DEFAULT_MATE_PROMPT_PATH, "utf8").trim();
+}
 
 function resolveBoardClient(overrides: FleetPiAdapterOptions = {}): {
   readonly client: BoardClient;
@@ -71,100 +76,24 @@ function resolveBoardClient(overrides: FleetPiAdapterOptions = {}): {
   };
 }
 
-function payloadString(payload: Readonly<Record<string, unknown>>, key: string): string {
-  const val = payload[key];
-  return typeof val === "string" ? val : "";
-}
-
-function formatChaseNotice(event: BoardEvent): string | undefined {
-  const parsed = ChasePayloadSchema.safeParse(event.payload);
-  if (!parsed.success || parsed.data.cards.length === 0) return undefined;
-  const lines = parsed.data.cards.map((card) => {
-    const mins = Math.max(1, Math.round(card.ageMs / 60_000));
-    const status =
-      card.stalledChild !== undefined ? `stalled with ${card.stalledChild}` : card.state;
-    return `- #${card.id} [${status}, ${String(mins)}m]: ${card.title}`;
-  });
-  return `[fleet] Cards needing attention:\n${lines.join("\n")}\nReview each with \`fleet view <id> --full\` and close, queue, snooze, hand off, or escalate.`;
-}
-
-function formatHolderTransition(
-  event: BoardEvent,
+async function buildAmbientBlock(
+  client: BoardClient,
   mate: string,
-  cardId: string,
-  title: string,
-): string | undefined {
-  if (event.holder !== mate) return undefined;
-  if (event.type === "card.returned") {
-    const summary = payloadString(event.payload, "summary");
-    return `[fleet] Card #${cardId} returned to you: ${title}${summary.length > 0 ? `\n${summary}` : ""}\nRun \`fleet view ${cardId} --full\` to decide the next step.`;
-  }
-  if (event.type === "card.escalated") {
-    const from = payloadString(event.payload, "from");
-    const reason = payloadString(event.payload, "reason");
-    return `[fleet] Card #${cardId} escalated from ${from || "mate"} to you: ${title}\nReason: ${reason}\nRun \`fleet view ${cardId} --full\` and \`fleet charter ${event.mate ?? mate}\` before answering or escalating.`;
-  }
-  if (event.type === "card.answered") {
-    const text = payloadString(event.payload, "text");
-    return `[fleet] Card #${cardId} answered by ${event.actor ?? "parent"}: ${title}\nAnswer: ${text}\nRun \`fleet view ${cardId} --full\` to proceed.`;
-  }
-  if (event.type === "card.handed_off") {
-    const text = payloadString(event.payload, "text");
-    return `[fleet] Card #${cardId} handed to you by ${event.actor ?? "mate"}: ${title}${text.length > 0 ? `\n${text}` : ""}\nRun \`fleet view ${cardId} --full\`.`;
-  }
-  if (event.type === "card.created") {
-    return `[fleet] New card #${cardId} in your court: ${title}\nRun \`fleet view ${cardId} --full\`.`;
-  }
-  return undefined;
-}
-
-function formatEntryNotice(
-  event: BoardEvent,
-  mate: string,
-  cardId: string,
-  title: string,
-): string | undefined {
-  if (event.payload["internal"] === true) return undefined;
-  const text = payloadString(event.payload, "text");
-  if (event.holder !== mate) return undefined;
-  return `[fleet] Reply on card #${cardId} (${title}) from ${event.actor ?? "unknown"}:\n${text}`;
-}
-
-function formatMateEvent(event: BoardEvent, mate: string): string | undefined {
-  if (event.actor === mate) return undefined;
-  if (event.type === "chase.due") {
-    return event.holder === mate ? formatChaseNotice(event) : undefined;
-  }
-  const cardId = event.cardId ?? payloadString(event.payload, "id");
-  const title = payloadString(event.payload, "title");
-  if (event.type === "card.done" && event.holder === mate) {
-    const result = payloadString(event.payload, "result");
-    return `[fleet] Card #${cardId} completed: ${title}${result.length > 0 ? ` (${result})` : ""}`;
-  }
-  if (event.type === "card.canceled" && event.holder === mate) {
-    const reason = payloadString(event.payload, "reason");
-    return `[fleet] Card #${cardId} canceled: ${title}${reason.length > 0 ? ` (${reason})` : ""}`;
-  }
-  if (event.type === "entry.posted") {
-    return formatEntryNotice(event, mate, cardId, title);
-  }
-  return formatHolderTransition(event, mate, cardId, title);
-}
-
-async function buildAmbientBlock(client: BoardClient, mate: string): Promise<string> {
+  signal: AbortSignal,
+): Promise<string> {
   const [charter, heldCards, domainCards, hosts, prefs, parents] = await Promise.all([
-    client.getCharter(mate).catch(() => ""),
+    client.getCharter(mate, signal).catch(() => ""),
     client
-      .listCards({ holder: mate, state: "open", scope: mate })
+      .listCards({ holder: mate, state: "open", scope: mate }, signal)
       .then((page) => page.cards)
       .catch(() => []),
     client
-      .listCards({ scope: mate, state: "open" })
+      .listCards({ scope: mate, state: "open" }, signal)
       .then((page) => page.cards)
       .catch(() => []),
-    client.listHosts().catch(() => []),
-    client.getPrefs().catch(() => ""),
-    client.getParents().catch((): Record<string, string> => ({})),
+    client.listHosts(signal).catch(() => []),
+    client.getPrefs(signal).catch(() => ""),
+    client.getParents(signal).catch((): Record<string, string> => ({})),
   ]);
 
   const parent = Object.hasOwn(parents, mate) ? (parents[mate] ?? "captain") : "captain";
@@ -192,112 +121,55 @@ async function buildAmbientBlock(client: BoardClient, mate: string): Promise<str
   return parts.join("\n\n");
 }
 
-async function buildReconciliationNotice(
-  client: BoardClient,
-  mate: string,
-): Promise<string | undefined> {
-  const [held, overview] = await Promise.all([
-    client.listCards({ holder: mate, state: "open", scope: mate }),
-    client.getOverview(mate),
-  ]);
-  const involved = (card: { readonly mate: string; readonly createdBy: string }): boolean =>
-    card.mate === mate || card.createdBy === mate;
-  const completed = overview.recentDone.filter(involved).slice(0, 5);
-  const canceled = overview.recentCanceled.slice(0, 5);
-  if (held.cards.length === 0 && completed.length === 0 && canceled.length === 0) {
-    return undefined;
-  }
-  const lines = [
-    ...held.cards.map((card) => `- #${card.id} [${card.state}] in your court: ${card.title}`),
-    ...completed.map((card) => `- #${card.id} completed: ${card.title}`),
-    ...canceled.map((card) => `- #${card.id} canceled: ${card.title}`),
-  ];
-  return `[fleet] The Card Server is reachable again after an outage. Current state for ${mate}:\n${lines.join("\n")}`;
-}
-
-function waitAbortable(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise((resolve) => {
-    const state: { timer?: ReturnType<typeof setTimeout> } = {};
-    const onAbort = (): void => {
-      if (state.timer !== undefined) clearTimeout(state.timer);
-      resolve();
-    };
-    state.timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    state.timer.unref();
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
 export function attachFleetPiAdapter(
   pi: PiExtensionApi,
   overrides: FleetPiAdapterOptions = {},
 ): void {
+  const attached = getAttachedSet();
+  if (attached.has(pi)) return;
+  attached.add(pi);
+
   const { client, mate } = resolveBoardClient(overrides);
-  const baseDelayMs = overrides.reconnectDelayMs ?? 1500;
+  const matePrompt = loadDefaultMatePrompt();
   let controller: AbortController | undefined;
   let ambientBlock = "";
 
-  const wake = (content: string): void => {
-    pi.sendMessage(
-      { customType: "fleet", content, display: true },
-      { triggerTurn: true, deliverAs: "followUp" },
-    );
-  };
-
-  const watchEvents = async (signal: AbortSignal, cursor: number | undefined): Promise<void> => {
-    let lastEventId = cursor;
-    let initialChase = cursor !== undefined;
-    let attempt = 0;
-
-    while (!signal.aborted) {
-      try {
-        if (lastEventId === undefined) {
-          const recovered = await client.latestEventId();
-          const reconciliation = await buildReconciliationNotice(client, mate);
-          ambientBlock = await buildAmbientBlock(client, mate);
-          lastEventId = recovered;
-          if (reconciliation !== undefined) wake(reconciliation);
-        }
-        const wantsChase = initialChase;
-        initialChase = false;
-        for await (const event of client.events({
-          ...(lastEventId !== undefined ? { after: lastEventId } : {}),
-          ...(wantsChase ? { initialChase: true } : {}),
-          holder: mate,
-          signal,
-        })) {
-          attempt = 0;
-          if (event.id > 0) lastEventId = Math.max(lastEventId ?? 0, event.id);
-          const notice = formatMateEvent(event, mate);
-          if (notice === undefined) continue;
-          wake(notice);
-        }
-      } catch {
-        if (signal.aborted) break;
-      }
-      if (signal.aborted) break;
-      const delayMs = Math.min(30_000, baseDelayMs * 2 ** Math.min(attempt, 4));
-      attempt += 1;
-      await waitAbortable(delayMs, signal);
-    }
-  };
-
   pi.on("session_start", async () => {
-    const cursor = await client.latestEventId().catch(() => undefined);
-    ambientBlock = await buildAmbientBlock(client, mate);
-    controller = new AbortController();
-    void watchEvents(controller.signal, cursor);
+    const sessionController = new AbortController();
+    controller = sessionController;
+    const cursor = await client.latestEventId(sessionController.signal).catch(() => undefined);
+    ambientBlock = await buildAmbientBlock(client, mate, sessionController.signal);
+    if (sessionController.signal.aborted) return;
+    void watchMateWakes({
+      client,
+      mate,
+      signal: sessionController.signal,
+      ...(cursor !== undefined ? { initialCursor: cursor } : {}),
+      ...(overrides.reconnectDelayMs !== undefined
+        ? { reconnectDelayMs: overrides.reconnectDelayMs }
+        : {}),
+      async onRecovered() {
+        ambientBlock = await buildAmbientBlock(client, mate, sessionController.signal);
+      },
+      onWake(wake) {
+        pi.sendMessage(
+          { customType: "fleet", content: wake.notice, display: true },
+          { triggerTurn: true, deliverAs: "followUp" },
+        );
+      },
+    });
   });
 
   pi.on("before_agent_start", (event) => {
-    if (ambientBlock === "") return undefined;
-    return {
-      systemPrompt: `${event.systemPrompt}\n\n## Ambient Fleet Context (live at session start)\n\n${ambientBlock}`,
-    };
+    const sections: string[] = [event.systemPrompt];
+    if (matePrompt.length > 0 && !event.systemPrompt.includes(matePrompt)) {
+      sections.push(matePrompt);
+    }
+    if (ambientBlock !== "") {
+      sections.push(`## Ambient Fleet Context (live at session start)\n\n${ambientBlock}`);
+    }
+    if (sections.length === 1) return undefined;
+    return { systemPrompt: sections.join("\n\n") };
   });
 
   pi.on("session_shutdown", () => {
