@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { attachFleetPiAdapter } from "../src/adapters/pi.ts";
+import { loadFleetConfig } from "../src/config.ts";
+import { ensureMatesUp, listMates } from "../src/mates.ts";
 import { createMockPi, startTestServer, waitFor, type TestServer } from "./support.ts";
 
 const BIN_PATH = fileURLToPath(new URL("../src/bin.ts", import.meta.url));
@@ -531,17 +536,24 @@ void test("fleet channel closes promptly on EOF while the Card Server stalls its
       env: { ...process.env, BOARD_URL: `http://127.0.0.1:${String(addr.port)}` },
       stdio: ["pipe", "pipe", "pipe"],
     });
-    child.stdin.write(
-      `${JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: { protocolVersion: "2025-06-18", capabilities: {} },
-      })}\n`,
-    );
-    assert.equal(await waitFor(() => requestSeen), true);
-    child.stdin.end();
-    assert.equal(await waitForExit(child), 0);
+    try {
+      child.stdin.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: { protocolVersion: "2025-06-18", capabilities: {} },
+        })}\n`,
+      );
+      assert.equal(await waitFor(() => requestSeen), true);
+      child.stdin.end();
+      assert.equal(await waitForExit(child), 0);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await waitForExit(child);
+      }
+    }
   } finally {
     stalledBoard.closeAllConnections();
     await new Promise<void>((resolve) => {
@@ -633,6 +645,308 @@ void test("Pi adapter attaches idempotently and injects prompts/mate.md when not
     assert.equal(mock.delivered.length, 1);
   } finally {
     await mock.emitShutdown();
+    await server.stop();
+  }
+});
+
+void test("Pi adapter stays inert inside crewmates when FLEET_CLAIM_TOKEN is set", async () => {
+  const server = await startTestServer({
+    parents: { "1stmate": "captain" },
+  });
+  const prevToken = process.env["FLEET_CLAIM_TOKEN"];
+  process.env["FLEET_CLAIM_TOKEN"] = "worker-claim-secret";
+  const mock = createMockPi();
+  try {
+    attachFleetPiAdapter(mock.api, { boardUrl: server.url, mate: "1stmate" });
+    await mock.emitStart();
+    const out = await mock.emitBeforeStart("Worker prompt");
+    assert.equal(out, undefined);
+
+    await server.client.createCard({
+      mate: "1stmate",
+      title: "Should not wake crewmate",
+      actor: "captain",
+    });
+    await sleep(150);
+    assert.equal(mock.delivered.length, 0);
+  } finally {
+    if (prevToken === undefined) {
+      Reflect.deleteProperty(process.env, "FLEET_CLAIM_TOKEN");
+    } else {
+      process.env["FLEET_CLAIM_TOKEN"] = prevToken;
+    }
+    await mock.emitShutdown();
+    await server.stop();
+  }
+});
+
+void test("fleet chat launches local mate with cwd, env, auto-generated mcp.json, and -- passthrough", async () => {
+  const server = await startTestServer({
+    parents: { "1stmate": "captain", cleo: "1stmate" },
+  });
+  const root = mkdtempSync(join(tmpdir(), "fleet-chat-local-"));
+  const harnessPath = join(root, "fake-harness.mjs");
+  const cfgPath = join(root, "fleet.yaml");
+
+  writeFileSync(
+    harnessPath,
+    [
+      `#!${process.execPath}`,
+      'import { readFileSync } from "node:fs";',
+      "const mcpIndex = process.argv.indexOf('--mcp-config');",
+      "const mcpPath = mcpIndex >= 0 ? process.argv[mcpIndex + 1] : '';",
+      "const mcpContent = mcpPath ? JSON.parse(readFileSync(mcpPath, 'utf8')) : null;",
+      "process.stdout.write(JSON.stringify({",
+      "  cwd: process.cwd(),",
+      "  mate: process.env.FLEET_MATE ?? null,",
+      "  boardUrl: process.env.BOARD_URL ?? null,",
+      "  claimToken: process.env.FLEET_CLAIM_TOKEN ?? null,",
+      "  claimEpoch: process.env.FLEET_CLAIM_EPOCH ?? null,",
+      "  args: process.argv.slice(2),",
+      "  mcp: mcpContent,",
+      String.raw`}) + '\n');`,
+      "process.exit(process.argv.includes('--exit-7') ? 7 : 0);",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  chmodSync(harnessPath, 0o755);
+
+  writeFileSync(
+    cfgPath,
+    [
+      `boardUrl: ${server.url}`,
+      "mates:",
+      "  stateDir: ./mates",
+      "  command:",
+      `    - ${harnessPath}`,
+      "    - --mcp-config",
+      '    - "{mcpConfig}"',
+      "    - --prompt",
+      '    - "{prompt}"',
+      "  items:",
+      "    - name: 1stmate",
+      "      parent: captain",
+      "      cwd: ./1stmate",
+      "      autoStart: false",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  try {
+    await server.client.setCharter("1stmate", "Own top-level delegation.");
+    const okRun = await runBinOnce(["chat", "--config", cfgPath, "--", "--help", "--resume"], {
+      BOARD_URL: server.url,
+      FLEET_CLAIM_TOKEN: "stale-worker-token",
+      FLEET_CLAIM_EPOCH: "9",
+    });
+    assert.equal(okRun.exitCode, 0, okRun.output);
+    const payload: unknown = JSON.parse(okRun.stdout.trim());
+    assert.ok(isRecord(payload));
+    assert.equal(realpathSync(strField(payload, "cwd")), realpathSync(join(root, "1stmate")));
+    assert.equal(payload["mate"], "1stmate");
+    assert.equal(payload["boardUrl"], server.url);
+    assert.equal(payload["claimToken"], null);
+    assert.equal(payload["claimEpoch"], null);
+    assert.ok(Array.isArray(payload["args"]));
+    assert.ok(payload["args"].includes("--help"));
+    assert.ok(payload["args"].includes("--resume"));
+    const mcp = payload["mcp"];
+    assert.ok(isRecord(mcp) && isRecord(mcp["mcpServers"]) && isRecord(mcp["mcpServers"]["fleet"]));
+    assert.equal(mcp["mcpServers"]["fleet"]["command"], "fleet");
+    assert.deepEqual(mcp["mcpServers"]["fleet"]["args"], ["channel", "--mate", "1stmate"]);
+
+    const exitRun = await runBinOnce(["chat", "1stmate", "--config", cfgPath, "--", "--exit-7"], {
+      BOARD_URL: server.url,
+    });
+    assert.equal(exitRun.exitCode, 7);
+
+    const diskMcp: unknown = JSON.parse(
+      readFileSync(join(root, "mates", "1stmate", "mcp.json"), "utf8"),
+    );
+    assert.ok(isRecord(diskMcp) && isRecord(diskMcp["mcpServers"]));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    await server.stop();
+  }
+});
+
+void test("fleet chat handles external webhook mates cleanly and rejects unreachable board", async () => {
+  const server = await startTestServer({
+    parents: { "1stmate": "captain", grokbot: "1stmate" },
+  });
+  const root = mkdtempSync(join(tmpdir(), "fleet-chat-ext-"));
+  const cfgPath = join(root, "fleet.yaml");
+  const badCfgPath = join(root, "bad-auto.yaml");
+
+  writeFileSync(
+    cfgPath,
+    [
+      `boardUrl: ${server.url}`,
+      "mates:",
+      "  stateDir: ./mates",
+      "  items:",
+      "    - name: 1stmate",
+      "      parent: captain",
+      "      mode: external",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(
+    badCfgPath,
+    [
+      `boardUrl: ${server.url}`,
+      "mates:",
+      "  stateDir: ./mates",
+      "  items:",
+      "    - name: 1stmate",
+      "      parent: captain",
+      "      mode: external",
+      "      autoStart: true",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  try {
+    assert.throws(() => loadFleetConfig(badCfgPath), /cannot set autoStart: true/u);
+
+    const loaded = loadFleetConfig(cfgPath);
+    assert.equal(loaded.mates?.items[0]?.autoStart, false);
+    const statuses = await listMates(loaded);
+    assert.equal(statuses[0]?.status, "external");
+    assert.equal(statuses[0]?.mode, "external");
+    await assert.rejects(() => ensureMatesUp(loaded, { name: "1stmate" }), /mode "external"/u);
+    assert.deepEqual(await ensureMatesUp(loaded, { all: true }), []);
+
+    await server.client.setCharter("1stmate", "External Grok Bot 1stmate.");
+    await server.client.createCard({
+      mate: "1stmate",
+      title: "Pending external card",
+      actor: "captain",
+    });
+
+    const extRun = await runBinOnce(["chat", "--config", cfgPath], { BOARD_URL: server.url });
+    assert.equal(extRun.exitCode, 0, extRun.output);
+    assert.match(extRun.stdout, /external mate \(mode: external\)/u);
+    assert.match(extRun.stdout, /open cards held by 1stmate: 1/u);
+    assert.match(extRun.stdout, /fleet watch --mate 1stmate --webhook/u);
+
+    await server.stop();
+    const downRun = await runBinOnce(["chat", "--config", cfgPath], { BOARD_URL: server.url });
+    assert.notEqual(downRun.exitCode, 0);
+    assert.match(downRun.output, /Card Server is unreachable/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    await server.stop().catch(() => undefined);
+  }
+});
+
+void test("fleet doctor validates board, charter, external mode, and Claude channel flags", async () => {
+  const server = await startTestServer({
+    parents: { "1stmate": "captain", bot: "1stmate" },
+  });
+  const root = mkdtempSync(join(tmpdir(), "fleet-doctor-"));
+  const fakeClaude = join(root, "claude");
+  const badClaudeCfg = join(root, "claude-missing-flag.yaml");
+  const goodClaudeCfg = join(root, "claude-ok.yaml");
+  const externalCfg = join(root, "external.yaml");
+  const brokenCfg = join(root, "broken.yaml");
+
+  writeFileSync(fakeClaude, "#!/bin/sh\nexit 0\n", "utf8");
+  chmodSync(fakeClaude, 0o755);
+
+  writeFileSync(
+    badClaudeCfg,
+    [
+      `boardUrl: ${server.url}`,
+      "mates:",
+      "  stateDir: ./mates",
+      "  items:",
+      "    - name: 1stmate",
+      "      parent: captain",
+      "      autoStart: false",
+      "      command:",
+      `        - ${fakeClaude}`,
+      "        - --append-system-prompt-file",
+      '        - "{prompt}"',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  writeFileSync(
+    goodClaudeCfg,
+    [
+      `boardUrl: ${server.url}`,
+      "mates:",
+      "  stateDir: ./mates",
+      "  items:",
+      "    - name: 1stmate",
+      "      parent: captain",
+      "      autoStart: false",
+      "      command:",
+      `        - ${fakeClaude}`,
+      "        - --mcp-config",
+      '        - "{mcpConfig}"',
+      "        - --dangerously-load-development-channels",
+      "        - server:fleet",
+      "        - --append-system-prompt-file",
+      '        - "{prompt}"',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  writeFileSync(
+    externalCfg,
+    [
+      `boardUrl: ${server.url}`,
+      "mates:",
+      "  stateDir: ./mates",
+      "  items:",
+      "    - name: 1stmate",
+      "      parent: captain",
+      "      mode: external",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  writeFileSync(brokenCfg, "boardUrl: not-a-url\n", "utf8");
+
+  try {
+    await server.client.setCharter("1stmate", "Doctor verified charter.");
+
+    const missingChannel = await runBinOnce(["doctor", "--config", badClaudeCfg], {
+      BOARD_URL: server.url,
+    });
+    assert.equal(missingChannel.exitCode, 1);
+    assert.match(missingChannel.stdout, /ok: false/u);
+    assert.match(missingChannel.stdout, /--dangerously-load-development-channels/u);
+
+    const goodClaude = await runBinOnce(["doctor", "--config", goodClaudeCfg], {
+      BOARD_URL: server.url,
+    });
+    assert.equal(goodClaude.exitCode, 0, goodClaude.output);
+    assert.match(goodClaude.stdout, /ok: true/u);
+
+    const extDoc = await runBinOnce(["doctor", "--config", externalCfg], {
+      BOARD_URL: server.url,
+    });
+    assert.equal(extDoc.exitCode, 0, extDoc.output);
+    assert.match(extDoc.stdout, /ok: true/u);
+    assert.match(extDoc.stdout, /external mate/u);
+
+    const brokenDoc = await runBinOnce(["doctor", "--config", brokenCfg], {
+      BOARD_URL: server.url,
+    });
+    assert.equal(brokenDoc.exitCode, 1);
+    assert.match(brokenDoc.stdout, /ok: false/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
     await server.stop();
   }
 });

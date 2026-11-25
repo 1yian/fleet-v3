@@ -125,6 +125,7 @@ export function attachFleetPiAdapter(
   pi: PiExtensionApi,
   overrides: FleetPiAdapterOptions = {},
 ): void {
+  if ((process.env["FLEET_CLAIM_TOKEN"] ?? "").trim().length > 0) return;
   const attached = getAttachedSet();
   if (attached.has(pi)) return;
   attached.add(pi);

@@ -16,8 +16,8 @@ Before writing any config or starting services, briefly explain what Fleet is to
 Then inspect the machine (`ls ~/Projects`, check installed tools: `node -v`, `bun`, `herdr`, `ypi`, `pi`, `claude`) and ask the captain **only** what you cannot infer:
 
 1. **What harness do you want for `1stmate`?**
-   - **Coding harness:** `pi` / `ypi` or **Claude Code** (you launch `1stmate` with one command right from the `fleet-v3` git checkout).
-   - **Non-coding / chat harness:** **Grok Bot**, **Dots**, **Muse**, or another webhook-capable bot (wired via `fleet watch --mate 1stmate --webhook <url>`).
+   - **Coding harness:** `pi` / `ypi` or **Claude Code** (you launch `1stmate` from any directory with one command: `fleet chat`).
+   - **Non-coding / chat harness:** **Grok Bot**, **Dots**, **Muse**, or another webhook-capable bot (set `mode: external` in `fleet.yaml` and wire wakes via `fleet watch --mate 1stmate --webhook <url>`).
 2. **What harness do you want for `crewmates`?**
    - **Coding harnesses only** (`pi` / `ypi` or **Claude Code** for now). Confirm whether local `crewmates` should open interactively in `herdr` panes (`viewport: herdr`, recommended on macOS/desktop) or run `headless`.
 3. **Do you want any optional `2ndmate`s?**
@@ -30,11 +30,10 @@ Then inspect the machine (`ls ~/Projects`, check installed tools: `node -v`, `bu
 
 ### Non-negotiable hook hygiene rule
 
-**Never install Fleet hooks or extensions globally** into `~/.pi/agent/extensions/` or `~/.claude/`.
+**Never install Fleet hooks or extensions globally** into `~/.pi/agent/extensions/` or `~/.claude/`, and do not commit Fleet mate hooks into the `fleet-v3` git repo.
 
-- For **`1stmate`** on a coding harness: configure gitignored local files inside the `fleet-v3` checkout so running one command (`ypi` or `claude ...`) from the checkout opens `1stmate` directly.
-- For **`2ndmate`s** and **`crewmates`** on coding harnesses: inject adapters/channels/prompts **strictly via their launch command** in `~/.fleet/fleet.yaml`.
-- All mutable runtime state (`fleet.yaml`, `board/`, `mates/`, `optchat/`, `workspaces/`, `logs/`) lives under **`~/.fleet`** (never inside the `fleet-v3` git checkout, so worker worktrees never inherit `fleet-v3/AGENTS.md` or `node_modules/`).
+- For **`1stmate`**, **`2ndmate`s**, and **`crewmates`** on coding harnesses: inject adapters, MCP configs, and prompts **strictly via launch commands** (`fleet chat` for interactive `1stmate`, `fleet mates up` for `2ndmate`s, and `fleet run` for `crewmates`).
+- All mutable runtime state (`fleet.yaml`, `board/`, `1stmate/`, `mates/`, `optchat/`, `workspaces/`, `logs/`) lives under **`~/.fleet`** (never inside the `fleet-v3` git checkout, so worker worktrees never inherit `fleet-v3/AGENTS.md` or `node_modules/`).
 
 ---
 
@@ -114,8 +113,6 @@ mates:
   stateDir: ./mates
   command:
     - ypi
-    - --model
-    - tier/orchestrator
     - -e
     - "{adapter}"
     - --append-system-prompt
@@ -123,7 +120,7 @@ mates:
   items:
     - name: 1stmate
       parent: captain
-      cwd: ~/Projects/fleet-v3
+      cwd: ./1stmate
       autoStart: false
     - name: cleo
       parent: 1stmate
@@ -208,59 +205,59 @@ fleet charter cleo --set "You are the Cleo 2ndmate (parent: 1stmate). Own ~/Proj
 
 ## 3. Wire Up `1stmate` (Main Entry Point)
 
-Pick the block matching the captain's `1stmate` harness choice:
+Pick the block matching the captain's `1stmate` harness choice, then verify everything with `fleet doctor`:
 
-### Option A: `ypi` / `pi` as `1stmate` (single command from the git checkout)
+### Option A: `ypi` / `pi` as `1stmate` (single command from any directory)
 
-Create gitignored local files inside `~/Projects/fleet-v3/.pi/` (never in `~/.pi/agent/extensions/`):
-
-```bash
-mkdir -p ~/Projects/fleet-v3/.pi/extensions
-cat > ~/Projects/fleet-v3/.pi/extensions/fleet.ts <<'EOF'
-process.env["FLEET_MATE"] ??= "1stmate";
-export { default } from "../../src/adapters/pi.ts";
-EOF
-```
-
-Now the captain simply runs:
+With `mates.command` set to the `ypi` or stock `pi` recipe from Section 2 (`-e "{adapter}" --append-system-prompt "{prompt}"`) and `1stmate` under `mates.items` (`cwd: ./1stmate`), run:
 
 ```bash
-cd ~/Projects/fleet-v3 && ypi
+fleet doctor
+fleet chat
 ```
 
-`src/adapters/pi.ts` automatically loads `prompts/mate.md`, injects live ambient context, subscribes to `1stmate`'s SSE stream, and attaches only once per Pi instance. Pi discovers this project extension, and Claude Code reads `.mcp.json`, in any session launched from `~/Projects/fleet-v3`, so never use the `fleet-v3` checkout as the `cwd` of a `2ndmate` or crewmate. Give every `2ndmate` its own domain repo or state directory so its hooks stay launch-command-only.
+`fleet chat` checks Card Server health, sets `FLEET_MATE=1stmate`, `BOARD_URL`, and `cwd` (`~/.fleet/1stmate`), injects `src/adapters/pi.ts` via `-e`, and launches `ypi` / `pi` directly in your terminal. Pass extra harness flags after `--` (for example `fleet chat -- --resume`). Zero global hooks and zero `.pi/` files inside `~/Projects/fleet-v3` are needed.
 
-### Option B: Claude Code as `1stmate` (native Channel MCP from the git checkout)
+### Option B: Claude Code as `1stmate` (native Channel MCP via `fleet chat`)
 
-Create gitignored `~/Projects/fleet-v3/.mcp.json` (never globally in `~/.claude/`):
+Override `command` on `1stmate` in `~/.fleet/fleet.yaml` (never globally in `~/.claude/`):
+
+```yaml
+- name: 1stmate
+  parent: captain
+  cwd: ./1stmate
+  autoStart: false
+  command:
+    - claude
+    - --mcp-config
+    - "{mcpConfig}"
+    - --dangerously-load-development-channels
+    - server:fleet
+    - --append-system-prompt-file
+    - "{prompt}"
+```
+
+Verify and launch from any directory:
 
 ```bash
-cat > ~/Projects/fleet-v3/.mcp.json <<'EOF'
-{
-  "mcpServers": {
-    "fleet": {
-      "command": "fleet",
-      "args": ["channel", "--mate", "1stmate"]
-    }
-  }
-}
-EOF
+fleet doctor
+fleet chat
 ```
 
-Launch `1stmate` from the checkout:
-
-```bash
-cd ~/Projects/fleet-v3 && FLEET_MATE=1stmate claude \
-  --dangerously-load-development-channels server:fleet \
-  --append-system-prompt-file ./prompts/mate.md
-```
+`fleet chat` automatically writes `~/.fleet/mates/1stmate/mcp.json` (`fleet channel --mate 1stmate`), checks board health, and launches Claude Code with `--dangerously-load-development-channels server:fleet` so wakes are never silently dropped. (`fleet doctor` fails loudly if that flag or `--mcp-config` is missing.)
 
 _(Claude Code Channels are in research preview; Team/Enterprise orgs must allow `channelsEnabled`.)_
 
 ### Option C: Non-coding harness (`Grok Bot`, `Dots`, `Muse`, or any webhook bot)
 
-1. Give the bot `prompts/mate.md` as its system instructions, `fleet` on `PATH`, `BOARD_URL` set to the Card Server address reachable from the bot (the `boardUrl` in `~/.fleet/fleet.yaml`), and `FLEET_MATE=1stmate`.
-2. Run `fleet watch` to push filtered wakes straight to the bot's HTTP webhook:
+1. Mark `1stmate` with `mode: external` in `~/.fleet/fleet.yaml` (which sets `autoStart: false` automatically and prevents `fleet chat` or `fleet mates up` from trying to launch a local TUI):
+   ```yaml
+   - name: 1stmate
+     parent: captain
+     mode: external
+   ```
+2. Give the bot `prompts/mate.md` as its system instructions, `fleet` on `PATH`, `BOARD_URL` set to the Card Server address reachable from the bot (the `boardUrl` in `~/.fleet/fleet.yaml`), and `FLEET_MATE=1stmate`.
+3. Run `fleet watch` to push filtered wakes straight to the bot's HTTP webhook:
 
 ```bash
 fleet watch --mate 1stmate --webhook https://bot.example.com/wake --header "Authorization: Bearer <token>"
@@ -274,14 +271,14 @@ _(If your bot consumes a pipe instead of HTTP, run bare `fleet watch --mate 1stm
 
 Each `2ndmate` uses `parent: 1stmate` in `~/.fleet/fleet.yaml` and gets its own charter via `fleet charter <name> --set "..."`:
 
-- **`ypi` / `pi` `2ndmate`s in Herdr (launch-command injected via the `mates.command` recipe that matches the installed harness):**
+- **`ypi` / `pi` `2ndmate`s in Herdr (launch-command injected via `mates.command`):**
   Run:
   ```bash
   fleet mates up
   fleet mates status
   ```
-- **Claude Code `2ndmate`s in Herdr (launch-command injected, no global hooks):**
-  Write a per-mate MCP file at `~/.fleet/mates/<name>/mcp.json` with `fleet channel --mate <name>`, and override `command` on that mate item in `fleet.yaml`:
+- **Claude Code `2ndmate`s in Herdr (launch-command injected, automatic `mcp.json`):**
+  Override `command` on that mate item in `~/.fleet/fleet.yaml` using `{mcpConfig}` (`fleet mates up` writes `{stateDir}/mcp.json` automatically):
   ```yaml
   - name: cleo
     parent: 1stmate
@@ -289,14 +286,14 @@ Each `2ndmate` uses `parent: 1stmate` in `~/.fleet/fleet.yaml` and gets its own 
     command:
       - claude
       - --mcp-config
-      - "{stateDir}/mcp.json"
+      - "{mcpConfig}"
       - --dangerously-load-development-channels
       - server:fleet
       - --append-system-prompt-file
       - "{prompt}"
   ```
 - **Non-coding `2ndmate`s (e.g. multiple Grok Bot instances):**
-  Add each bot to `mates.items` in `~/.fleet/fleet.yaml` with `autoStart: false` so `fleet mates up` never launches a second agent for the bot's identity, then run one `fleet watch --mate <name> --webhook <bot-webhook-url>` service per `2ndmate` bot instance.
+  Add each bot to `mates.items` in `~/.fleet/fleet.yaml` with `mode: external` so `fleet mates up` skips it, then run one `fleet watch --mate <name> --webhook <bot-webhook-url>` service per `2ndmate` bot instance.
 
 ---
 
@@ -318,7 +315,12 @@ A remote host (e.g. `p620` or Linux dev VM) only needs `fleet` + a tunnel to the
 
 ### macOS (`launchd`)
 
-Create `~/Library/LaunchAgents/dev.fleet.board.plist` (repeat with `run` for `dev.fleet.runner.plist`, `web --host <ip> --port 4101` for `dev.fleet.kanban.plist`, and `watch --mate 1stmate --webhook <url>` if using a webhook bot):
+Create `~/Library/LaunchAgents/dev.fleet.board.plist` using the template below. When copying it for other daemons, give **each** plist a distinct `<key>Label</key>`, matching `ProgramArguments`, and separate `StandardOutPath`/`StandardErrorPath` log file:
+
+- `dev.fleet.board.plist`: Label `dev.fleet.board`, args `["/Users/YOU/.local/bin/fleet", "serve"]`, log `~/.fleet/logs/board.log`
+- `dev.fleet.runner.plist`: Label `dev.fleet.runner`, args `["/Users/YOU/.local/bin/fleet", "run"]`, log `~/.fleet/logs/runner.log`
+- `dev.fleet.kanban.plist`: Label `dev.fleet.kanban`, args `["/Users/YOU/.local/bin/fleet", "web", "--host", "<ip>", "--port", "4101"]`, log `~/.fleet/logs/kanban.log`
+- `dev.fleet.watch-1stmate.plist` (external webhook bot only): Label `dev.fleet.watch-1stmate`, args `["/Users/YOU/.local/bin/fleet", "watch", "--mate", "1stmate", "--webhook", "<url>"]`, log `~/.fleet/logs/watch-1stmate.log`
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
