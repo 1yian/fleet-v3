@@ -137,7 +137,30 @@ repos:
     delivery: no-mistakes
 ```
 
-`spawn.mode` is `local`, `container` (macOS), or `docker` (Linux), and `spawn.viewport` is `herdr` or `headless`. The `spawn.command` above is the `ypi` / `pi` crewmate; replace it with the Claude Code form below when the captain chooses Claude Code.
+`spawn.mode` is `local`, `container` (macOS), or `docker` (Linux), and `spawn.viewport` is `herdr` or `headless`. The `spawn.command` and `mates.command` above are the `ypi` recipes. If the host has only stock `pi` (no `ypi` executable), replace them with the stock Pi recipes below; if the captain chooses Claude Code for crewmates, use the Claude Code form further below.
+
+Stock `pi` crewmate (`spawn.command`):
+
+```yaml
+command:
+  - pi
+  - --print
+  - --no-session
+  - --append-system-prompt
+  - "{prompt}"
+  - "Read card #{card} with `fleet view {card} --full` and execute it."
+```
+
+Stock `pi` persistent mate (`mates.command`):
+
+```yaml
+command:
+  - pi
+  - -e
+  - "{adapter}"
+  - --append-system-prompt
+  - "{prompt}"
+```
 
 **If the captain chose Claude Code for `crewmates`**, set `spawn.command` to inject the worker prompt via CLI flags (no global hooks):
 
@@ -251,7 +274,7 @@ _(If your bot consumes a pipe instead of HTTP, run bare `fleet watch --mate 1stm
 
 Each `2ndmate` uses `parent: 1stmate` in `~/.fleet/fleet.yaml` and gets its own charter via `fleet charter <name> --set "..."`:
 
-- **`ypi` / `pi` `2ndmate`s in Herdr (launch-command injected):**
+- **`ypi` / `pi` `2ndmate`s in Herdr (launch-command injected via the `mates.command` recipe that matches the installed harness):**
   Run:
   ```bash
   fleet mates up

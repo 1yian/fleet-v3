@@ -93,6 +93,8 @@ export async function waitFor(
   return predicate();
 }
 
+type PiHandler = (...args: never[]) => unknown;
+
 export function createMockPi(): {
   readonly api: PiExtensionApi;
   readonly delivered: string[];
@@ -101,40 +103,21 @@ export function createMockPi(): {
   readonly emitShutdown: () => Promise<void>;
   readonly emitBeforeStart: (systemPrompt: string) => Promise<{ systemPrompt: string } | undefined>;
 } {
-  const handlers: {
-    start?: () => Promise<void> | void;
-    shutdown?: () => Promise<void> | void;
-    beforeStart?: (event: {
-      readonly systemPrompt: string;
-    }) => Promise<{ systemPrompt: string } | undefined> | { systemPrompt: string } | undefined;
-  } = {};
+  const handlers: Record<string, PiHandler[]> = {
+    session_start: [],
+    session_shutdown: [],
+    before_agent_start: [],
+  };
   const delivered: string[] = [];
   const woke: boolean[] = [];
 
-  const on: PiExtensionApi["on"] = (event: string, handler: (...args: never[]) => unknown) => {
-    if (event === "session_start") {
-      handlers.start = () => {
-        const result: unknown = Reflect.apply(handler, undefined, []);
-        return result instanceof Promise ? result.then(() => undefined) : undefined;
-      };
-      return;
-    }
-    if (event === "session_shutdown") {
-      handlers.shutdown = () => {
-        const result: unknown = Reflect.apply(handler, undefined, []);
-        return result instanceof Promise ? result.then(() => undefined) : undefined;
-      };
-      return;
-    }
-    if (event === "before_agent_start") {
-      handlers.beforeStart = async (ev) => {
-        const raw: unknown = await Promise.resolve(Reflect.apply(handler, undefined, [ev]));
-        if (typeof raw === "object" && raw !== null && "systemPrompt" in raw) {
-          const prompt: unknown = Reflect.get(raw, "systemPrompt");
-          if (typeof prompt === "string") return { systemPrompt: prompt };
-        }
-        return undefined;
-      };
+  const on: PiExtensionApi["on"] = (event: string, handler: PiHandler) => {
+    handlers[event]?.push(handler);
+  };
+
+  const emit = async (event: string): Promise<void> => {
+    for (const handler of handlers[event] ?? []) {
+      await Promise.resolve(Reflect.apply(handler, undefined, []));
     }
   };
 
@@ -148,14 +131,24 @@ export function createMockPi(): {
     },
     delivered,
     woke,
-    async emitStart() {
-      await handlers.start?.();
-    },
-    async emitShutdown() {
-      await handlers.shutdown?.();
-    },
-    emitBeforeStart(systemPrompt: string) {
-      return Promise.resolve(handlers.beforeStart?.({ systemPrompt }));
+    emitStart: () => emit("session_start"),
+    emitShutdown: () => emit("session_shutdown"),
+    async emitBeforeStart(systemPrompt: string) {
+      let current = systemPrompt;
+      let changed = false;
+      for (const handler of handlers["before_agent_start"] ?? []) {
+        const raw: unknown = await Promise.resolve(
+          Reflect.apply(handler, undefined, [{ systemPrompt: current }]),
+        );
+        if (typeof raw === "object" && raw !== null && "systemPrompt" in raw) {
+          const prompt: unknown = Reflect.get(raw, "systemPrompt");
+          if (typeof prompt === "string") {
+            current = prompt;
+            changed = true;
+          }
+        }
+      }
+      return changed ? { systemPrompt: current } : undefined;
     },
   };
 }

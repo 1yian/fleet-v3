@@ -17,6 +17,7 @@ const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] a
 const PARSE_ERROR = -32_700;
 const INVALID_REQUEST = -32_600;
 const METHOD_NOT_FOUND = -32_601;
+const INTERNAL_ERROR = -32_603;
 
 function parseJsonRpcRequest(value: unknown): JsonRpcRequest | undefined {
   if (!isRecord(value) || Array.isArray(value)) return undefined;
@@ -63,7 +64,7 @@ export async function runFleetChannel(options: FleetChannelOptions): Promise<voi
   const replyError = (id: string | number | null, code: number, message: string): Promise<void> =>
     reply({ jsonrpc: "2.0", id, error: { code, message } });
 
-  let initialCursor: number | undefined;
+  let initialCursor = 0;
   let initializeAnswered = false;
   let watchPromise: Promise<void> | undefined;
 
@@ -73,7 +74,7 @@ export async function runFleetChannel(options: FleetChannelOptions): Promise<voi
       client,
       mate,
       signal: controller.signal,
-      ...(initialCursor !== undefined ? { initialCursor } : {}),
+      initialCursor,
       onWake(wake) {
         return reply({
           jsonrpc: "2.0",
@@ -100,8 +101,13 @@ export async function runFleetChannel(options: FleetChannelOptions): Promise<voi
         await replyError(id, INVALID_REQUEST, "Already initialized");
         return;
       }
+      const cursor = await client.latestEventId(controller.signal).catch(() => undefined);
+      if (cursor === undefined) {
+        await replyError(id, INTERNAL_ERROR, "Card Server unreachable; retry initialize");
+        return;
+      }
+      initialCursor = cursor;
       initializeAnswered = true;
-      initialCursor = await client.latestEventId(controller.signal).catch(() => undefined);
       await reply({
         jsonrpc: "2.0",
         id,
@@ -147,14 +153,18 @@ export async function runFleetChannel(options: FleetChannelOptions): Promise<voi
   };
 
   const rl = createInterface({ input: process.stdin, crlfDelay: Number.POSITIVE_INFINITY });
-  const closeOnAbort = (): void => {
-    rl.close();
-  };
-  controller.signal.addEventListener("abort", closeOnAbort, { once: true });
+  rl.once("close", () => {
+    controller.abort();
+  });
+  controller.signal.addEventListener(
+    "abort",
+    () => {
+      rl.close();
+    },
+    { once: true },
+  );
   for await (const line of rl) {
     await handleLine(line);
   }
-  controller.abort();
-  controller.signal.removeEventListener("abort", closeOnAbort);
   await watchPromise?.catch(() => undefined);
 }

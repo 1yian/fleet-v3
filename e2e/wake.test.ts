@@ -514,13 +514,103 @@ void test("fleet channel negotiates the highest supported MCP version for unsupp
   }
 });
 
+void test("fleet channel closes promptly on EOF while the Card Server stalls its health reply", async () => {
+  let requestSeen = false;
+  const stalledBoard = createServer(() => {
+    requestSeen = true;
+  });
+  await new Promise<void>((resolve) => {
+    stalledBoard.listen(0, "127.0.0.1", () => {
+      resolve();
+    });
+  });
+  const addr = stalledBoard.address();
+  assert.ok(addr !== null && typeof addr === "object");
+  try {
+    const child = spawn(process.execPath, [BIN_PATH, "channel", "--mate", "cleo"], {
+      env: { ...process.env, BOARD_URL: `http://127.0.0.1:${String(addr.port)}` },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18", capabilities: {} },
+      })}\n`,
+    );
+    assert.equal(await waitFor(() => requestSeen), true);
+    child.stdin.end();
+    assert.equal(await waitForExit(child), 0);
+  } finally {
+    stalledBoard.closeAllConnections();
+    await new Promise<void>((resolve) => {
+      stalledBoard.close(() => {
+        resolve();
+      });
+    });
+  }
+});
+
+void test("fleet channel refuses to acknowledge initialize without a replay cursor and accepts a retry", async () => {
+  const probe = await startTestServer({ parents: FLEET_PARENTS });
+  const port = Number(new URL(probe.url).port);
+  await probe.stop();
+
+  const child = spawn(process.execPath, [BIN_PATH, "channel", "--mate", "cleo"], {
+    env: { ...process.env, BOARD_URL: `http://127.0.0.1:${String(port)}` },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const messages: Record<string, unknown>[] = [];
+  const rl = createInterface({ input: child.stdout });
+  rl.on("line", (line) => {
+    const parsed: unknown = JSON.parse(line);
+    if (isRecord(parsed)) messages.push(parsed);
+  });
+  const initialize = (id: number): void => {
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18", capabilities: {} },
+      })}\n`,
+    );
+  };
+  let server: TestServer | undefined;
+  try {
+    initialize(1);
+    await waitFor(() => messages.some((m) => m["id"] === 1));
+    const failed = messages.find((m) => m["id"] === 1);
+    assert.ok(failed !== undefined && isRecord(failed["error"]));
+    assert.equal(failed["error"]["code"], -32_603);
+    assert.equal(Object.hasOwn(failed, "result"), false);
+
+    server = await startTestServer({ parents: FLEET_PARENTS, port });
+    initialize(2);
+    await waitFor(() => messages.some((m) => m["id"] === 2));
+    const retried = messages.find((m) => m["id"] === 2);
+    assert.ok(retried !== undefined && isRecord(retried["result"]));
+
+    child.stdin.end();
+    assert.equal(await waitForExit(child), 0);
+  } finally {
+    rl.close();
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await waitForExit(child);
+    }
+    await server?.stop();
+  }
+});
+
 void test("Pi adapter attaches idempotently and injects prompts/mate.md when not already present", async () => {
   const server = await startTestServer({
     parents: { "1stmate": "captain", cleo: "1stmate" },
   });
 
+  const mock = createMockPi();
   try {
-    const mock = createMockPi();
     attachFleetPiAdapter(mock.api, { boardUrl: server.url, mate: "1stmate" });
     attachFleetPiAdapter(mock.api, { boardUrl: server.url, mate: "1stmate" });
 
@@ -541,9 +631,8 @@ void test("Pi adapter attaches idempotently and injects prompts/mate.md when not
     await waitFor(() => mock.delivered.length > 0);
     await sleep(150);
     assert.equal(mock.delivered.length, 1);
-
-    await mock.emitShutdown();
   } finally {
+    await mock.emitShutdown();
     await server.stop();
   }
 });
