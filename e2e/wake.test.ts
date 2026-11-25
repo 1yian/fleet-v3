@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { attachFleetPiAdapter } from "../src/adapters/pi.ts";
-import { createMockPi, startTestServer, waitFor } from "./support.ts";
+import { createMockPi, startTestServer, waitFor, type TestServer } from "./support.ts";
 
 const BIN_PATH = fileURLToPath(new URL("../src/bin.ts", import.meta.url));
 
@@ -53,15 +53,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function isChannelPush(message: Record<string, unknown>): boolean {
+  return message["method"] === "notifications/claude/channel";
+}
+
 function strField(obj: Readonly<Record<string, unknown>> | undefined, key: string): string {
   const val = obj?.[key];
   return typeof val === "string" ? val : "";
 }
 
+const FLEET_PARENTS = { "1stmate": "captain", cleo: "1stmate" };
+const WAKE_ENVELOPE_KEYS = ["actor", "cardId", "eventType", "mate", "notice"];
+
+async function startServerWithStaleCard(title: string): Promise<TestServer> {
+  const clock = { now: 1000 };
+  const server = await startTestServer({ parents: FLEET_PARENTS, now: () => clock.now });
+  await server.client.createCard({ mate: "cleo", title, actor: "1stmate" });
+  clock.now = 10_000_000;
+  return server;
+}
+
 void test("fleet watch streams filtered NDJSON wakes and rejects invalid flags", async () => {
-  const server = await startTestServer({
-    parents: { "1stmate": "captain", cleo: "1stmate" },
-  });
+  const server = await startServerWithStaleCard("Stale seed card");
 
   try {
     const missingMate = await runBinOnce(["watch"], { BOARD_URL: server.url }, ["FLEET_MATE"]);
@@ -99,16 +112,23 @@ void test("fleet watch streams filtered NDJSON wakes and rejects invalid flags",
     });
 
     try {
-      await sleep(250);
+      await waitFor(() => received.length > 0);
+      assert.equal(strField(received[0], "eventType"), "chase.due");
+      assert.match(strField(received[0], "notice"), /Stale seed card/u);
 
       const card = await server.client.createCard({
         mate: "cleo",
         title: "Watch NDJSON card",
         actor: "1stmate",
       });
-      await waitFor(() => received.length > 0);
-      assert.equal(strField(received[0], "mate"), "cleo");
-      assert.match(strField(received[0], "notice"), /Watch NDJSON card/u);
+      await waitFor(() => received.length > 1);
+      const created = received[1];
+      assert.deepEqual(Object.keys(created ?? {}).toSorted(), WAKE_ENVELOPE_KEYS);
+      assert.equal(strField(created, "mate"), "cleo");
+      assert.equal(strField(created, "eventType"), "card.created");
+      assert.equal(strField(created, "cardId"), card.id);
+      assert.equal(strField(created, "actor"), "1stmate");
+      assert.match(strField(created, "notice"), /Watch NDJSON card/u);
 
       await server.client.postEntry(card.id, {
         by: "cleo",
@@ -146,11 +166,11 @@ void test("fleet watch streams filtered NDJSON wakes and rejects invalid flags",
 });
 
 void test("fleet watch --webhook POSTs JSON wakes with custom header and survives transient 500s", async () => {
-  const server = await startTestServer({
-    parents: { "1stmate": "captain", cleo: "1stmate" },
-  });
+  const server = await startServerWithStaleCard("Stale webhook seed card");
 
   const hits: {
+    readonly method: string | undefined;
+    readonly url: string | undefined;
     readonly header: string | undefined;
     readonly body: Record<string, unknown>;
   }[] = [];
@@ -165,6 +185,8 @@ void test("fleet watch --webhook POSTs JSON wakes with custom header and survive
       const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       if (isRecord(parsed)) {
         hits.push({
+          method: req.method,
+          url: req.url,
           header:
             typeof req.headers["x-fleet-secret"] === "string"
               ? req.headers["x-fleet-secret"]
@@ -217,24 +239,31 @@ void test("fleet watch --webhook POSTs JSON wakes with custom header and survive
     });
 
     try {
-      await sleep(250);
-      await server.client.createCard({
-        mate: "cleo",
-        title: "First webhook card",
-        actor: "1stmate",
-      });
-      await waitFor(() => hits.length > 0 && stderrChunks.join("").includes("500"));
+      await waitFor(() => hits.length > 0 && stderrChunks.join("").includes("HTTP 500"));
+      assert.match(strField(hits[0]?.body, "notice"), /Stale webhook seed card/u);
 
-      await server.client.createCard({
+      const card = await server.client.createCard({
         mate: "cleo",
         title: "Second webhook card",
         actor: "1stmate",
       });
       await waitFor(() => hits.length >= 2);
 
+      for (const hit of hits) {
+        assert.equal(hit.method, "POST");
+        assert.equal(hit.url, "/wake");
+      }
       assert.equal(hits[1]?.header, "top-secret");
+      assert.deepEqual(Object.keys(hits[1]?.body ?? {}).toSorted(), WAKE_ENVELOPE_KEYS);
       assert.equal(strField(hits[1]?.body, "mate"), "cleo");
+      assert.equal(strField(hits[1]?.body, "eventType"), "card.created");
+      assert.equal(strField(hits[1]?.body, "cardId"), card.id);
       assert.match(strField(hits[1]?.body, "notice"), /Second webhook card/u);
+
+      const stderrText = stderrChunks.join("");
+      assert.equal(stderrText.includes("top-secret"), false);
+      assert.equal(stderrText.includes(webhookUrl), false);
+      assert.equal(stderrText.includes("temporary outage"), false);
     } finally {
       child.kill("SIGTERM");
       await waitForExit(child);
@@ -250,9 +279,7 @@ void test("fleet watch --webhook POSTs JSON wakes with custom header and survive
 });
 
 void test("fleet channel speaks Claude Code MCP Channel protocol over stdio and exits cleanly on EOF", async () => {
-  const server = await startTestServer({
-    parents: { "1stmate": "captain", cleo: "1stmate" },
-  });
+  const server = await startServerWithStaleCard("Stale channel seed card");
 
   try {
     const child = spawn(process.execPath, [BIN_PATH, "channel", "--mate", "cleo"], {
@@ -275,31 +302,48 @@ void test("fleet channel speaks Claude Code MCP Channel protocol over stdio and 
           params: { protocolVersion: "2025-03-26", capabilities: {} },
         })}\n`,
       );
-      await waitFor(() => messages.some((m) => m["id"] === 1));
+      child.stdin.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: 4,
+          method: "initialize",
+          params: { protocolVersion: "1999-01-01", capabilities: {} },
+        })}\n`,
+      );
+      child.stdin.write(`${JSON.stringify({ jsonrpc: "1.0", id: 5, method: "ping" })}\n`);
+      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" })}\n`);
+      await waitFor(() => [1, 2, 4, 5].every((id) => messages.some((m) => m["id"] === id)));
       const initResp = messages.find((m) => m["id"] === 1);
       assert.ok(initResp !== undefined && isRecord(initResp["result"]));
+      assert.equal(initResp["result"]["protocolVersion"], "2025-03-26");
+      const unsupportedResp = messages.find((m) => m["id"] === 4);
+      assert.ok(unsupportedResp !== undefined && isRecord(unsupportedResp["result"]));
+      assert.equal(unsupportedResp["result"]["protocolVersion"], "2025-06-18");
+      const invalidResp = messages.find((m) => m["id"] === 5);
+      assert.ok(invalidResp !== undefined && isRecord(invalidResp["error"]));
+      assert.equal(invalidResp["error"]["code"], -32_600);
       const capabilities = initResp["result"]["capabilities"];
       assert.ok(isRecord(capabilities) && isRecord(capabilities["experimental"]));
       assert.ok(Object.hasOwn(capabilities["experimental"], "claude/channel"));
 
+      assert.equal(await waitFor(() => messages.some((m) => isChannelPush(m)), 400), false);
+
       child.stdin.write(
         `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`,
       );
-      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" })}\n`);
-      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/list" })}\n`);
-      await waitFor(
-        () => messages.some((m) => m["id"] === 2) && messages.some((m) => m["id"] === 3),
-      );
+      await waitFor(() => messages.some((m) => isChannelPush(m)));
+      const chase = messages.find((m) => isChannelPush(m));
+      assert.ok(chase !== undefined && isRecord(chase["params"]));
+      assert.match(strField(chase["params"], "content"), /Stale channel seed card/u);
 
-      await sleep(250);
       const card = await server.client.createCard({
         mate: "cleo",
         title: "Channel MCP card",
         actor: "1stmate",
       });
 
-      await waitFor(() => messages.some((m) => m["method"] === "notifications/claude/channel"));
-      const notif = messages.find((m) => m["method"] === "notifications/claude/channel");
+      await waitFor(() => messages.filter((m) => isChannelPush(m)).length > 1);
+      const notif = messages.filter((m) => isChannelPush(m))[1];
       assert.ok(notif !== undefined && isRecord(notif["params"]));
       assert.match(strField(notif["params"], "content"), /Channel MCP card/u);
       const meta = notif["params"]["meta"];

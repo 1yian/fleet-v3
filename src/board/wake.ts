@@ -5,7 +5,19 @@ import type { BoardEvent } from "./types.ts";
 export interface WakeMessage {
   readonly mate: string;
   readonly notice: string;
-  readonly event?: BoardEvent;
+  readonly eventType: string;
+  readonly cardId?: string;
+  readonly actor?: string;
+}
+
+function wakeFromEvent(mate: string, notice: string, event: BoardEvent): WakeMessage {
+  return {
+    mate,
+    notice,
+    eventType: event.type,
+    ...(typeof event.cardId === "string" ? { cardId: event.cardId } : {}),
+    ...(typeof event.actor === "string" ? { actor: event.actor } : {}),
+  };
 }
 
 export interface WatchMateWakesOptions {
@@ -147,7 +159,6 @@ function waitAbortable(ms: number, signal: AbortSignal): Promise<void> {
       signal.removeEventListener("abort", onAbort);
       resolve();
     }, ms);
-    state.timer.unref();
     signal.addEventListener("abort", onAbort, { once: true });
   });
 }
@@ -163,7 +174,7 @@ async function deliverWake(options: WatchMateWakesOptions, wake: WakeMessage): P
 export async function watchMateWakes(options: WatchMateWakesOptions): Promise<void> {
   const baseDelayMs = options.reconnectDelayMs ?? 1500;
   let lastEventId = options.initialCursor;
-  let initialChase = options.initialCursor !== undefined;
+  let initialChase = true;
   let attempt = 0;
 
   while (!options.signal.aborted) {
@@ -174,22 +185,25 @@ export async function watchMateWakes(options: WatchMateWakesOptions): Promise<vo
         await options.onRecovered?.();
         lastEventId = recovered;
         if (reconciliation !== undefined) {
-          await deliverWake(options, { mate: options.mate, notice: reconciliation });
+          await deliverWake(options, {
+            mate: options.mate,
+            notice: reconciliation,
+            eventType: "reconciliation",
+          });
         }
       }
-      const wantsChase = initialChase;
-      initialChase = false;
       for await (const event of options.client.events({
         ...(lastEventId !== undefined ? { after: lastEventId } : {}),
-        ...(wantsChase ? { initialChase: true } : {}),
+        ...(initialChase ? { initialChase: true } : {}),
         holder: options.mate,
         signal: options.signal,
       })) {
         attempt = 0;
+        initialChase = false;
         if (event.id > 0) lastEventId = Math.max(lastEventId ?? 0, event.id);
         const notice = formatMateEvent(event, options.mate);
         if (notice === undefined) continue;
-        await deliverWake(options, { mate: options.mate, notice, event });
+        await deliverWake(options, wakeFromEvent(options.mate, notice, event));
       }
     } catch (error) {
       if (options.signal.aborted) break;
@@ -207,10 +221,10 @@ export function validateWebhookUrl(raw: string): string {
   try {
     parsed = new URL(raw);
   } catch {
-    throw new Error(`Invalid webhook URL: ${raw}`);
+    throw new Error("Invalid webhook URL");
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error(`Webhook URL must use http:// or https://: ${raw}`);
+    throw new Error("Webhook URL must use http:// or https://");
   }
   return parsed.toString();
 }
@@ -218,21 +232,23 @@ export function validateWebhookUrl(raw: string): string {
 export function parseHeaderFlag(raw: string): readonly [string, string] {
   const colon = raw.indexOf(":");
   if (colon <= 0) {
-    throw new Error(`Invalid --header value "${raw}". Expected "Name: Value".`);
+    throw new Error('Invalid --header value. Expected "Name: Value".');
   }
   const name = raw.slice(0, colon).trim();
   const value = raw.slice(colon + 1).trim();
   if (!/^[A-Za-z0-9-]+$/u.test(name) || /[\r\n]/u.test(value)) {
-    throw new Error(`Invalid HTTP header "${raw}".`);
+    throw new Error("Invalid --header name or value");
   }
   return [name, value];
 }
 
+const WEBHOOK_TIMEOUT_MS = 15_000;
+
 export async function postWakeWebhook(
   url: string,
   wake: WakeMessage,
-  headers: Readonly<Record<string, string>> = {},
-  signal?: AbortSignal,
+  headers: Readonly<Record<string, string>>,
+  signal: AbortSignal,
 ): Promise<void> {
   const response = await fetch(url, {
     method: "POST",
@@ -241,12 +257,11 @@ export async function postWakeWebhook(
       ...headers,
     },
     body: JSON.stringify(wake),
-    ...(signal !== undefined ? { signal } : {}),
+    redirect: "error",
+    signal: AbortSignal.any([signal, AbortSignal.timeout(WEBHOOK_TIMEOUT_MS)]),
   });
+  await response.body?.cancel();
   if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(
-      `Webhook ${url} responded ${String(response.status)}${body.length > 0 ? `: ${body.slice(0, 200)}` : ""}`,
-    );
+    throw new Error(`Webhook delivery failed with HTTP ${String(response.status)}`);
   }
 }

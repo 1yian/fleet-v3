@@ -4,11 +4,35 @@ import type { BoardClient } from "../board/client.ts";
 import { watchMateWakes, type WakeMessage } from "../board/wake.ts";
 import { VERSION } from "../version.ts";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 interface JsonRpcRequest {
-  readonly jsonrpc?: unknown;
-  readonly id?: string | number | null;
-  readonly method?: unknown;
+  readonly id?: string | number;
+  readonly method: string;
   readonly params?: unknown;
+}
+
+const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] as const;
+const PARSE_ERROR = -32_700;
+const INVALID_REQUEST = -32_600;
+const METHOD_NOT_FOUND = -32_601;
+
+function parseJsonRpcRequest(value: unknown): JsonRpcRequest | undefined {
+  if (!isRecord(value) || Array.isArray(value)) return undefined;
+  const { jsonrpc, id, method, params } = value;
+  if (jsonrpc !== "2.0" || typeof method !== "string") return undefined;
+  if (id !== undefined && typeof id !== "string" && typeof id !== "number") return undefined;
+  return { ...(id !== undefined ? { id } : {}), method, params };
+}
+
+function negotiateProtocolVersion(params: unknown): string {
+  const requested = isRecord(params) ? params["protocolVersion"] : undefined;
+  return (
+    SUPPORTED_PROTOCOL_VERSIONS.find((version) => version === requested) ??
+    SUPPORTED_PROTOCOL_VERSIONS[0]
+  );
 }
 
 export interface FleetChannelOptions {
@@ -20,22 +44,13 @@ export interface FleetChannelOptions {
   readonly reconnectDelayMs?: number;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function channelMeta(wake: WakeMessage): Record<string, string> {
-  const meta: Record<string, string> = {
+  return {
     mate: wake.mate,
-    event_type: wake.event?.type ?? "reconciliation",
+    event_type: wake.eventType,
+    ...(wake.cardId !== undefined ? { card_id: wake.cardId } : {}),
+    ...(wake.actor !== undefined ? { actor: wake.actor } : {}),
   };
-  if (wake.event?.cardId !== undefined && wake.event.cardId !== null) {
-    meta["card_id"] = wake.event.cardId;
-  }
-  if (wake.event?.actor !== undefined && wake.event.actor !== null) {
-    meta["actor"] = wake.event.actor;
-  }
-  return meta;
 }
 
 function writeJsonLine(output: Writable, payload: unknown): void {
@@ -86,67 +101,40 @@ export async function runFleetChannel(options: FleetChannelOptions): Promise<voi
     })();
   };
 
-  const handleRequest = (req: JsonRpcRequest): void => {
-    const method = typeof req.method === "string" ? req.method : undefined;
-    const hasId = req.id !== undefined && req.id !== null;
+  const writeError = (id: string | number | null, code: number, message: string): void => {
+    writeJsonLine(output, { jsonrpc: "2.0", id, error: { code, message } });
+  };
 
-    if (method === "initialize") {
-      const requestedVersion =
-        isRecord(req.params) && typeof req.params["protocolVersion"] === "string"
-          ? req.params["protocolVersion"]
-          : "2025-03-26";
-      if (hasId) {
-        writeJsonLine(output, {
-          jsonrpc: "2.0",
-          id: req.id,
-          result: {
-            protocolVersion: requestedVersion,
-            capabilities: {
-              experimental: {
-                "claude/channel": {},
-              },
-            },
-            serverInfo: {
-              name: "fleet",
-              version: VERSION,
-            },
-            instructions: channelInstructions(options.mate),
-          },
-        });
-      }
-      startWatch();
-      return;
-    }
+  const handleRequest = (req: JsonRpcRequest): void => {
+    const { id, method } = req;
 
     if (method === "notifications/initialized") {
       startWatch();
       return;
     }
 
-    if (method === "ping") {
-      if (hasId) {
-        writeJsonLine(output, { jsonrpc: "2.0", id: req.id, result: {} });
-      }
-      return;
-    }
+    if (id === undefined) return;
 
-    if (method === "tools/list") {
-      if (hasId) {
-        writeJsonLine(output, { jsonrpc: "2.0", id: req.id, result: { tools: [] } });
-      }
-      return;
-    }
-
-    if (hasId) {
+    if (method === "initialize") {
       writeJsonLine(output, {
         jsonrpc: "2.0",
-        id: req.id,
-        error: {
-          code: -32_601,
-          message: `Method not found: ${method ?? "unknown"}`,
+        id,
+        result: {
+          protocolVersion: negotiateProtocolVersion(req.params),
+          capabilities: { experimental: { "claude/channel": {} } },
+          serverInfo: { name: "fleet", version: VERSION },
+          instructions: channelInstructions(options.mate),
         },
       });
+      return;
     }
+
+    if (method === "ping") {
+      writeJsonLine(output, { jsonrpc: "2.0", id, result: {} });
+      return;
+    }
+
+    writeError(id, METHOD_NOT_FOUND, `Method not found: ${method}`);
   };
 
   const rl = createInterface({ input, crlfDelay: Number.POSITIVE_INFINITY });
@@ -157,10 +145,20 @@ export async function runFleetChannel(options: FleetChannelOptions): Promise<voi
     try {
       parsed = JSON.parse(trimmed);
     } catch {
+      writeError(null, PARSE_ERROR, "Parse error");
       return;
     }
-    if (!isRecord(parsed)) return;
-    handleRequest(parsed);
+    const request = parseJsonRpcRequest(parsed);
+    if (request === undefined) {
+      const id = isRecord(parsed) ? parsed["id"] : undefined;
+      writeError(
+        typeof id === "string" || typeof id === "number" ? id : null,
+        INVALID_REQUEST,
+        "Invalid Request",
+      );
+      return;
+    }
+    handleRequest(request);
   });
 
   await new Promise<void>((resolve) => {

@@ -95,13 +95,13 @@ server:
   staleAfterSeconds: 120
 
 spawn:
-  mode: local # local | container (macOS) | docker (Linux)
-  viewport: herdr # herdr | headless
+  mode: local
+  viewport: herdr
   direnv: true
   herdr:
     workspace: crewmates
     keepPane: on-failure
-  command: # pick ypi/pi OR claude below
+  command:
     - ypi
     - --auto-exit
     - --no-session
@@ -139,13 +139,13 @@ repos:
     delivery: no-mistakes
 ```
 
+`spawn.mode` is `local`, `container` (macOS), or `docker` (Linux), and `spawn.viewport` is `herdr` or `headless`. The `spawn.command` above is the `ypi` / `pi` crewmate; replace it with the Claude Code form below when the captain chooses Claude Code.
+
 **If the captain chose Claude Code for `crewmates`**, set `spawn.command` to inject the worker prompt via CLI flags (no global hooks):
 
 ```yaml
 command:
   - claude
-  - --permission-mode
-  - bypassPermissions
   - --append-system-prompt-file
   - "{prompt}"
   - -p
@@ -191,26 +191,7 @@ Create gitignored local files inside `~/Projects/fleet-v3/.pi/` (never in `~/.pi
 mkdir -p ~/Projects/fleet-v3/.pi/extensions
 cat > ~/Projects/fleet-v3/.pi/extensions/fleet.ts <<'EOF'
 process.env["FLEET_MATE"] ??= "1stmate";
-process.env["BOARD_URL"] ??= "http://127.0.0.1:4100";
 export { default } from "../../src/adapters/pi.ts";
-EOF
-```
-
-If using `ypi`, also give `1stmate` its own persistent OptChat profile in `~/.fleet/optchat`:
-
-```bash
-cat > ~/Projects/fleet-v3/.pi/optchat.json <<'EOF'
-{
-  "enabled": true,
-  "memoryHome": "~/.fleet/optchat",
-  "profile": "1stmate",
-  "compactorProvider": "tier",
-  "compactorModel": "compact",
-  "thinking": "low",
-  "mode": "fold",
-  "foldTokens": 256000,
-  "foldOnCacheExpiry": true
-}
 EOF
 ```
 
@@ -251,14 +232,14 @@ _(Claude Code Channels are in research preview; Team/Enterprise orgs must allow 
 
 ### Option C: Non-coding harness (`Grok Bot`, `Dots`, `Muse`, or any webhook bot)
 
-1. Give the bot `prompts/mate.md` as its system instructions, `fleet` on `PATH`, `BOARD_URL=http://127.0.0.1:4100`, and `FLEET_MATE=1stmate`.
+1. Give the bot `prompts/mate.md` as its system instructions, `fleet` on `PATH`, `BOARD_URL` set to the Card Server address reachable from the bot (the `boardUrl` in `~/.fleet/fleet.yaml`), and `FLEET_MATE=1stmate`.
 2. Run `fleet watch` to push filtered wakes straight to the bot's HTTP webhook:
 
 ```bash
-fleet watch --mate 1stmate --webhook http://127.0.0.1:8080/wake --header "Authorization: Bearer <token>"
+fleet watch --mate 1stmate --webhook https://bot.example.com/wake --header "Authorization: Bearer <token>"
 ```
 
-_(If your bot consumes a pipe instead of HTTP, run bare `fleet watch --mate 1stmate` for filtered NDJSON lines `{ mate, notice, event }`.)_
+_(If your bot consumes a pipe instead of HTTP, run bare `fleet watch --mate 1stmate` for filtered NDJSON lines. Each line, and each webhook POST body, is exactly `{ mate, notice, eventType, cardId?, actor? }`.)_
 
 ---
 
@@ -288,7 +269,7 @@ Each `2ndmate` uses `parent: 1stmate` in `~/.fleet/fleet.yaml` and gets its own 
       - "{prompt}"
   ```
 - **Non-coding `2ndmate`s (e.g. multiple Grok Bot instances):**
-  Run one `fleet watch --mate <name> --webhook <bot-webhook-url>` service per `2ndmate` bot instance.
+  Add each bot to `mates.items` in `~/.fleet/fleet.yaml` with `autoStart: false` so `fleet mates up` never launches a second agent for the bot's identity, then run one `fleet watch --mate <name> --webhook <bot-webhook-url>` service per `2ndmate` bot instance.
 
 ---
 
@@ -375,18 +356,23 @@ loginctl enable-linger "$USER"
 
 ## 7. End-to-End Smoke Test
 
-Verify every piece directly before handing back to the captain:
+Verify every piece directly before handing back to the captain. First confirm the Card Server and runners are healthy:
 
 ```bash
-# 1. Card Server and runners healthy
 curl -sf http://127.0.0.1:4100/api/health
 fleet hosts
+```
 
-# 2. Wake a mate (1stmate or a 2ndmate) and confirm it handles + closes the card
+Then wake a mate (`1stmate` or a `2ndmate`) and confirm it handles and closes the card:
+
+```bash
 fleet dispatch --mate 1stmate --title "Smoke test: reply ok and close this card"
 fleet cards
 fleet view 1 --full
+```
 
-# 3. Verify crewmate worktree execution on a local repo
+Finally verify crewmate worktree execution on a local repo:
+
+```bash
 FLEET_MATE=1stmate fleet dispatch --project Cleo --host macbook --delivery local --title "Smoke test: print git status and exit cleanly"
 ```

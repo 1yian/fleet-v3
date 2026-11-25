@@ -294,7 +294,8 @@ Usage:
   fleet watch [--mate <name>] [--webhook <url>] [--header <Name: Value>]
 Flags:
   --mate <name>            Mate name to watch (defaults to FLEET_MATE)
-  --webhook <url>          HTTP/HTTPS URL to receive JSON POST { mate, notice, event }
+  --webhook <url>          HTTP/HTTPS URL to receive a JSON POST per wake
+  Wake JSON: { mate, notice, eventType, cardId?, actor? } (same lines on stdout without --webhook)
   --header <Name: Value>   Optional HTTP header for webhook requests (e.g. Authorization)`;
 
 const CHANNEL_HELP = `fleet channel - run a stdio MCP server speaking Claude Code's native Channel protocol
