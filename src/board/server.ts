@@ -259,10 +259,10 @@ function handleSse(
     connection: "keep-alive",
   });
 
-  const writeEvent = (event: BoardEvent, replayed = false): void => {
+  const writeEvent = (event: BoardEvent): void => {
     if (res.writableEnded || !matchesHolderFilter(event, holderFilter)) return;
-    if (replayed && event.type === "chase.due") return;
-    res.write(`id: ${String(event.id)}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+    const idLine = event.id > 0 ? `id: ${String(event.id)}\n` : "";
+    res.write(`${idLine}event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
   };
 
   res.write(": connected\n\n");
@@ -270,20 +270,25 @@ function handleSse(
   for (;;) {
     const batch = store.listEventsSince(lastSentId, REPLAY_BATCH);
     for (const event of batch) {
-      writeEvent(event, true);
+      writeEvent(event);
       lastSentId = Math.max(lastSentId, event.id);
     }
     if (batch.length < REPLAY_BATCH) break;
   }
 
-  if (holderFilter !== null && afterRaw === null) {
+  if (
+    holderFilter !== null &&
+    (afterRaw === null || url.searchParams.get("initialChase") === "1")
+  ) {
     const pending = store.pendingChase(holderFilter, staleAfterMs);
-    if (pending !== undefined) {
-      res.write(`event: ${pending.type}\ndata: ${JSON.stringify(pending)}\n\n`);
-    }
+    if (pending !== undefined) writeEvent(pending);
   }
 
   const unsubscribe = store.subscribe((event) => {
+    if (event.id === 0) {
+      writeEvent(event);
+      return;
+    }
     if (event.id <= lastSentId) return;
     lastSentId = event.id;
     writeEvent(event);

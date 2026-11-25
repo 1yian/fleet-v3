@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { attachFleetPiAdapter } from "../src/adapters/pi.ts";
-import { loadConfig, loadFleetConfig, type RunnerConfig } from "../src/config.ts";
+import type { RunnerConfig } from "../src/config.ts";
 import { ensureMatesUp, listMates, stopMates } from "../src/mates.ts";
 import { createMockPi, startTestServer, waitFor } from "./support.ts";
 
@@ -40,14 +40,6 @@ function tryExecSilent(bin: string, args: readonly string[], timeout = 5000): bo
   } catch {
     return false;
   }
-}
-
-function matesYaml(...items: readonly string[]): string[] {
-  return [
-    "mates:",
-    "  items:",
-    ...items.flatMap((entry) => entry.split("|").map((line) => `    ${line}`)),
-  ];
 }
 
 afterEach(() => {
@@ -260,100 +252,6 @@ void test("a mate that starts against a healthy board with stale held work is ch
     await pane.emitShutdown();
     await server.stop();
   }
-});
-
-void test("Pi mate adapter refuses to start without a configured mate identity", () => {
-  const previous = process.env["FLEET_MATE"];
-  delete process.env["FLEET_MATE"];
-  try {
-    assert.throws(() => {
-      attachFleetPiAdapter(createMockPi().api, { boardUrl: "http://127.0.0.1:1" });
-    }, /requires FLEET_MATE/u);
-  } finally {
-    if (previous !== undefined) process.env["FLEET_MATE"] = previous;
-  }
-});
-
-void test("config load rejects cyclic, duplicated, or unrooted mate hierarchies and review caps above four", () => {
-  const root = makeTempDir("fv3-config-");
-  const base = [
-    "host: h1",
-    "spawn:",
-    "  command: [echo]",
-    "repos:",
-    "  demo:",
-    "    path: /tmp/demo",
-  ];
-  const write = (name: string, extra: readonly string[]): string => {
-    const path = join(root, name);
-    writeFileSync(path, [...base, ...extra].join("\n"));
-    return path;
-  };
-
-  assert.doesNotThrow(() =>
-    loadConfig(
-      write(
-        "ok.yaml",
-        matesYaml("- name: jarvis|  parent: captain", "- name: cleo|  parent: jarvis"),
-      ),
-    ),
-  );
-  assert.throws(
-    () =>
-      loadConfig(
-        write(
-          "cycle.yaml",
-          matesYaml("- name: cleo|  parent: jarvis", "- name: jarvis|  parent: cleo"),
-        ),
-      ),
-    /does not reach captain/u,
-  );
-  assert.throws(
-    () =>
-      loadConfig(
-        write(
-          "dup.yaml",
-          matesYaml("- name: cleo|  parent: captain", "- name: cleo|  parent: captain"),
-        ),
-      ),
-    /duplicated/u,
-  );
-  assert.throws(
-    () => loadConfig(write("missing-parent.yaml", matesYaml("- name: cleo|  parent: ghost"))),
-    /does not reach captain/u,
-  );
-  assert.throws(
-    () => loadConfig(write("punctuation.yaml", matesYaml("- name: ops.qa|  parent: captain"))),
-    /names use letters/u,
-  );
-  for (const reserved of ["runner", "worker", "captain"]) {
-    assert.throws(
-      () =>
-        loadConfig(write(`${reserved}.yaml`, matesYaml(`- name: ${reserved}|  parent: captain`))),
-      /reserved/u,
-    );
-  }
-  const boardOnly = join(root, "board-only.yaml");
-  writeFileSync(
-    boardOnly,
-    ["server:", "  port: 4321", ...matesYaml("- name: cleo|  parent: captain")].join("\n"),
-  );
-  const board = loadFleetConfig(boardOnly);
-  assert.equal(board.server?.port, 4321);
-  assert.equal(board.mates?.items[0]?.name, "cleo");
-  assert.throws(() => loadConfig(boardOnly), /host/u);
-  const shared = loadFleetConfig(
-    write("shared.yaml", matesYaml("- name: jarvis|  parent: captain")),
-  );
-  assert.equal(shared.mates?.items[0]?.name, "jarvis", "one shared file serves every entry point");
-  assert.throws(
-    () => loadConfig(write("filter.yaml", ['matesFilter: ["ops.qa"]'])),
-    /names use letters/u,
-  );
-  assert.throws(
-    () => loadConfig(write("rounds.yaml", ["maxReviewRounds: 5"])),
-    /too_big|<=4|Too big/iu,
-  );
 });
 
 void test("fleet mates up idempotently manages permanent interactive panes in Herdr", async (t) => {

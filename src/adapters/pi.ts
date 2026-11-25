@@ -248,23 +248,25 @@ export function attachFleetPiAdapter(
     );
   };
 
-  const watchEvents = async (signal: AbortSignal, coldStart: boolean): Promise<void> => {
-    let lastEventId: number | undefined;
+  const watchEvents = async (signal: AbortSignal, cursor: number | undefined): Promise<void> => {
+    let lastEventId = cursor;
+    let initialChase = cursor !== undefined;
     let attempt = 0;
-    let firstConnect = coldStart;
 
     while (!signal.aborted) {
       try {
-        if (lastEventId === undefined && !firstConnect) {
+        if (lastEventId === undefined) {
           const recovered = await client.latestEventId();
           const reconciliation = await buildReconciliationNotice(client, mate);
           ambientBlock = await buildAmbientBlock(client, mate);
           lastEventId = recovered;
           if (reconciliation !== undefined) wake(reconciliation);
         }
-        firstConnect = false;
+        const wantsChase = initialChase;
+        initialChase = false;
         for await (const event of client.events({
           ...(lastEventId !== undefined ? { after: lastEventId } : {}),
+          ...(wantsChase ? { initialChase: true } : {}),
           holder: mate,
           signal,
         })) {
@@ -285,13 +287,10 @@ export function attachFleetPiAdapter(
   };
 
   pi.on("session_start", async () => {
-    const healthy = await client
-      .latestEventId()
-      .then(() => true)
-      .catch(() => false);
-    controller = new AbortController();
-    void watchEvents(controller.signal, healthy);
+    const cursor = await client.latestEventId().catch(() => undefined);
     ambientBlock = await buildAmbientBlock(client, mate);
+    controller = new AbortController();
+    void watchEvents(controller.signal, cursor);
   });
 
   pi.on("before_agent_start", (event) => {

@@ -1599,31 +1599,7 @@ export class CardStore {
     return grouped;
   }
 
-  public sweepStale(staleAfterMs: number): BoardEvent[] {
-    return this.runTransaction(() => {
-      const now = this.nowFn();
-      const events: BoardEvent[] = [];
-      for (const [holder, cards] of this.staleChaseGroups(now, staleAfterMs)) {
-        events.push(
-          this.appendEvent({
-            type: "chase.due",
-            cardId: null,
-            mate: holder,
-            holder,
-            actor: SERVER_ACTOR,
-            payload: { holder, cards },
-            createdAt: now,
-          }),
-        );
-      }
-      return { result: events, events };
-    });
-  }
-
-  public pendingChase(holder: string, staleAfterMs: number): BoardEvent | undefined {
-    const now = this.nowFn();
-    const cards = this.staleChaseGroups(now, staleAfterMs).get(holder);
-    if (cards === undefined) return undefined;
+  private static chaseEvent(holder: string, cards: StaleChaseCard[], now: number): BoardEvent {
     return {
       id: 0,
       type: "chase.due",
@@ -1634,6 +1610,18 @@ export class CardStore {
       payload: { holder, cards },
       createdAt: now,
     };
+  }
+
+  public sweepStale(staleAfterMs: number): void {
+    const now = this.nowFn();
+    const groups = this.staleChaseGroups(now, staleAfterMs);
+    this.publish([...groups].map(([holder, cards]) => CardStore.chaseEvent(holder, cards, now)));
+  }
+
+  public pendingChase(holder: string, staleAfterMs: number): BoardEvent | undefined {
+    const now = this.nowFn();
+    const cards = this.staleChaseGroups(now, staleAfterMs).get(holder);
+    return cards === undefined ? undefined : CardStore.chaseEvent(holder, cards, now);
   }
 
   public getOverview(scope?: string): BoardOverview {

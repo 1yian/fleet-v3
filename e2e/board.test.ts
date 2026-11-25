@@ -917,7 +917,7 @@ void test("a mate connecting to a restarted board is chased at once and out-of-s
   }
 });
 
-void test("chase reminders are current-state only and never replayed from history", async () => {
+void test("chase reminders are transient: swept live, never stored or replayed", async () => {
   let now = 1_700_000_000_000;
   const server = await startTestServer({
     parents: { jarvis: "captain", cleo: "jarvis" },
@@ -926,15 +926,31 @@ void test("chase reminders are current-state only and never replayed from histor
     staleAfterMs: 120_000,
   });
   const { client } = server;
-  const live = watchEvents(client, { holder: "cleo" });
+  const live = watchEvents(client, { after: await client.latestEventId(), holder: "cleo" });
 
   try {
     const card = await client.createCard({ mate: "cleo", title: "Waiting", actor: "jarvis" });
+    assert.equal(
+      await waitFor(() => live.events.some((ev) => ev.type === "card.created"), 2000),
+      true,
+      "the subscription is live before time advances",
+    );
     now += 130_000;
     assert.equal(
-      await waitFor(() => live.events.some((ev) => ev.type === "chase.due"), 2000),
+      await waitFor(
+        () =>
+          live.events.some(
+            (ev) =>
+              ev.type === "chase.due" && JSON.stringify(ev.payload).includes(`"id":"${card.id}"`),
+          ),
+        2000,
+      ),
       true,
-      "the periodic sweep chases the stale card",
+      "the periodic sweep chases the stale card on a cursored subscription",
+    );
+    assert.ok(
+      live.events.filter((ev) => ev.type === "chase.due").every((ev) => ev.id === 0),
+      "chase reminders carry no durable event id",
     );
     await client.snoozeCard(card.id, { until: now + 3_600_000, actor: "cleo" });
     await live.stop();
@@ -951,10 +967,65 @@ void test("chase reminders are current-state only and never replayed from histor
     await reconnect.stop();
     assert.ok(
       !reconnect.events.some((ev) => ev.type === "chase.due"),
-      "an obsolete chase never wakes a mate that has since snoozed the card",
+      "no recorded chase is replayed to wake a mate that has since snoozed the card",
     );
   } finally {
     await live.stop();
+    await server.stop();
+  }
+});
+
+void test("a startup subscription keeps its replay cursor and still gets the initial chase", async () => {
+  let now = 1_700_000_000_000;
+  const server = await startTestServer({
+    parents: { jarvis: "captain", cleo: "jarvis" },
+    now: () => now,
+    staleAfterMs: 120_000,
+  });
+  const { client } = server;
+
+  try {
+    const stale = await client.createCard({ mate: "cleo", title: "Stale", actor: "jarvis" });
+    const deferred = await client.createCard({ mate: "cleo", title: "Deferred", actor: "jarvis" });
+    await client.snoozeCard(deferred.id, { until: now + 3_600_000, actor: "cleo" });
+    now += 130_000;
+    const cursor = await client.latestEventId();
+    const missed = await client.createCard({
+      mate: "cleo",
+      title: "Arrived mid-connect",
+      actor: "jarvis",
+    });
+
+    const startup = watchEvents(client, { after: cursor, holder: "cleo", initialChase: true });
+    const plain = watchEvents(client, { after: cursor, holder: "cleo" });
+    assert.equal(
+      await waitFor(
+        () =>
+          startup.events.some((ev) => ev.type === "card.created" && ev.cardId === missed.id) &&
+          startup.events.some((ev) => ev.type === "chase.due"),
+        2000,
+      ),
+      true,
+      "the replay boundary and the snapshot are both honored",
+    );
+    await new Promise((resolve) => {
+      setTimeout(resolve, 100);
+    });
+    await startup.stop();
+    await plain.stop();
+
+    const chased = JSON.stringify(startup.events.find((ev) => ev.type === "chase.due")?.payload);
+    assert.ok(chased.includes(`"id":"${stale.id}"`));
+    assert.ok(!chased.includes(`"id":"${deferred.id}"`), "snoozed cards are not chased");
+    assert.ok(
+      plain.events.some((ev) => ev.type === "card.created" && ev.cardId === missed.id),
+      "a plain reconnect still replays from its cursor",
+    );
+    assert.ok(
+      !plain.events.some((ev) => ev.type === "chase.due"),
+      "a plain reconnect does not get another snapshot",
+    );
+  } finally {
     await server.stop();
   }
 });

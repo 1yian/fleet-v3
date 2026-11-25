@@ -441,7 +441,7 @@ async function loadDrawer(id) {
 
   const shownEntries = entries.filter(e => showInternal || !e.internal);
   const parts = [];
-  if (card.result) {
+  if (card.result && (card.state === "held" || card.state === "done" || card.state === "canceled")) {
     const heading = card.state === "held" ? "Ball with " + esc(card.holder) : card.state === "done" ? "Result" : "Reason";
     parts.push('<div class="block-box"><strong>' + heading + '</strong><div class="prose">' + linkify(card.result) + '</div></div>');
   }
@@ -472,7 +472,7 @@ async function loadDrawer(id) {
     const pendingDraft = $("drawer-reply");
     const draft = pendingDraft ? pendingDraft.value : "";
     foot.innerHTML = '<div style="color:var(--muted);font-size:12px">Card is ' + esc(card.state) + '.</div>'
-      + (draft.trim() ? '<div style="color:var(--muted);font-size:12px">Your unsent draft:</div><textarea class="textarea" id="drawer-draft" readonly></textarea>' : "");
+      + (draft.trim() ? '<div id="drawer-draft-box"><div style="color:var(--muted);font-size:12px">Your unsent draft:</div><textarea class="textarea" id="drawer-draft" readonly></textarea></div>' : "");
     const kept = $("drawer-draft");
     if (kept) kept.value = draft;
     return;
@@ -496,6 +496,8 @@ async function submitDraft(id, path, payload) {
   if (!text) return;
   await post("/cards/" + encodeURIComponent(id) + path, payload(text));
   if (editor.isConnected && editor.value.trim() === text) editor.value = "";
+  const kept = $("drawer-draft");
+  if (openCardId === id && kept && kept.value.trim() === text) $("drawer-draft-box").remove();
   await refresh();
 }
 

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { runFleetCli } from "../src/cli.ts";
 import { VERSION } from "../src/version.ts";
 import { startTestServer } from "./support.ts";
@@ -297,6 +297,113 @@ void test("fleet serve refuses an explicit --config that does not exist", async 
   assert.equal(result.exitCode, 1);
   assert.match(result.output, /not found/iu);
   assert.ok(result.output.includes(missing), "the diagnostic names the missing explicit path");
+});
+
+function fleetYaml(root: string, name: string, extra: readonly string[]): string {
+  const path = join(root, name);
+  const base = [
+    "host: h1",
+    "spawn:",
+    "  command: [echo]",
+    "repos:",
+    "  demo:",
+    "    path: /tmp/demo",
+  ];
+  writeFileSync(path, [...base, ...extra].join("\n"));
+  return path;
+}
+
+function matesYaml(...items: readonly string[]): string[] {
+  return [
+    "mates:",
+    "  items:",
+    ...items.flatMap((entry) => entry.split("|").map((line) => `    ${line}`)),
+  ];
+}
+
+void test("fleet refuses to launch from a config with a broken mate hierarchy or review cap", async () => {
+  const root = makeTempDir("fv3-config-");
+  const hierarchyCases: readonly (readonly [string, readonly string[], RegExp])[] = [
+    [
+      "cycle",
+      matesYaml("- name: cleo|  parent: jarvis", "- name: jarvis|  parent: cleo"),
+      /does not reach captain/u,
+    ],
+    [
+      "duplicate",
+      matesYaml("- name: cleo|  parent: captain", "- name: cleo|  parent: captain"),
+      /duplicated/u,
+    ],
+    ["unrooted", matesYaml("- name: cleo|  parent: ghost"), /does not reach captain/u],
+    ["punctuation", matesYaml("- name: ops.qa|  parent: captain"), /names use letters/u],
+    ["reserved-runner", matesYaml("- name: runner|  parent: captain"), /reserved/u],
+    ["reserved-worker", matesYaml("- name: worker|  parent: captain"), /reserved/u],
+    ["reserved-captain", matesYaml("- name: captain|  parent: captain"), /reserved/u],
+  ];
+  for (const [name, extra, pattern] of hierarchyCases) {
+    const config = fleetYaml(root, `${name}.yaml`, extra);
+    const serve = await runBin(["serve", "--config", config, "--port", "4198"]);
+    assert.equal(serve.exitCode, 1, `serve refuses the ${name} hierarchy`);
+    assert.match(serve.output, pattern);
+    const mates = await runBin(["mates", "--config", config]);
+    assert.equal(mates.exitCode, 1, `mates refuses the ${name} hierarchy`);
+    assert.match(mates.output, pattern);
+  }
+
+  const rounds = await runBin([
+    "run",
+    "--config",
+    fleetYaml(root, "rounds.yaml", ["maxReviewRounds: 5"]),
+  ]);
+  assert.equal(rounds.exitCode, 1, "run refuses a review cap above four");
+  assert.match(rounds.output, /too_big|<=4|Too big/iu);
+
+  const filter = await runBin([
+    "run",
+    "--config",
+    fleetYaml(root, "filter.yaml", ['matesFilter: ["ops.qa"]']),
+  ]);
+  assert.equal(filter.exitCode, 1, "run refuses a malformed mates filter");
+  assert.match(filter.output, /names use letters/u);
+
+  const boardOnly = join(root, "board-only.yaml");
+  writeFileSync(
+    boardOnly,
+    ["server:", "  port: 4321", ...matesYaml("- name: cleo|  parent: captain")].join("\n"),
+  );
+  const noHost = await runBin(["run", "--config", boardOnly]);
+  assert.equal(noHost.exitCode, 1, "run needs the execution-host fields a board-only file omits");
+  assert.match(noHost.output, /host/u);
+});
+
+void test("a mate launched without an identity fails at the Pi extension entrypoint", async () => {
+  const adapterUrl = pathToFileURL(
+    fileURLToPath(new URL("../src/adapters/pi.ts", import.meta.url)),
+  ).href;
+  const env = { ...process.env };
+  delete env["FLEET_MATE"];
+  const result = await new Promise<{ readonly exitCode: number | null; readonly output: string }>(
+    (resolve) => {
+      execFile(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `const m = await import(${JSON.stringify(adapterUrl)}); m.default({ on() {}, sendMessage() {} });`,
+        ],
+        { encoding: "utf8", timeout: 15_000, env },
+        (error, stdout, stderr) => {
+          const code: unknown = error === null ? 0 : Reflect.get(error, "code");
+          resolve({
+            exitCode: typeof code === "number" ? code : null,
+            output: `${stdout}${stderr}`,
+          });
+        },
+      );
+    },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.match(result.output, /requires FLEET_MATE/u);
 });
 
 void test("mate CLI defaults dispatch --mate to self, scopes reads to subtree, and supports snooze", async () => {

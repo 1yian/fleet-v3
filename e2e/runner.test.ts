@@ -32,6 +32,7 @@ const WorkerReceiptSchema = z.object({
   cwd: z.string(),
   worktree: z.string(),
   branch: z.string(),
+  checkedOut: z.string(),
   prompt: z.string(),
 });
 
@@ -120,6 +121,10 @@ function isCommandAvailable(bin: string, args: readonly string[]): boolean {
   }
 }
 
+function listed(dir: string): string[] {
+  return existsSync(dir) ? readdirSync(dir) : [];
+}
+
 function tryExecSilent(fn: () => void): boolean {
   try {
     fn();
@@ -164,6 +169,9 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
         cwd: process.cwd(),
         worktree: process.env.FLEET_WORKTREE,
         branch: process.env.FLEET_BRANCH,
+        checkedOut: require("node:child_process")
+          .execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" })
+          .trim(),
         prompt: process.env.FLEET_PROMPT,
       }));
     `;
@@ -187,7 +195,18 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
     assert.equal(receipt.epoch, "1");
     assert.equal(receipt.boardUrl, server.url, "workers always target the claiming board");
     assert.ok(receipt.tokenLength >= 32, "worker receives its claim fencing token");
-    assert.match(receipt.branch, new RegExp(`^fleet/t-${card.id}-e1-[A-Za-z0-9]{6}$`, "u"));
+    assert.equal(
+      receipt.checkedOut,
+      receipt.branch,
+      "the worktree has its advertised branch checked out",
+    );
+    const repoBranches = execFileSync("git", ["-C", repoDir, "branch", "--list", "fleet/*"], {
+      encoding: "utf8",
+    })
+      .split("\n")
+      .map((line) => line.replace(/^[*+ ]+/u, "").trim())
+      .filter((line) => line.length > 0);
+    assert.deepEqual(repoBranches, [receipt.branch], "git holds exactly the advertised branch");
     assert.notEqual(receipt.worktree, repoDir);
     assert.equal(existsSync(receipt.worktree), false);
 
@@ -639,13 +658,18 @@ void test("runs real isolated card inside Apple container micro-VM with worktree
     );
 
     const observed = readFileSync(hostOutPath, "utf8").trim();
-    assert.match(
-      observed,
-      new RegExp(
-        `^${card.id}\\|inherited-ok\\|cred-payload\\|ref: refs/heads/fleet/t-${card.id}-e1-[A-Za-z0-9]{6}$`,
-        "u",
-      ),
-    );
+    const [observedCard, inherited, secret, headRef] = observed.split("|");
+    assert.equal(observedCard, card.id);
+    assert.equal(inherited, "inherited-ok");
+    assert.equal(secret, "cred-payload");
+    const repoBranches = execFileSync("git", ["-C", repoDir, "branch", "--list", "fleet/*"], {
+      encoding: "utf8",
+    })
+      .split("\n")
+      .map((line) => line.replace(/^[*+ ]+/u, "").trim())
+      .filter((line) => line.length > 0);
+    assert.equal(repoBranches.length, 1);
+    assert.equal(headRef, `ref: refs/heads/${repoBranches[0] ?? ""}`);
   } finally {
     if (prevInherited === undefined) delete process.env["FLEET_E2E_INHERITED"];
     else process.env["FLEET_E2E_INHERITED"] = prevInherited;
@@ -982,6 +1006,42 @@ void test("a failed worktree setup leaves no scratch directory or branch behind"
   }
 });
 
+void test("a checkout whose post-checkout hook fails leaves no worktree, scratch directory, or branch", async () => {
+  const root = makeTempDir("fleet-v3-hook-failure-");
+  const repoDir = initGitRepo(root);
+  const hookPath = join(repoDir, ".git", "hooks", "post-checkout");
+  writeFileSync(hookPath, "#!/bin/sh\nexit 1\n");
+  chmodSync(hookPath, 0o755);
+  const server = await startTestServer();
+  const { client } = server;
+
+  try {
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Checkout hook rejects the worktree",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    await runLoop(client, makeConfig(root, repoDir, {}), { once: true });
+
+    assert.equal(await cardField(client, card.id, "state"), "held");
+    const projectRoot = join(root, "workspaces", "cleo", "demo");
+    assert.deepEqual(listed(join(projectRoot, "tmp")), []);
+    assert.deepEqual(listed(join(projectRoot, "worktrees")), []);
+    const worktrees = execFileSync("git", ["-C", repoDir, "worktree", "list", "--porcelain"], {
+      encoding: "utf8",
+    });
+    assert.equal(worktrees.split("\n").filter((line) => line.startsWith("worktree ")).length, 1);
+    const branches = execFileSync("git", ["-C", repoDir, "branch", "--list", "fleet/*"], {
+      encoding: "utf8",
+    });
+    assert.equal(branches.trim(), "");
+  } finally {
+    await server.stop();
+  }
+});
+
 void test("a branch left from an earlier board is never overwritten or deleted by a new attempt", async () => {
   const root = makeTempDir("fleet-v3-branch-");
   const repoDir = initGitRepo(root);
@@ -1077,15 +1137,20 @@ void test("runners on one host serving different boards never share a checkout, 
     const workerScript = `
       const fs = require("node:fs");
       const marker = ${JSON.stringify(receiptDir)} + "/" + process.env.BOARD_URL.split(":").pop();
+      const head = () => require("node:child_process")
+        .execFileSync("git", ["-C", process.env.FLEET_WORKTREE, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" })
+        .trim();
       fs.writeFileSync(marker + ".start", JSON.stringify({
         worktree: process.env.FLEET_WORKTREE,
         branch: process.env.FLEET_BRANCH,
         tmp: process.env.TMPDIR,
+        head: head(),
       }));
       setTimeout(() => {
         fs.writeFileSync(marker + ".end", JSON.stringify({
           worktree: fs.existsSync(process.env.FLEET_WORKTREE),
           tmp: fs.existsSync(process.env.TMPDIR),
+          head: head(),
         }));
       }, 1200);
     `;
@@ -1107,8 +1172,13 @@ void test("runners on one host serving different boards never share a checkout, 
 
     const read = (name: string): unknown =>
       JSON.parse(readFileSync(join(receiptDir, name), "utf8"));
-    const Start = z.object({ worktree: z.string(), branch: z.string(), tmp: z.string() });
-    const End = z.object({ worktree: z.boolean(), tmp: z.boolean() });
+    const Start = z.object({
+      worktree: z.string(),
+      branch: z.string(),
+      tmp: z.string(),
+      head: z.string(),
+    });
+    const End = z.object({ worktree: z.boolean(), tmp: z.boolean(), head: z.string() });
     const portA = new URL(boardA.url).port;
     const portB = new URL(boardB.url).port;
     const startA = Start.parse(read(`${portA}.start`));
@@ -1116,8 +1186,18 @@ void test("runners on one host serving different boards never share a checkout, 
     assert.notEqual(startA.worktree, startB.worktree);
     assert.notEqual(startA.branch, startB.branch);
     assert.notEqual(startA.tmp, startB.tmp);
-    assert.deepEqual(End.parse(read(`${portA}.end`)), { worktree: true, tmp: true });
-    assert.deepEqual(End.parse(read(`${portB}.end`)), { worktree: true, tmp: true });
+    assert.equal(startA.head, startA.branch);
+    assert.equal(startB.head, startB.branch);
+    assert.deepEqual(End.parse(read(`${portA}.end`)), {
+      worktree: true,
+      tmp: true,
+      head: startA.branch,
+    });
+    assert.deepEqual(End.parse(read(`${portB}.end`)), {
+      worktree: true,
+      tmp: true,
+      head: startB.branch,
+    });
     assert.equal(await cardField(boardA.client, "1", "state"), "done");
     assert.equal(await cardField(boardB.client, "1", "state"), "done");
   } finally {
