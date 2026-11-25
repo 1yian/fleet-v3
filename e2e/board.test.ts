@@ -916,3 +916,45 @@ void test("a mate connecting to a restarted board is chased at once and out-of-s
     await server.stop();
   }
 });
+
+void test("chase reminders are current-state only and never replayed from history", async () => {
+  let now = 1_700_000_000_000;
+  const server = await startTestServer({
+    parents: { jarvis: "captain", cleo: "jarvis" },
+    now: () => now,
+    chaseIntervalMs: 40,
+    staleAfterMs: 120_000,
+  });
+  const { client } = server;
+  const live = watchEvents(client, { holder: "cleo" });
+
+  try {
+    const card = await client.createCard({ mate: "cleo", title: "Waiting", actor: "jarvis" });
+    now += 130_000;
+    assert.equal(
+      await waitFor(() => live.events.some((ev) => ev.type === "chase.due"), 2000),
+      true,
+      "the periodic sweep chases the stale card",
+    );
+    await client.snoozeCard(card.id, { until: now + 3_600_000, actor: "cleo" });
+    await live.stop();
+
+    const reconnect = watchEvents(client, { after: 0, holder: "cleo" });
+    assert.equal(
+      await waitFor(() => reconnect.events.some((ev) => ev.type === "card.snoozed"), 2000),
+      true,
+      "history is replayed from the cursor",
+    );
+    await new Promise((resolve) => {
+      setTimeout(resolve, 150);
+    });
+    await reconnect.stop();
+    assert.ok(
+      !reconnect.events.some((ev) => ev.type === "chase.due"),
+      "an obsolete chase never wakes a mate that has since snoozed the card",
+    );
+  } finally {
+    await live.stop();
+    await server.stop();
+  }
+});

@@ -203,7 +203,7 @@ async function buildReconciliationNotice(
   const involved = (card: { readonly mate: string; readonly createdBy: string }): boolean =>
     card.mate === mate || card.createdBy === mate;
   const completed = overview.recentDone.filter(involved).slice(0, 5);
-  const canceled = overview.recentCanceled.filter(involved).slice(0, 5);
+  const canceled = overview.recentCanceled.slice(0, 5);
   if (held.cards.length === 0 && completed.length === 0 && canceled.length === 0) {
     return undefined;
   }
@@ -248,26 +248,28 @@ export function attachFleetPiAdapter(
     );
   };
 
-  const watchEvents = async (signal: AbortSignal, cursor: number | undefined): Promise<void> => {
-    let lastEventId = cursor;
+  const watchEvents = async (signal: AbortSignal, coldStart: boolean): Promise<void> => {
+    let lastEventId: number | undefined;
     let attempt = 0;
+    let firstConnect = coldStart;
 
     while (!signal.aborted) {
       try {
-        if (lastEventId === undefined) {
+        if (lastEventId === undefined && !firstConnect) {
           const recovered = await client.latestEventId();
           const reconciliation = await buildReconciliationNotice(client, mate);
           ambientBlock = await buildAmbientBlock(client, mate);
           lastEventId = recovered;
           if (reconciliation !== undefined) wake(reconciliation);
         }
+        firstConnect = false;
         for await (const event of client.events({
           ...(lastEventId !== undefined ? { after: lastEventId } : {}),
           holder: mate,
           signal,
         })) {
           attempt = 0;
-          lastEventId = Math.max(lastEventId ?? 0, event.id);
+          if (event.id > 0) lastEventId = Math.max(lastEventId ?? 0, event.id);
           const notice = formatMateEvent(event, mate);
           if (notice === undefined) continue;
           wake(notice);
@@ -283,10 +285,13 @@ export function attachFleetPiAdapter(
   };
 
   pi.on("session_start", async () => {
-    const cursor = await client.latestEventId().catch(() => undefined);
-    ambientBlock = await buildAmbientBlock(client, mate);
+    const healthy = await client
+      .latestEventId()
+      .then(() => true)
+      .catch(() => false);
     controller = new AbortController();
-    void watchEvents(controller.signal, cursor);
+    void watchEvents(controller.signal, healthy);
+    ambientBlock = await buildAmbientBlock(client, mate);
   });
 
   pi.on("before_agent_start", (event) => {

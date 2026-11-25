@@ -166,7 +166,7 @@ void test("unified Pi mate adapter scopes ambient context and wakes on escalatio
 
 void test("a mate pane started during a board outage is reconciled once the board returns", async () => {
   const dataDir = makeTempDir("fv3-outage-");
-  const parents = { cleo: "jarvis", jarvis: "captain" };
+  const parents = { cleo: "jarvis", jarvis: "captain", sub: "cleo" };
   const seed = await startTestServer({ dataDir, parents });
   const port = Number(new URL(seed.url).port);
   const delegated = await seed.client.createCard({
@@ -174,13 +174,14 @@ void test("a mate pane started during a board outage is reconciled once the boar
     title: "Delegated then withdrawn",
     actor: "jarvis",
   });
+  await seed.client.cancelCard(delegated.id, { reason: "Superseded", actor: "cleo" });
   for (let n = 0; n < 51; n += 1) {
     const filler = await seed.client.createCard({
-      mate: "cleo",
+      mate: "sub",
       title: `Filler ${String(n)}`,
-      actor: "jarvis",
+      actor: "cleo",
     });
-    await seed.client.cancelCard(filler.id, { reason: "Noise", actor: "cleo" });
+    await seed.client.cancelCard(filler.id, { reason: "Noise", actor: "sub" });
   }
   const waiting = await seed.client.createCard({ mate: "cleo", title: "Waiting on Jarvis" });
   await seed.client.escalateCard(waiting.id, { reason: "Decide?", actor: "cleo" });
@@ -189,7 +190,6 @@ void test("a mate pane started during a board outage is reconciled once the boar
     title: "Finished during outage",
   });
   await seed.client.closeCard(finished.id, { result: "ok" });
-  await seed.client.cancelCard(delegated.id, { reason: "Superseded", actor: "cleo" });
   await seed.stop();
 
   const pane = createMockPi();
@@ -216,6 +216,49 @@ void test("a mate pane started during a board outage is reconciled once the boar
   } finally {
     await pane.emitShutdown();
     await revived.stop();
+  }
+});
+
+void test("a mate that starts against a healthy board with stale held work is chased at once", async () => {
+  let now = 1_700_000_000_000;
+  const server = await startTestServer({
+    parents: { cleo: "jarvis", jarvis: "captain" },
+    now: () => now,
+    staleAfterMs: 120_000,
+  });
+  await server.client.createCard({ mate: "cleo", title: "Stale before restart", actor: "jarvis" });
+  const snoozed = await server.client.createCard({
+    mate: "cleo",
+    title: "Deferred before restart",
+    actor: "jarvis",
+  });
+  await server.client.snoozeCard(snoozed.id, { until: now + 3_600_000, actor: "cleo" });
+  now += 130_000;
+
+  const pane = createMockPi();
+  attachFleetPiAdapter(pane.api, { boardUrl: server.url, mate: "cleo", reconnectDelayMs: 50 });
+  await pane.emitStart();
+
+  try {
+    assert.ok(
+      await waitFor(
+        () =>
+          pane.delivered.some(
+            (text) =>
+              text.includes("Cards needing attention") && text.includes("Stale before restart"),
+          ),
+        3000,
+      ),
+      "a restarted mate gets its T=0 chase without waiting for the next sweep",
+    );
+    assert.ok(pane.woke.every(Boolean), "the startup chase wakes a Pi turn");
+    assert.ok(
+      !pane.delivered.some((text) => text.includes("Deferred before restart")),
+      "snoozed cards are not chased",
+    );
+  } finally {
+    await pane.emitShutdown();
+    await server.stop();
   }
 });
 

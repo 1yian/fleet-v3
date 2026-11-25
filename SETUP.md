@@ -234,7 +234,7 @@ To run any agent harness as a mate (e.g. `jarvis` or `cleo`):
    ```text
    GET $BOARD_URL/api/events?holder=$FLEET_MATE
    ```
-   Pass `Last-Event-ID: <last_id>` on reconnect so zero events are lost. Forward each incoming JSON event (skipping `event.actor === FLEET_MATE` and internal replies) as a short wake message into the harness's ingress (webhook, Discord DM, RPC, or terminal input).
+   Connect without a cursor on first start to receive an immediate `chase.due` for stale cards, then pass `Last-Event-ID: <last_id>` on reconnect so zero events are lost (chase reminders are current-state and are never replayed). Forward each incoming JSON event (skipping `event.actor === FLEET_MATE` and internal replies) as a short wake message into the harness's ingress (webhook, Discord DM, RPC, or terminal input).
 
 ---
 

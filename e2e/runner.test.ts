@@ -187,7 +187,7 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
     assert.equal(receipt.epoch, "1");
     assert.equal(receipt.boardUrl, server.url, "workers always target the claiming board");
     assert.ok(receipt.tokenLength >= 32, "worker receives its claim fencing token");
-    assert.match(receipt.branch, new RegExp(`^fleet/t-${card.id}-e1-[0-9a-f]{8}$`, "u"));
+    assert.match(receipt.branch, new RegExp(`^fleet/t-${card.id}-e1-[A-Za-z0-9]{6}$`, "u"));
     assert.notEqual(receipt.worktree, repoDir);
     assert.equal(existsSync(receipt.worktree), false);
 
@@ -642,7 +642,7 @@ void test("runs real isolated card inside Apple container micro-VM with worktree
     assert.match(
       observed,
       new RegExp(
-        `^${card.id}\\|inherited-ok\\|cred-payload\\|ref: refs/heads/fleet/t-${card.id}-e1-[0-9a-f]{8}$`,
+        `^${card.id}\\|inherited-ok\\|cred-payload\\|ref: refs/heads/fleet/t-${card.id}-e1-[A-Za-z0-9]{6}$`,
         "u",
       ),
     );

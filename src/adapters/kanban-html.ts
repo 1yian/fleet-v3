@@ -441,8 +441,9 @@ async function loadDrawer(id) {
 
   const shownEntries = entries.filter(e => showInternal || !e.internal);
   const parts = [];
-  if (card.state === "held" && card.result) {
-    parts.push('<div class="block-box"><strong>Ball with ' + esc(card.holder) + '</strong><div class="prose">' + linkify(card.result) + '</div></div>');
+  if (card.result) {
+    const heading = card.state === "held" ? "Ball with " + esc(card.holder) : card.state === "done" ? "Result" : "Reason";
+    parts.push('<div class="block-box"><strong>' + heading + '</strong><div class="prose">' + linkify(card.result) + '</div></div>');
   }
   if (card.body) {
     parts.push('<div class="prose">' + linkify(card.body) + '</div>');
@@ -468,7 +469,12 @@ async function loadDrawer(id) {
   footKey = nextFootKey;
   const foot = $("drawer-foot");
   if (!isOpen) {
-    foot.innerHTML = '<div style="color:var(--muted);font-size:12px">Card is ' + esc(card.state) + '.</div>';
+    const pendingDraft = $("drawer-reply");
+    const draft = pendingDraft ? pendingDraft.value : "";
+    foot.innerHTML = '<div style="color:var(--muted);font-size:12px">Card is ' + esc(card.state) + '.</div>'
+      + (draft.trim() ? '<div style="color:var(--muted);font-size:12px">Your unsent draft:</div><textarea class="textarea" id="drawer-draft" readonly></textarea>' : "");
+    const kept = $("drawer-draft");
+    if (kept) kept.value = draft;
     return;
   }
   foot.innerHTML =
@@ -479,7 +485,6 @@ async function loadDrawer(id) {
     + '<button class="btn" data-action="reply" data-id="' + esc(card.id) + '">Reply</button>'
     + '</div>'
     + '<div style="display:flex;gap:8px">'
-    + '<button class="btn btn-ghost" data-action="close-card" data-id="' + esc(card.id) + '">Close</button>'
     + '<button class="btn btn-danger" data-action="cancel-card" data-id="' + esc(card.id) + '">Cancel</button>'
     + '</div>'
     + '</div>';
@@ -534,7 +539,6 @@ const ACTIONS = {
   "toggle-internal": () => { showInternal = !showInternal; if (openCardId) return loadDrawer(openCardId); },
   "answer": data => submitDraft(data.id, "/answer", text => ({ text, actor: "captain" })),
   "reply": data => submitDraft(data.id, "/entries", text => ({ text, by: "captain" })),
-  "close-card": async data => { await post("/cards/" + encodeURIComponent(data.id) + "/close", { actor: "captain" }); await refresh(); },
   "cancel-card": async data => {
     const answer = prompt("Cancel reason?");
     if (answer === null) return;

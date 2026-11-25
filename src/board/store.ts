@@ -297,15 +297,6 @@ export class CardStore {
     }
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA_SQL);
-    this.ensureSnoozeColumn();
-  }
-
-  private ensureSnoozeColumn(): void {
-    const cols = this.db.prepare("PRAGMA table_info(cards)").all();
-    const hasSnooze = cols.some((col) => Reflect.get(col, "name") === "snooze_until");
-    if (!hasSnooze) {
-      this.db.exec("ALTER TABLE cards ADD COLUMN snooze_until INTEGER;");
-    }
   }
 
   public close(): void {
@@ -1634,7 +1625,7 @@ export class CardStore {
     const cards = this.staleChaseGroups(now, staleAfterMs).get(holder);
     if (cards === undefined) return undefined;
     return {
-      id: this.latestEventId(),
+      id: 0,
       type: "chase.due",
       cardId: null,
       mate: holder,
@@ -1681,7 +1672,7 @@ export class CardStore {
         ...(scope !== undefined ? { scope } : {}),
       }).cards,
       recentDone: this.recentTerminal("done", "card.done", scopeCheck),
-      recentCanceled: this.recentTerminal("canceled", "card.canceled", scopeCheck),
+      recentCanceled: this.recentTerminal("canceled", "card.canceled", scopeCheck, scope),
     };
   }
 
@@ -1689,11 +1680,16 @@ export class CardStore {
     state: "done" | "canceled",
     eventType: "card.done" | "card.canceled",
     scopeCheck: { readonly clause: string | undefined; readonly params: string[] },
+    recipient?: string,
   ): Card[] {
-    const where =
-      scopeCheck.clause === undefined
-        ? `WHERE c.state = '${state}'`
-        : `WHERE c.state = '${state}' AND ${scopeCheck.clause}`;
+    const conditions = [`c.state = '${state}'`];
+    const params = [...scopeCheck.params];
+    if (scopeCheck.clause !== undefined) conditions.push(scopeCheck.clause);
+    if (recipient !== undefined && isMateActor(recipient)) {
+      conditions.push("(c.mate = ? OR c.created_by = ?)");
+      params.push(recipient, recipient);
+    }
+    const where = `WHERE ${conditions.join(" AND ")}`;
     return this.db
       .prepare(
         `SELECT c.*, (SELECT COUNT(*) FROM entries e WHERE e.card_id = c.id) AS entry_count
@@ -1705,7 +1701,7 @@ export class CardStore {
          ${where}
          ORDER BY COALESCE(te.terminal_event_id, 0) DESC, c.id DESC LIMIT ?`,
       )
-      .all(...scopeCheck.params, RECENT_DONE_LIMIT)
+      .all(...params, RECENT_DONE_LIMIT)
       .map((raw) => rowToCard(CardRowSchema.parse(raw)));
   }
 

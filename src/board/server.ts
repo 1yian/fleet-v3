@@ -259,8 +259,9 @@ function handleSse(
     connection: "keep-alive",
   });
 
-  const writeEvent = (event: BoardEvent): void => {
+  const writeEvent = (event: BoardEvent, replayed = false): void => {
     if (res.writableEnded || !matchesHolderFilter(event, holderFilter)) return;
+    if (replayed && event.type === "chase.due") return;
     res.write(`id: ${String(event.id)}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
   };
 
@@ -269,15 +270,17 @@ function handleSse(
   for (;;) {
     const batch = store.listEventsSince(lastSentId, REPLAY_BATCH);
     for (const event of batch) {
-      writeEvent(event);
+      writeEvent(event, true);
       lastSentId = Math.max(lastSentId, event.id);
     }
     if (batch.length < REPLAY_BATCH) break;
   }
 
-  if (holderFilter !== null) {
+  if (holderFilter !== null && afterRaw === null) {
     const pending = store.pendingChase(holderFilter, staleAfterMs);
-    if (pending !== undefined) writeEvent(pending);
+    if (pending !== undefined) {
+      res.write(`event: ${pending.type}\ndata: ${JSON.stringify(pending)}\n\n`);
+    }
   }
 
   const unsubscribe = store.subscribe((event) => {
