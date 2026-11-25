@@ -165,23 +165,28 @@ function waitAbortable(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-export async function writeLine(
+export function createLineWriter(
   output: Writable,
-  line: string,
-  signal: AbortSignal,
-): Promise<void> {
-  if (output.write(line) || signal.aborted) return;
-  await new Promise<void>((resolve) => {
-    const done = (): void => {
-      output.off("drain", done);
-      output.off("close", done);
-      signal.removeEventListener("abort", done);
-      resolve();
-    };
-    output.once("drain", done);
-    output.once("close", done);
-    signal.addEventListener("abort", done, { once: true });
+  controller: AbortController,
+): (line: string) => Promise<void> {
+  output.on("error", () => {
+    controller.abort();
   });
+  const { signal } = controller;
+  return async (line) => {
+    if (signal.aborted || output.write(line)) return;
+    await new Promise<void>((resolve) => {
+      const done = (): void => {
+        output.off("drain", done);
+        output.off("close", done);
+        signal.removeEventListener("abort", done);
+        resolve();
+      };
+      output.once("drain", done);
+      output.once("close", done);
+      signal.addEventListener("abort", done, { once: true });
+    });
+  };
 }
 
 async function deliverWake(options: WatchMateWakesOptions, wake: WakeMessage): Promise<void> {
@@ -281,17 +286,14 @@ const WEBHOOK_TIMEOUT_MS = 15_000;
 export async function postWakeWebhook(
   url: string,
   wake: WakeMessage,
-  headers: Readonly<Record<string, string>>,
+  headers: readonly [string, string][],
   signal: AbortSignal,
 ): Promise<void> {
   let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...headers,
-      },
+      headers: new Headers([["content-type", "application/json"], ...headers]),
       body: JSON.stringify(wake),
       redirect: "error",
       signal: AbortSignal.any([signal, AbortSignal.timeout(WEBHOOK_TIMEOUT_MS)]),

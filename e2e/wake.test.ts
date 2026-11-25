@@ -15,13 +15,17 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-function waitForExit(child: ChildProcess): Promise<number | null> {
+function waitForExit(child: ChildProcess, timeoutMs = 5000): Promise<number | null> {
   return new Promise((resolve) => {
     if (child.exitCode !== null || child.signalCode !== null) {
       resolve(child.exitCode);
       return;
     }
+    const deadline = setTimeout(() => {
+      child.kill("SIGKILL");
+    }, timeoutMs);
     child.once("exit", (code) => {
+      clearTimeout(deadline);
       resolve(code);
     });
   });
@@ -207,6 +211,42 @@ void test("fleet watch streams filtered NDJSON wakes and rejects invalid flags",
   }
 });
 
+void test("fleet watch exits cleanly when the NDJSON consumer closes the pipe", async () => {
+  const server = await startServerWithStaleCard("Stale pipe seed card");
+  try {
+    const child = spawn(process.execPath, [BIN_PATH, "watch", "--mate", "cleo"], {
+      env: { ...process.env, BOARD_URL: server.url },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let sawWake = false;
+    child.stdout.once("data", () => {
+      sawWake = true;
+    });
+    try {
+      await waitFor(() => sawWake);
+      assert.equal(sawWake, true);
+      child.stdout.destroy();
+      await waitFor(async () => {
+        if (child.exitCode !== null || child.signalCode !== null) return true;
+        await server.client.createCard({
+          mate: "cleo",
+          title: "After pipe close",
+          actor: "1stmate",
+        });
+        return false;
+      }, 5000);
+      assert.equal(await waitForExit(child), 0);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await waitForExit(child);
+      }
+    }
+  } finally {
+    await server.stop();
+  }
+});
+
 void test("fleet watch --webhook POSTs JSON wakes with custom header and survives transient 500s", async () => {
   const server = await startServerWithStaleCard("Stale webhook seed card");
 
@@ -378,15 +418,27 @@ void test("fleet channel speaks Claude Code MCP Channel protocol over stdio and 
       assert.ok(isRecord(capabilities) && isRecord(capabilities["experimental"]));
       assert.ok(Object.hasOwn(capabilities["experimental"], "claude/channel"));
 
+      await server.client.createCard({
+        mate: "cleo",
+        title: "Handshake gap card",
+        actor: "1stmate",
+      });
       assert.equal(await waitFor(() => messages.some((m) => isChannelPush(m)), 400), false);
 
       child.stdin.write(
         `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`,
       );
-      await waitFor(() => messages.some((m) => isChannelPush(m)));
-      const chase = messages.find((m) => isChannelPush(m));
-      assert.ok(chase !== undefined && isRecord(chase["params"]));
-      assert.match(strField(chase["params"], "content"), /Stale channel seed card/u);
+      const pushContents = (): string[] =>
+        messages
+          .filter((m) => isChannelPush(m))
+          .map((m) => (isRecord(m["params"]) ? strField(m["params"], "content") : ""));
+      await waitFor(
+        () =>
+          pushContents().some((c) => c.includes("Handshake gap card")) &&
+          pushContents().some((c) => c.includes("Stale channel seed card")),
+      );
+      assert.ok(pushContents().some((c) => c.includes("Handshake gap card")));
+      assert.ok(pushContents().some((c) => c.includes("Stale channel seed card")));
 
       const card = await server.client.createCard({
         mate: "cleo",
@@ -394,10 +446,14 @@ void test("fleet channel speaks Claude Code MCP Channel protocol over stdio and 
         actor: "1stmate",
       });
 
-      await waitFor(() => messages.filter((m) => isChannelPush(m)).length > 1);
-      const notif = messages.filter((m) => isChannelPush(m))[1];
+      await waitFor(() => pushContents().some((c) => c.includes("Channel MCP card")));
+      const notif = messages.find(
+        (m) =>
+          isChannelPush(m) &&
+          isRecord(m["params"]) &&
+          strField(m["params"], "content").includes("Channel MCP card"),
+      );
       assert.ok(notif !== undefined && isRecord(notif["params"]));
-      assert.match(strField(notif["params"], "content"), /Channel MCP card/u);
       const meta = notif["params"]["meta"];
       assert.ok(isRecord(meta));
       for (const key of Object.keys(meta)) {

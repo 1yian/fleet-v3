@@ -205,7 +205,7 @@ Now the captain simply runs:
 cd ~/Projects/fleet-v3 && ypi
 ```
 
-`src/adapters/pi.ts` automatically loads `prompts/mate.md`, injects live ambient context, subscribes to `1stmate`'s SSE stream, and stays idempotent if a `fleet-v3` `2ndmate` launches with `FLEET_MATE=fleet-v3`.
+`src/adapters/pi.ts` automatically loads `prompts/mate.md`, injects live ambient context, subscribes to `1stmate`'s SSE stream, and attaches only once per Pi instance. Pi discovers this project extension, and Claude Code reads `.mcp.json`, in any session launched from `~/Projects/fleet-v3`, so never use the `fleet-v3` checkout as the `cwd` of a `2ndmate` or crewmate. Give every `2ndmate` its own domain repo or state directory so its hooks stay launch-command-only.
 
 ### Option B: Claude Code as `1stmate` (native Channel MCP from the git checkout)
 
@@ -386,4 +386,10 @@ Finally verify crewmate worktree execution on a local repo:
 
 ```bash
 FLEET_MATE=1stmate fleet dispatch --project Cleo --host macbook --delivery local --title "Smoke test: print git status and exit cleanly"
+```
+
+Dispatch only queues the card. Read the card id it prints, wait for the runner to claim and finish it, then inspect that exact card and confirm it ran to completion rather than staying queued:
+
+```bash
+fleet view <card-id> --full
 ```

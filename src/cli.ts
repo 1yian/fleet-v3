@@ -35,7 +35,7 @@ import {
   postWakeWebhook,
   validateWebhookUrl,
   watchMateWakes,
-  writeLine,
+  createLineWriter,
 } from "./board/wake.ts";
 import { extractMateParents, loadFleetConfig, type FleetConfig } from "./config.ts";
 import { ensureMatesUp, listMates, stopMates } from "./mates.ts";
@@ -350,12 +350,12 @@ async function watchCommand(
     throw new AxiError("--header requires --webhook <url>", "VALIDATION_ERROR", [WATCH_HELP]);
   }
   let webhookUrl: string | undefined;
-  const headers: Record<string, string> = {};
+  const headers: [string, string][] = [];
   try {
     if (rawWebhook !== undefined) webhookUrl = validateWebhookUrl(rawWebhook);
     if (rawHeader !== undefined) {
       const [name, value] = parseHeaderFlag(rawHeader);
-      headers[name] = value;
+      headers.push([name, value]);
     }
   } catch (error) {
     throw new AxiError(error instanceof Error ? error.message : String(error), "VALIDATION_ERROR", [
@@ -372,6 +372,7 @@ async function watchCommand(
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
+  const writeStdout = createLineWriter(process.stdout, controller);
 
   try {
     const client = ctx.board();
@@ -386,7 +387,7 @@ async function watchCommand(
           await postWakeWebhook(webhookUrl, wake, headers, controller.signal);
           return;
         }
-        await writeLine(process.stdout, `${JSON.stringify(wake)}\n`, controller.signal);
+        await writeStdout(`${JSON.stringify(wake)}\n`);
       },
       onError(error) {
         process.stderr.write(
@@ -434,7 +435,7 @@ async function channelCommand(
     await runFleetChannel({
       client: ctx.board(),
       mate,
-      signal: controller.signal,
+      controller,
     });
   } finally {
     process.removeListener("SIGINT", stop);
