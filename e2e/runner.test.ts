@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -1126,11 +1127,36 @@ void test("a checkout whose post-checkout hook fails leaves no worktree, scratch
   }
 });
 
-void test("a checkout Git refuses to remove is reported with its path, after a failed setup and after a finished claim", async () => {
+function restoreScratch(projectRoot: string): void {
+  const tmp = join(projectRoot, "tmp");
+  for (const dir of listed(tmp)) chmodSync(join(tmp, dir), 0o700);
+}
+
+function assertCheckoutReservationReleased(projectRoot: string, checkout: string): void {
+  const probe = new DatabaseSync(join(projectRoot, "locks", `${checkout}.lock`));
+  try {
+    probe.exec("BEGIN EXCLUSIVE");
+  } finally {
+    probe.close();
+  }
+}
+
+void test("Git removal stays visible despite scratch and reporting failures, without finishing twice", async (t) => {
+  const cannotRemoveScratch = process.getuid?.() !== 0;
   const hookRoot = makeTempDir("fleet-v3-untracked-hook-");
   const hookRepo = initGitRepo(hookRoot);
+  const hookProject = join(hookRoot, "workspaces", "cleo", "demo");
   const hookPath = join(hookRepo, ".git", "hooks", "post-checkout");
-  writeFileSync(hookPath, "#!/bin/sh\necho junk > untracked.txt\nexit 1\n");
+  writeFileSync(
+    hookPath,
+    [
+      "#!/bin/sh",
+      "echo junk > untracked.txt",
+      `for d in ${JSON.stringify(join(hookProject, "tmp"))}/c-*; do touch "$d/keep" && chmod 500 "$d"; done`,
+      "exit 1",
+      "",
+    ].join("\n"),
+  );
   chmodSync(hookPath, 0o755);
   const setupBoard = await startTestServer();
   try {
@@ -1142,56 +1168,118 @@ void test("a checkout Git refuses to remove is reported with its path, after a f
       delivery: "direct-pr",
     });
     await runLoop(setupBoard.client, makeConfig(hookRoot, hookRepo), { once: true });
-    const left = join(hookRoot, "workspaces", "cleo", "demo", "worktrees", "c-1-a1");
+    const left = join(hookProject, "worktrees", "c-1-a1");
     assert.equal(await cardField(setupBoard.client, card.id, "state"), "held");
     assert.ok(existsSync(join(left, "untracked.txt")), "the unforced rollback leaves the checkout");
-    const { entries } = await setupBoard.client.getThread(card.id);
-    const report = entries.map((entry) => entry.text).join("\n");
-    assert.ok(report.includes("git worktree add"), "the setup failure is reported");
-    assert.ok(
-      report.includes(`left the checkout at ${left}`),
-      "the cleanup failure names the left-behind path",
-    );
+    const { card: held, entries } = await setupBoard.client.getThread(card.id);
+    const report = held.result ?? entries.map((entry) => entry.text).join("\n");
+    assert.match(report, /git worktree add[\s\S]+git worktree remove failed/u);
+    assert.ok(report.includes(`left the checkout at ${left}`));
+    if (cannotRemoveScratch)
+      assert.match(report, /git worktree remove failed[\s\S]+Could not remove scratch directory/u);
+    assertCheckoutReservationReleased(hookProject, "c-1-a1");
   } finally {
+    restoreScratch(hookProject);
     await setupBoard.stop();
   }
 
   const lockRoot = makeTempDir("fleet-v3-locked-checkout-");
   const lockRepo = initGitRepo(lockRoot);
+  const lockProject = join(lockRoot, "workspaces", "cleo", "demo");
   const lockBoard = await startTestServer();
+  const { client } = lockBoard;
+  const config = makeConfig(lockRoot, lockRepo, {
+    spawn: {
+      mode: "local",
+      viewport: "headless",
+      direnv: false,
+      command: [
+        "node",
+        "-e",
+        `
+        const { FLEET_WORKTREE: wt, TMPDIR: scratch } = process.env;
+        const fs = require("node:fs");
+        require("node:child_process").execFileSync("git", ["-C", wt, "worktree", "lock", wt]);
+        fs.writeFileSync(require("node:path").join(scratch, "keep"), "");
+        fs.chmodSync(scratch, 0o500);
+      `,
+      ],
+    },
+  });
   try {
-    const card = await lockBoard.client.createCard({
-      mate: "cleo",
-      title: "Worker locks its checkout",
-      host: "test-host",
-      project: "demo",
-      delivery: "direct-pr",
-    });
-    const lockWorker =
-      'const wt = process.env.FLEET_WORKTREE; require("node:child_process").execFileSync("git", ["-C", wt, "worktree", "lock", wt]);';
-    await runLoop(
-      lockBoard.client,
-      makeConfig(lockRoot, lockRepo, {
-        spawn: {
-          mode: "local",
-          viewport: "headless",
-          direnv: false,
-          command: ["node", "-e", lockWorker],
-        },
-      }),
-      { once: true },
-    );
-    assert.equal(await cardField(lockBoard.client, card.id, "state"), "done");
-    const { entries } = await lockBoard.client.getThread(card.id);
-    assert.ok(
-      entries.some(
-        (entry) =>
-          entry.text.includes("could not clean up the checkout") &&
-          entry.text.includes("left the checkout at"),
-      ),
-      "teardown failure is reported on the card after the claim finished",
-    );
+    for (const rejectsReporting of [false, true]) {
+      const card = await client.createCard({
+        mate: "cleo",
+        title: "Worker locks its checkout",
+        host: "test-host",
+        project: "demo",
+        delivery: "direct-pr",
+      });
+      const checkout = `c-${card.id}-a1`;
+      const reports: string[] = [];
+      const finishes: string[] = [];
+      const stderr = t.mock.method(process.stderr, "write", (chunk: string | Uint8Array) => {
+        reports.push(String(chunk));
+        return true;
+      });
+      const close = rejectsReporting
+        ? t.mock.method(DatabaseSync.prototype, "close", () => {
+            throw new Error("reservation close failed");
+          })
+        : undefined;
+      try {
+        await runLoop(
+          rejectsReporting
+            ? {
+                ...client,
+                finishClaim: async (id, input) => {
+                  finishes.push(input.outcome);
+                  await client.finishClaim(id, input);
+                  throw new Error("finish response lost");
+                },
+                postEntry: (id, input, signal) =>
+                  input.token === undefined
+                    ? Promise.reject(new Error("status post refused"))
+                    : client.postEntry(id, input, signal),
+              }
+            : client,
+          config,
+          { once: true },
+        );
+      } finally {
+        const failedReservation = close?.mock.calls[0]?.this;
+        close?.mock.restore();
+        stderr.mock.restore();
+        if (failedReservation instanceof DatabaseSync) failedReservation.close();
+      }
+      const thread = await client.getThread(card.id);
+      assert.equal(thread.card.state, "done");
+      assert.match(thread.card.result ?? "", /Completed on test-host/u);
+      const status = thread.entries.find((entry) => entry.text.includes("teardown for card"));
+      if (rejectsReporting) {
+        assert.deepEqual(finishes, ["done"]);
+        assert.match(reports.join(""), /finish response lost[\s\S]+intended outcome done/u);
+        assert.match(
+          reports.join(""),
+          /git worktree remove failed[\s\S]+reservation close failed[\s\S]+status post refused/u,
+        );
+      } else {
+        assert.equal(status?.kind, "status");
+        assert.equal(status.internal, true);
+      }
+      const report = rejectsReporting ? reports.join("") : (status?.text ?? "");
+      assert.ok(
+        report.includes(`left the checkout at ${join(lockProject, "worktrees", checkout)}`),
+      );
+      if (cannotRemoveScratch)
+        assert.match(
+          report,
+          /git worktree remove failed[\s\S]+Could not remove scratch directory/u,
+        );
+      assertCheckoutReservationReleased(lockProject, checkout);
+    }
   } finally {
+    restoreScratch(lockProject);
     await lockBoard.stop();
   }
 });
@@ -1305,13 +1393,28 @@ async function runOneCard(root: string, repoDir: string, receiptPath: string): P
   }
 }
 
-void test("a branch name blocked by a ref namespace conflict takes a suffix, while a Git lock failure does not", async () => {
+void test("a ref namespace conflict or a missing registered checkout takes a suffix, while a Git lock failure does not", async () => {
   const conflictRoot = makeTempDir("fleet-v3-namespace-");
   const conflictRepo = initGitRepo(conflictRoot);
   const conflictReceipt = join(conflictRoot, "receipt.txt");
   execFileSync("git", ["-C", conflictRepo, "branch", "c-1-a1/topic"]);
   await runOneCard(conflictRoot, conflictRepo, conflictReceipt);
   assert.match(readFileSync(conflictReceipt, "utf8"), /^c-1-a1-[a-zA-Z0-9]{6}$/u);
+
+  const missingRoot = makeTempDir("fleet-v3-missing-checkout-");
+  const missingRepo = initGitRepo(missingRoot);
+  const missingReceipt = join(missingRoot, "receipt.txt");
+  const missing = join(missingRoot, "workspaces", "cleo", "demo", "worktrees", "c-1-a1");
+  execFileSync("git", ["-C", missingRepo, "worktree", "add", "--detach", missing], {
+    stdio: "ignore",
+  });
+  rmSync(missing, { recursive: true });
+  await runOneCard(missingRoot, missingRepo, missingReceipt);
+  assert.match(readFileSync(missingReceipt, "utf8"), /^c-1-a1-[a-zA-Z0-9]{6}$/u);
+  const registered = execFileSync("git", ["-C", missingRepo, "worktree", "list", "--porcelain"], {
+    encoding: "utf8",
+  });
+  assert.match(registered, /worktree .*[/\\]c-1-a1\nHEAD [a-f0-9]+\ndetached/u);
 
   const lockRoot = makeTempDir("fleet-v3-lock-");
   const lockRepo = initGitRepo(lockRoot);
@@ -1430,52 +1533,55 @@ void test("runner processes on different repos sharing a checkout root never tak
   }
 });
 
-void test("a checkout another repo creates at the reserved path survives this attempt's failed worktree add", async () => {
-  const root = makeTempDir("fleet-v3-late-occupant-");
-  mkdirSync(join(root, "a"));
-  mkdirSync(join(root, "b"));
-  const repoA = initGitRepo(join(root, "a"));
-  const repoB = initGitRepo(join(root, "b"));
-  const occupied = join(root, "workspaces", "cleo", "demo", "worktrees", "c-1-a1");
-  const hook = join(repoA, ".git", "hooks", "reference-transaction");
-  writeFileSync(
-    hook,
-    [
-      "#!/bin/sh",
-      '[ "$1" = prepared ] || exit 0',
-      "grep -q ' refs/heads/c-1-a1$' || exit 0",
-      `[ ! -e ${JSON.stringify(occupied)} ] || exit 0`,
-      `env -i PATH="$PATH" HOME="$HOME" git -C ${JSON.stringify(repoB)} worktree add -q -b other ${JSON.stringify(occupied)}`,
-      `echo uncommitted > ${JSON.stringify(join(occupied, "dirty.txt"))}`,
-      "",
-    ].join("\n"),
-  );
-  chmodSync(hook, 0o755);
+void test("a checkout Git creates for a different branch at the reserved path survives this attempt's failed worktree add", async () => {
+  for (const sameRepo of [false, true]) {
+    const root = makeTempDir("fleet-v3-late-occupant-");
+    mkdirSync(join(root, "a"));
+    mkdirSync(join(root, "b"));
+    const repoA = initGitRepo(join(root, "a"));
+    const repoB = sameRepo ? repoA : initGitRepo(join(root, "b"));
+    const occupied = join(root, "workspaces", "cleo", "demo", "worktrees", "c-1-a1");
+    const hook = join(repoA, ".git", "hooks", "reference-transaction");
+    writeFileSync(
+      hook,
+      [
+        "#!/bin/sh",
+        '[ "$1" = prepared ] || exit 0',
+        "grep -q ' refs/heads/c-1-a1$' || exit 0",
+        `[ ! -e ${JSON.stringify(occupied)} ] || exit 0`,
+        `env -i PATH="$PATH" HOME="$HOME" git -C ${JSON.stringify(repoB)} worktree add -q -b other ${JSON.stringify(occupied)}`,
+        ...(sameRepo ? [] : [`echo uncommitted > ${JSON.stringify(join(occupied, "dirty.txt"))}`]),
+        "",
+      ].join("\n"),
+    );
+    chmodSync(hook, 0o755);
 
-  const board = await startTestServer();
-  try {
-    await board.client.createCard({
-      mate: "cleo",
-      title: "Late occupant card",
-      host: "test-host",
-      project: "demo",
-      delivery: "direct-pr",
+    const board = await startTestServer();
+    try {
+      const card = await board.client.createCard({
+        mate: "cleo",
+        title: "Late occupant card",
+        host: "test-host",
+        project: "demo",
+        delivery: "direct-pr",
+      });
+      await runLoop(board.client, makeConfig(root, repoA), { once: true });
+      assert.equal(await cardField(board.client, card.id, "state"), "held");
+    } finally {
+      await board.stop();
+    }
+
+    if (!sameRepo) assert.equal(readFileSync(join(occupied, "dirty.txt"), "utf8"), "uncommitted\n");
+    assert.ok(existsSync(join(occupied, "README.md")), "the other branch's checkout is intact");
+    const worktreesOfB = execFileSync("git", ["-C", repoB, "worktree", "list", "--porcelain"], {
+      encoding: "utf8",
     });
-    await runLoop(board.client, makeConfig(root, repoA), { once: true });
-  } finally {
-    await board.stop();
+    assert.ok(worktreesOfB.includes("refs/heads/other"));
+    const branchesOfA = execFileSync("git", ["-C", repoA, "branch", "--list", "c-*"], {
+      encoding: "utf8",
+    });
+    assert.equal(branchesOfA.trim(), "", "the failed attempt's own branch is removed");
   }
-
-  assert.equal(readFileSync(join(occupied, "dirty.txt"), "utf8"), "uncommitted\n");
-  assert.ok(existsSync(join(occupied, "README.md")), "the other repo's checkout is intact");
-  const worktreesOfB = execFileSync("git", ["-C", repoB, "worktree", "list", "--porcelain"], {
-    encoding: "utf8",
-  });
-  assert.ok(worktreesOfB.includes("refs/heads/other"));
-  const branchesOfA = execFileSync("git", ["-C", repoA, "branch", "--list", "c-*"], {
-    encoding: "utf8",
-  });
-  assert.equal(branchesOfA.trim(), "", "the failed attempt's own branch is removed");
 });
 
 void test("runners on one host serving different boards never share a checkout, scratch directory, or branch", async () => {

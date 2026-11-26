@@ -38,7 +38,11 @@ export interface BoardClient {
   readonly listCards: (query?: ListCardsQuery, signal?: AbortSignal) => Promise<CardPage>;
   readonly createCard: (input: CreateCardInput) => Promise<Card>;
   readonly getThread: (id: string, scope?: string) => Promise<CardThread>;
-  readonly postEntry: (id: string, input: PostEntryInput) => Promise<PostedEntry>;
+  readonly postEntry: (
+    id: string,
+    input: PostEntryInput,
+    signal?: AbortSignal,
+  ) => Promise<PostedEntry>;
   readonly queueCard: (id: string, input: QueueCardInput) => Promise<Card>;
   readonly escalateCard: (id: string, input: EscalateCardInput) => Promise<Card>;
   readonly handoffCard: (id: string, input: HandoffCardInput) => Promise<Card>;
@@ -195,10 +199,11 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
       const qs = scope !== undefined ? `?scope=${encodeURIComponent(scope)}` : "";
       return requestJson(cleanBase, `/api/cards/${encodeURIComponent(id)}${qs}`, CardThreadSchema);
     },
-    postEntry: (id, input) =>
+    postEntry: (id, input, signal) =>
       requestJson(cleanBase, `/api/cards/${encodeURIComponent(id)}/entries`, PostedEntrySchema, {
         method: "POST",
         body: input,
+        ...requestOptions(signal),
       }),
     queueCard: async (id, input) => {
       const res = await requestJson(

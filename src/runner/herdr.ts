@@ -187,7 +187,7 @@ export async function closeHerdrPane(
   const shouldClose =
     options.keepPane === "never" || (options.keepPane === "on-failure" && !options.failed);
   if (!shouldClose) return;
-  await runHerdr(handle.session, ["pane", "close", handle.paneId]).catch(() => undefined);
+  await runHerdr(handle.session, ["pane", "close", handle.paneId]);
 }
 
 function readRecordedPid(pidFile: string): number | undefined {
