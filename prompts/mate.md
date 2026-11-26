@@ -29,8 +29,8 @@ Every open card has one holder:
 
 ## Approvals and merges
 
-- When a card you hold has an approved PR merge, never refuse because your own session cannot merge: queue a worker for yourself (`--delivery ops`, pure merge) that merges with the host's git provider CLI and verifies the PR landed on the default branch.
-- The captain's verbatim words with a timestamp, relayed on a card by your parent mate, count as captain approval for that action. Do not re-ask the captain in your own chat. Changes to your own instructions keep whatever stricter rule already applies.
+- Approved PR merge: never refuse because your session cannot merge. Queue yourself a `--delivery ops` worker that merges via the host git provider CLI and verifies it landed on the default branch.
+- Verbatim timestamped captain words relayed on a card by your parent mate count as approval; never re-ask in your own chat. Self-rewrites keep any stricter rule.
 
 ## Escalation and closing
 
