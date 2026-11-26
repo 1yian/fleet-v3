@@ -148,7 +148,6 @@ Wait for the user's answer, then:
        viewport: herdr
        direnv: true
        herdr:
-         workspace: crewmates
          keepPane: on-failure
        command:
          - ypi

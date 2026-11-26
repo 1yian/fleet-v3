@@ -250,7 +250,6 @@ async function handleVerification(params: {
 function openWorkerPane(
   config: RunnerConfig,
   claim: ClaimReceipt,
-  project: string,
   workspace: TaskWorkspace,
   delivery: Delivery,
   signal: AbortSignal,
@@ -258,10 +257,7 @@ function openWorkerPane(
   if (config.spawn.viewport !== "herdr") return Promise.resolve(undefined);
   return openHerdrPane({
     config: resolveHerdrConfig(config.spawn),
-    host: config.host,
-    channel: claim.card.mate,
-    project,
-    taskId: claim.card.id,
+    cardId: claim.card.id,
     branch: workspace.branch,
     delivery,
     mode: config.spawn.mode,
@@ -286,6 +282,32 @@ async function abandonLaunch(
   await client
     .releaseClaim(claim.card.id, { epoch: claim.epoch, token: claim.token })
     .catch(() => undefined);
+}
+
+async function teardownWorkspace(
+  client: BoardClient,
+  config: RunnerConfig,
+  cardId: string,
+  workspace: TaskWorkspace,
+): Promise<void> {
+  try {
+    await cleanupWorkspace(workspace);
+  } catch (cleanupError) {
+    const reason = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+    try {
+      await client.postEntry(cardId, {
+        text: `Runner ${config.host} could not clean up the checkout for card #${cardId}: ${reason}`,
+        by: runnerActor(config.host),
+        internal: true,
+        kind: "status",
+      });
+    } catch (postError) {
+      const postReason = postError instanceof Error ? postError.message : String(postError);
+      process.stderr.write(
+        `Runner ${config.host} could not clean up ${workspace.worktreePath} for card #${cardId}: ${reason}; reporting it failed: ${postReason}\n`,
+      );
+    }
+  }
 }
 
 async function runClaim(
@@ -352,7 +374,7 @@ async function runClaim(
     });
     preparedWorkspace = workspace;
 
-    pane = await openWorkerPane(config, claim, project, workspace, delivery, controller.signal);
+    pane = await openWorkerPane(config, claim, workspace, delivery, controller.signal);
     const paneSuffix = pane === undefined ? "" : `, herdr ${pane.paneId}`;
     await client.postEntry(cardId, {
       epoch: claim.epoch,
@@ -437,7 +459,9 @@ async function runClaim(
         });
       }
     } finally {
-      if (preparedWorkspace !== undefined) await cleanupWorkspace(preparedWorkspace);
+      if (preparedWorkspace !== undefined) {
+        await teardownWorkspace(client, config, cardId, preparedWorkspace);
+      }
     }
   }
 }

@@ -19,6 +19,12 @@ Read [VISION.md](VISION.md) for the design principles, [SETUP.md](SETUP.md) for 
 - `fleet.example.yaml` - configuration template. One shared `~/.fleet/fleet.yaml` can serve every command (`fleet serve`, `fleet run`, `fleet mates up`) with relative paths resolved against `fleet.yaml`'s directory.
 - `e2e/` - end-to-end tests against real `node:sqlite`, live HTTP/SSE servers, real webhook + MCP stdio channel processes, real git worktrees, Apple containers, and isolated Herdr sessions.
 
+## Worker names
+
+Each worker gets its own Herdr workspace in the configured session. The workspace label uses the first four ASCII alphanumeric runs from the lowercased card title, joined with hyphens and capped at 40 characters. A title with no ASCII alphanumeric runs falls back to `c-<card-id>`, so `修复登录` on card 19 becomes `c-19`. Permanent mate names are unchanged.
+
+The worktree directory and Git branch use `c-<card-id>-a<claim-epoch>`. If that name is already taken by a local branch (or a branch under the same name prefix) or by a checkout directory in the shared workspaces root, a short suffix is added to both. Uniqueness covers local refs and local checkout paths only, including boards that share them; remote branches are not consulted. For example, the first claim of card #19, `Restore original worker names today`, opens a Herdr workspace named `restore-original-worker-names` with worktree and branch `c-19-a1`.
+
 ## Quick start
 
 1. Run `bun install && bun run check`.
