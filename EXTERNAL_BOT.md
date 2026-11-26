@@ -17,7 +17,7 @@ Ask the captain only for anything missing from their message:
 Then create or configure a dedicated bot instance for that mate:
 
 1. **System instructions:** load and follow [`prompts/mate.md`](https://raw.githubusercontent.com/1yian/fleet-v3/main/prompts/mate.md) as the bot's operating prompt.
-2. **Identity & board config:** with Option A, bind `FLEET_MATE=<mate>` and `BOARD_URL=<url>` in the bot's environment or instructions. With Option B, attach the MCP URL for `<mate>` instead.
+2. **Identity & board config:** with Option A, create a bot-local file `fleet-<mate>.env` in the bot's working directory containing `export FLEET_MATE=<mate>` and `export BOARD_URL=<url>`, and source it before every `fleet` command. With Option B, attach the MCP URL for `<mate>` instead.
 3. **Domain charter & preferences:** at startup (or when checking context), read your charter and the captain's preferences from Fleet (`fleet charter <mate>` / `fleet prefs` via CLI, or the read-only `fleet_charter` / `fleet_prefs` via MCP).
 
 ---
@@ -90,9 +90,9 @@ Every wake arrives as `POST <webhook-url>` with `Content-Type: application/json`
 
 Pass the webhook body's `notice` and `cardId` (if present) to the bot and return HTTP `2xx` once the wake is accepted. Keep behavior in the mate prompt and charter, not in the webhook. Use a one-line wake prompt such as:
 
-> Fleet wake: source `<env file>`, load the `fleet-mate` skill (or `prompts/mate.md`), run `fleet view <cardId> --full` for the `cardId` in the webhook body if present, and handle the wake; message the captain only for a real decision or finished work.
+> Fleet wake: source `fleet-<mate>.env`, load the `fleet-mate` skill (or `prompts/mate.md`), run `fleet view <cardId> --full` for the `cardId` in the webhook body if present, and handle the wake; message the captain only for a real decision or finished work.
 
-For an MCP-only bot, omit the environment file step and use `fleet_view` instead of the CLI.
+For an MCP-only bot, omit the `fleet-<mate>.env` step and use `fleet_view` instead of the CLI.
 
 _(If your bot runs on the same host and consumes a local stream instead of HTTP webhooks, run bare `fleet watch --mate <mate>` to receive the same JSON envelope as NDJSON lines on stdout.)_
 
