@@ -15,7 +15,7 @@ Read [VISION.md](VISION.md) for the design principles, [SETUP.md](SETUP.md) for 
 - `src/runner/` - `fleet-runner` claiming queued cards for a host, managing git worktrees, `direnv`, container isolation (`docker` on Linux or Apple `container` on macOS), ephemeral interactive `herdr` panes, process-group timeouts, and 4-round capped `no-mistakes` verification.
 - `src/mates.ts` - `fleet chat`, `fleet doctor`, and `fleet mates` manage `1stmate` (`parent: captain`) and domain `2ndmate`s (`parent: 1stmate`) with launch-command hook injection (`{adapter}`, `{mcpConfig}`, `{prompt}`) and explicit `mode: external` support for webhook bots.
 - `src/adapters/` - thin optional viewports and wake bridges: the Pi/ypi native extension (`pi.ts`), Claude Code native stdio Channel MCP server (`channel.ts`, invoked via `fleet channel`), Fleet MCP tool server (`mcp.ts`, stdio or Streamable HTTP via `fleet mcp`), and visual Kanban UI (`kanban.ts`, served only by `fleet web`).
-- `prompts/` - always-loaded role prompts for mates and workers (`prompts/mate.md`, `prompts/worker.md` - under 1,000 words total).
+- `prompts/` - always-loaded role prompts for mates and workers (`prompts/mate.md`, `prompts/worker.md` - under 1,100 words total).
 - `fleet.example.yaml` - configuration template. One shared `~/.fleet/fleet.yaml` can serve every command (`fleet serve`, `fleet run`, `fleet mates up`) with relative paths resolved against `fleet.yaml`'s directory.
 - `e2e/` - end-to-end tests against real `node:sqlite`, live HTTP/SSE servers, real webhook + MCP stdio channel processes, real git worktrees, Apple containers, and isolated Herdr sessions.
 

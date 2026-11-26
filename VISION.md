@@ -69,7 +69,7 @@ A restart, session reset, or harness swap is a non-event because durable work st
 
 ## Simplicity is defended by subtraction
 
-Always-loaded prompts stay lean and under 1,000 words total (`prompts/mate.md` and `prompts/worker.md`); any behavior that requires a 500-word prompt protocol is a design flaw to delete, not a rule to document.
+Always-loaded prompts stay lean and under 1,100 words total (`prompts/mate.md` and `prompts/worker.md`); any behavior that requires a 500-word prompt protocol is a design flaw to delete, not a rule to document.
 Verification rigor belongs to `no-mistakes` and repository CI, with `fleet-runner` capping `no-mistakes` review loops at four rounds so runs converge instead of spiraling into speculative guards.
 When a run still has open findings after four rounds, `fleet-runner` never force-ships an unpassed branch: it returns the card to `held (holder = card.mate)` so the mate can dismiss false positives with a recorded reason, rescope, or escalate.
 
