@@ -11,21 +11,22 @@ This guide is for non-coding and chat-based agent platforms (such as **Grok Bot*
 Ask the captain only for anything missing from their message:
 
 - **Mate name:** defaults to `1stmate` (or a domain name like `cleo` for a `2ndmate`).
-- **`BOARD_URL`:** the HTTP URL of the captain's Fleet Card Server reachable from your runtime (for example `http://127.0.0.1:4100` on the same machine, or a private Tailscale/tunnel URL).
+- **Option A (shell access):** `BOARD_URL`, the HTTP URL of the captain's Fleet Card Server reachable from your runtime (for example `http://127.0.0.1:4100` on the same machine, or a private Tailscale/tunnel URL).
+- **Option B (no shell access):** the Fleet MCP URL only (for example `http://<reachable-ip>:4102/mcp?mate=<mate>`). You do not need the Card Server URL; `BOARD_URL` stays on the Control Host process that runs `fleet mcp`.
 
 Then create or configure a dedicated bot instance for that mate:
 
 1. **System instructions:** load and follow [`prompts/mate.md`](https://raw.githubusercontent.com/1yian/fleet-v3/main/prompts/mate.md) as the bot's operating prompt.
-2. **Identity & board config:** bind `FLEET_MATE=<mate>` and `BOARD_URL=<url>` in the bot's environment or instructions.
-3. **Domain charter & preferences:** at startup (or when checking context), read your charter and the captain's preferences from the Card Server (`fleet charter <mate>` and `fleet prefs`, or the HTTP endpoints below).
+2. **Identity & board config:** with Option A, bind `FLEET_MATE=<mate>` and `BOARD_URL=<url>` in the bot's environment or instructions. With Option B, attach the MCP URL for `<mate>` instead.
+3. **Domain charter & preferences:** at startup (or when checking context), read your charter and the captain's preferences from Fleet (`fleet charter <mate>` / `fleet prefs` via CLI, or the read-only `fleet_charter` / `fleet_prefs` via MCP).
 
 ---
 
 ## 2. How the Bot Talks to Fleet
 
-Use whichever access path your runtime has:
+Prefer **Option A (`fleet` CLI)** whenever your runtime has shell access. Otherwise use **Option B (MCP)** - never call raw Card Server REST endpoints manually.
 
-### Option A: Shell access (`fleet` CLI on `PATH`)
+### Option A (Preferred): Shell access (`fleet` CLI on `PATH`)
 
 Run `fleet` commands with `FLEET_MATE=<mate>` and `BOARD_URL=<url>`:
 
@@ -42,24 +43,25 @@ Run `fleet` commands with `FLEET_MATE=<mate>` and `BOARD_URL=<url>`:
 - `fleet close <id> [--text "..."]` / `fleet cancel <id> --reason "..."` - finish or cancel a card
 - `fleet hosts` / `fleet charter <mate>` / `fleet prefs`
 
-### Option B: Direct HTTP API (no shell / `fleet` CLI)
+### Option B (Fallback without shell access): Fleet MCP Server (`fleet mcp`)
 
-All JSON endpoints live under `<BOARD_URL>`:
+Connect your bot to Fleet's MCP tool server instead of shelling out:
 
-- `GET /api/health` - verify the Card Server is reachable
-- `GET /api/overview?scope=<mate>` - open counts, hosts, and active cards
-- `GET /api/cards?scope=<mate>&state=open` - list open cards in your subtree (optional `mate`, `holder`, `limit`)
-- `POST /api/cards` - create/dispatch a card (`{ mate, title, body?, actor, project?, host?, delivery?, needs? }`)
-- `GET /api/cards/:id?scope=<mate>` - read a card and its thread entries
-- `POST /api/cards/:id/entries` - post a reply (`{ by, text, kind? }`)
-- `POST /api/cards/:id/queue` - queue for a runner (`{ actor, project, host, delivery? }`)
-- `POST /api/cards/:id/escalate` - escalate to parent (`{ actor, reason }`)
-- `POST /api/cards/:id/handoff` - hand off (`{ actor, to?, text? }`)
-- `POST /api/cards/:id/answer` - answer escalation (`{ actor, text }`)
-- `POST /api/cards/:id/snooze` - defer chases (`{ actor, durationMs }` or `{ actor, until }`)
-- `POST /api/cards/:id/close` - close card (`{ actor, text? }`)
-- `POST /api/cards/:id/cancel` - cancel card (`{ actor, reason }`)
-- `GET /api/hosts`, `GET /api/charters/:mate`, `PUT /api/charters/:mate`, `GET /api/prefs`, `PUT /api/prefs`
+- **Streamable HTTP MCP (for remote/cloud bots such as Grok Bot, Dots, Muse):**
+  Ask the captain (or their local setup agent) to run `fleet mcp --http --host <reachable-ip> --port 4102` on the Control Host with `BOARD_URL` pointing at the Card Server, then attach your bot to:
+  ```text
+  http://<reachable-ip>:4102/mcp?mate=<mate>
+  ```
+- **Stdio MCP (for local MCP-capable bots):**
+  Configure an MCP server entry running:
+  ```json
+  {
+    "command": "fleet",
+    "args": ["mcp", "--mate", "1stmate"]
+  }
+  ```
+
+Both MCP transports expose the exact same scoped tools for `<mate>`: `fleet_overview`, `fleet_cards`, `fleet_view`, `fleet_dispatch`, `fleet_queue`, `fleet_reply`, `fleet_escalate`, `fleet_handoff`, `fleet_answer`, `fleet_snooze`, `fleet_close`, `fleet_cancel`, `fleet_hosts`, and the read-only `fleet_charter` and `fleet_prefs`.
 
 ---
 
@@ -89,7 +91,7 @@ Every wake arrives as `POST <webhook-url>` with `Content-Type: application/json`
 When a wake arrives:
 
 - Deliver `notice` (and `cardId` if present) to the `<mate>` bot.
-- The bot inspects the card (`fleet view <cardId> --full` or `GET /api/cards/<cardId>`), handles/delegates/closes it, and only pings the captain when a real decision is needed or final work is ready.
+- The bot inspects the card (`fleet view <cardId> --full` via CLI, or `fleet_view` via MCP), handles/delegates/closes it, and only pings the captain when a real decision is needed or final work is ready.
 - Return HTTP `2xx` once the wake is accepted.
 
 _(If your bot runs on the same host and consumes a local stream instead of HTTP webhooks, run bare `fleet watch --mate <mate>` to receive the same JSON envelope as NDJSON lines on stdout.)_

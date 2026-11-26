@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { AxiError, exitCodeForError, runAxiCli } from "axi-sdk-js";
 import { runFleetChannel } from "./adapters/channel.ts";
+import { runFleetMcpStdio, startFleetMcpHttpServer } from "./adapters/mcp.ts";
 import {
   answerCommand,
   cancelCommand,
@@ -68,6 +69,7 @@ Usage:
   fleet mates [subcommand]     Manage permanent interactive mate panes in Herdr
   fleet watch [flags]          Stream filtered mate wakes as NDJSON or POST to a webhook
   fleet channel [flags]        Run a stdio Claude Code Channel MCP server for a mate
+  fleet mcp [flags]            Run a Fleet MCP tool server (stdio or Streamable HTTP)
   fleet web [flags]            Serve a standalone Kanban viewport proxying to the Card Server
   fleet init [flags]           Create fleet.yaml from fleet.example.yaml
   fleet setup hooks [flags]    Install or check session-start hooks
@@ -133,12 +135,14 @@ function boardContext(options: RunFleetCliOptions): FleetAxiContext {
   };
 }
 
-function parsePort(raw: string, helpBlock: string): number {
+function parsePort(raw: string, helpBlock: string, minPort = 1): number {
   const port = Number(raw);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new AxiError("--port must be an integer between 1 and 65535", "VALIDATION_ERROR", [
-      helpBlock,
-    ]);
+  if (!Number.isInteger(port) || port < minPort || port > 65_535) {
+    throw new AxiError(
+      `--port must be an integer between ${String(minPort)} and 65535`,
+      "VALIDATION_ERROR",
+      [helpBlock],
+    );
   }
   return port;
 }
@@ -306,6 +310,16 @@ Usage:
   fleet channel [--mate <name>]
 Flags:
   --mate <name>            Mate name to watch (defaults to FLEET_MATE)`;
+
+const MCP_HELP = `fleet mcp - run a Fleet MCP tool server for external bots without shell access
+Usage:
+  fleet mcp [--mate <name>]
+  fleet mcp --http [--host 127.0.0.1] [--port 4102]
+Flags:
+  --mate <name>            Mate identity for tool calls (stdio only; HTTP clients pass ?mate=<name>)
+  --http                   Serve Streamable HTTP MCP at POST /mcp?mate=<name> instead of stdio
+  --host <addr>            HTTP bind host (requires --http, default: 127.0.0.1)
+  --port <port>            HTTP bind port (requires --http, default: 4102, 0 picks a free port)`;
 
 const CHAT_HELP = `fleet chat - launch 1stmate (or any configured mate) interactively in this terminal
 Usage:
@@ -479,6 +493,83 @@ async function channelCommand(
   return "";
 }
 
+async function mcpCommand(
+  args: readonly string[],
+  ctx: FleetAxiContext | undefined,
+): Promise<string> {
+  const parsed = parseStrictFlags(
+    "fleet mcp",
+    args,
+    {
+      mate: { type: "string" },
+      http: { type: "boolean" },
+      host: { type: "string" },
+      port: { type: "string" },
+    },
+    MCP_HELP,
+  );
+  if (boolFlag(parsed.values, "help")) return MCP_HELP;
+  if (parsed.positionals.length > 0) {
+    throw new AxiError(
+      `unexpected positional argument "${parsed.positionals[0] ?? ""}" for \`fleet mcp\``,
+      "VALIDATION_ERROR",
+      [MCP_HELP],
+    );
+  }
+  if (ctx === undefined) {
+    throw new AxiError("Fleet context not initialized", "INTERNAL_ERROR");
+  }
+  const httpMode = boolFlag(parsed.values, "http");
+  const rawHost = stringFlag(parsed.values, "host");
+  const rawPort = stringFlag(parsed.values, "port");
+  if (!httpMode && (rawHost !== undefined || rawPort !== undefined)) {
+    throw new AxiError("--host and --port require --http", "VALIDATION_ERROR", [MCP_HELP]);
+  }
+
+  if (httpMode) {
+    if (stringFlag(parsed.values, "mate") !== undefined) {
+      throw new AxiError("--mate is not accepted with --http", "VALIDATION_ERROR", [MCP_HELP]);
+    }
+    const host = rawHost ?? "127.0.0.1";
+    const port = parsePort(rawPort ?? "4102", MCP_HELP, 0);
+    const { url, stop } = await startFleetMcpHttpServer({
+      client: ctx.board(),
+      host,
+      port,
+    });
+    process.stderr.write(`fleet mcp listening at ${url} (upstream: ${ctx.boardUrl})\n`);
+    await new Promise<void>((resolve) => {
+      const shutdown = (): void => {
+        process.removeListener("SIGINT", shutdown);
+        process.removeListener("SIGTERM", shutdown);
+        void stop().finally(resolve);
+      };
+      process.once("SIGINT", shutdown);
+      process.once("SIGTERM", shutdown);
+    });
+    return "";
+  }
+
+  const mate = resolveRequiredMate(stringFlag(parsed.values, "mate"), MCP_HELP);
+  const controller = new AbortController();
+  const stop = (): void => {
+    controller.abort();
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  try {
+    await runFleetMcpStdio({
+      client: ctx.board(),
+      mate,
+      controller,
+    });
+  } finally {
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
+  }
+  return "";
+}
+
 async function chatCommand(args: readonly string[], options: RunFleetCliOptions): Promise<string> {
   const { head, extraArgs } = splitPassthroughArgs(args);
   const parsed = parseStrictFlags("fleet chat", head, { config: { type: "string" } }, CHAT_HELP);
@@ -561,7 +652,7 @@ export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<voi
   const first = argv[0];
   const rest = argv.slice(1);
   const bypassesAxi =
-    ((first === "watch" || first === "channel") && !hasHelpFlag(rest)) ||
+    ((first === "watch" || first === "channel" || first === "mcp") && !hasHelpFlag(rest)) ||
     (first === "chat" && !hasHelpFlag(splitPassthroughArgs(rest).head));
   if (bypassesAxi) {
     try {
@@ -569,7 +660,9 @@ export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<voi
         await chatCommand(rest, options);
       } else {
         const ctx = boardContext(options);
-        await (first === "watch" ? watchCommand(rest, ctx) : channelCommand(rest, ctx));
+        if (first === "watch") await watchCommand(rest, ctx);
+        else if (first === "channel") await channelCommand(rest, ctx);
+        else await mcpCommand(rest, ctx);
       }
     } catch (error) {
       if (error instanceof AxiError) {
@@ -598,6 +691,7 @@ export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<voi
       if (cmd === "mates") return MATES_HELP;
       if (cmd === "watch") return WATCH_HELP;
       if (cmd === "channel") return CHANNEL_HELP;
+      if (cmd === "mcp") return MCP_HELP;
       if (cmd === "chat") return CHAT_HELP;
       if (cmd === "doctor") return DOCTOR_HELP;
       return COMMAND_HELP[cmd];
@@ -639,6 +733,7 @@ export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<voi
       doctor: (args) => doctorCommand(args, options),
       watch: watchCommand,
       channel: channelCommand,
+      mcp: mcpCommand,
       web: webCommand,
     },
   });
