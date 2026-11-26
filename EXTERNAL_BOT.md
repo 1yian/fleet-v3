@@ -17,7 +17,7 @@ Ask the captain only for anything missing from their message:
 Then create or configure a dedicated bot instance for that mate:
 
 1. **System instructions:** load and follow [`prompts/mate.md`](https://raw.githubusercontent.com/1yian/fleet-v3/main/prompts/mate.md) as the bot's operating prompt.
-2. **Identity & board config:** with Option A, bind `FLEET_MATE=<mate>` and `BOARD_URL=<url>` in the bot's environment or instructions. With Option B, attach the MCP URL for `<mate>` instead.
+2. **Identity & board config:** with Option A, create a bot-local file `fleet-<mate>.env` in the bot's working directory containing `export FLEET_MATE=<mate>` and `export BOARD_URL=<url>`. With Option B, attach the MCP URL for `<mate>` instead.
 3. **Domain charter & preferences:** at startup (or when checking context), read your charter and the captain's preferences from Fleet (`fleet charter <mate>` / `fleet prefs` via CLI, or the read-only `fleet_charter` / `fleet_prefs` via MCP).
 
 ---
@@ -28,7 +28,7 @@ Prefer **Option A (`fleet` CLI)** whenever your runtime has shell access. Otherw
 
 ### Option A (Preferred): Shell access (`fleet` CLI on `PATH`)
 
-Run `fleet` commands with `FLEET_MATE=<mate>` and `BOARD_URL=<url>`:
+Run each `fleet` command as `. ./fleet-<mate>.env && fleet ...` in one shell invocation (it exports `FLEET_MATE=<mate>` and `BOARD_URL=<url>`):
 
 - `fleet` - live overview of open cards, counts, and advertised runner hosts
 - `fleet cards --mate <mate>` / `fleet cards --holder <mate>` - list cards in your subtree or currently held by you
@@ -67,7 +67,7 @@ Both MCP transports expose the exact same scoped tools for `<mate>`: `fleet_over
 
 ## 3. Wire Incoming Wakes (`fleet watch`)
 
-Fleet pushes actionable wakes (new cards, escalations, answers, crewmate handbacks, completions, and stale-card chases) without polling:
+Register the bot under `mates.items` in `fleet.yaml` with its `name`, `parent`, and `mode: external`. This keeps it in the same routing tree as a local mate without launching a Fleet terminal. Dispatch and handoff create the same Card Server events for either mode. Setting the mode alone does not deliver wakes: run `fleet watch` for the bot's mate name to forward its filtered events (new cards, handoffs, escalations, answers, crewmate handbacks, completions, and stale-card chases).
 
 1. **Create an inbound webhook endpoint** on your bot platform (plus an optional secret header such as `Authorization: Bearer <token>`) that triggers a turn on the `<mate>` bot when hit with an HTTP `POST`.
 2. **Give the captain (or their local setup agent) the webhook URL and header** so they run on the Control Host:
@@ -88,11 +88,11 @@ Every wake arrives as `POST <webhook-url>` with `Content-Type: application/json`
 }
 ```
 
-When a wake arrives:
+Pass the webhook body's `notice` and `cardId` (if present) to the bot and return HTTP `2xx` once the wake is accepted. Keep behavior in the mate prompt and charter, not in the webhook. Use a one-line wake prompt such as:
 
-- Deliver `notice` (and `cardId` if present) to the `<mate>` bot.
-- The bot inspects the card (`fleet view <cardId> --full` via CLI, or `fleet_view` via MCP), handles/delegates/closes it, and only pings the captain when a real decision is needed or final work is ready.
-- Return HTTP `2xx` once the wake is accepted.
+> Fleet wake: load the `fleet-mate` skill (or `prompts/mate.md`), run `. ./fleet-<mate>.env && fleet view <cardId> --full` in one shell invocation for the `cardId` in the webhook body if present, and handle the wake; message the captain only for a real decision or finished work.
+
+For an MCP-only bot, omit the `fleet-<mate>.env` step and use `fleet_view` instead of the CLI.
 
 _(If your bot runs on the same host and consumes a local stream instead of HTTP webhooks, run bare `fleet watch --mate <mate>` to receive the same JSON envelope as NDJSON lines on stdout.)_
 
