@@ -64,7 +64,7 @@ Wait for the user's answer, then follow the matching branch:
 
 **Do NOT download or install Grok Bot, Dots, or Muse locally.**
 
-1. Add `1stmate` with `mode: external` under `mates.items` in `~/.fleet/fleet.yaml` (sets `autoStart: false` automatically so `fleet chat` and `fleet mates up` never spawn a local TUI):
+1. Add `1stmate` with `mode: external` under `mates.items` in `~/.fleet/fleet.yaml`. The bot's platform runs it, so `fleet chat` reports status instead of launching it and `fleet mates up` skips it. `autoStart` defaults to `false` and cannot be `true`. Omit `mode` (or use `mode: local`) for a mate Fleet launches in a terminal.
    ```yaml
    mates:
      workspace: 2ndmates
@@ -86,7 +86,7 @@ Wait for the user's answer, then follow the matching branch:
    - If **you are the external bot itself** running on the Control Host, read and execute [`EXTERNAL_BOT.md`](EXTERNAL_BOT.md) directly (create/configure the `1stmate` bot, create its inbound webhook, and run `fleet watch` below) without asking the captain to copy-paste.
    - Otherwise, hand the captain this single ready-to-paste prompt (for Grok Bot, explicitly instructing it to create a dedicated `1stmate` bot):
      > Read `https://github.com/1yian/fleet-v3/blob/main/EXTERNAL_BOT.md` and create a dedicated `1stmate` bot for Fleet (`mate: 1stmate`). Prefer the `fleet` CLI if you have shell access (Option A, `BOARD_URL: <board-url>`), otherwise connect via MCP only (Option B, `http://<reachable-ip>:4102/mcp?mate=1stmate`). Return the incoming webhook URL and auth header when ready.
-5. Once the bot returns its webhook URL (and optional auth header), start `fleet watch` (and install its persistence service from **Reference A**):
+5. Dispatch and hand off cards by mate name as usual. The `parent` field sets the mate's place in the routing tree, regardless of launch mode. To deliver that mate's Card Server wakes, start `fleet watch` once the bot returns its webhook URL (and install its persistence service from **Reference A**):
    ```bash
    fleet watch --mate 1stmate --webhook https://bot.example.com/wake --header "Authorization: Bearer <token>"
    ```
@@ -205,7 +205,7 @@ Now ask ONE question:
      - For Claude Code, override `command` with `--mcp-config "{mcpConfig}" --dangerously-load-development-channels server:fleet --append-system-prompt-file "{prompt}"` (`fleet mates up` writes `{stateDir}/mcp.json` automatically).
      - Start them with `fleet mates up` and verify with `fleet mates status`.
   3. **Grok Bot (or other multi-bot external platform) `2ndmate`s:**
-     - Never install any bot app locally. Set `mode: external` on that mate in `~/.fleet/fleet.yaml` (so `fleet mates up` skips it).
+     - Never install any bot app locally. Set `mode: external` on that mate in `~/.fleet/fleet.yaml` as in Step 2, Branch A. A parent routes cards to this child by name just as it would to a local child.
      - Hand the captain a ready-to-paste prompt explicitly instructing Grok Bot to **create another separate bot** for that domain (or if you are Grok Bot running on the host, create the separate bot directly):
        > Read `https://github.com/1yian/fleet-v3/blob/main/EXTERNAL_BOT.md` and create a new separate bot for my `<name>` secondmate (`mate: <name>`, `parent: 1stmate`, domain: `<domain>`). Prefer the `fleet` CLI if you have shell access (Option A, `BOARD_URL: <board-url>`), otherwise connect via MCP only (Option B, `http://<reachable-ip>:4102/mcp?mate=<name>`). Return its incoming webhook URL and auth header when ready.
      - Wire a dedicated `fleet watch --mate <name> --webhook <bot-webhook-url> [--header "..."]` service (with persistence from **Reference A**) once the bot returns its webhook URL.

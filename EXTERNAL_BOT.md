@@ -67,7 +67,7 @@ Both MCP transports expose the exact same scoped tools for `<mate>`: `fleet_over
 
 ## 3. Wire Incoming Wakes (`fleet watch`)
 
-Fleet pushes actionable wakes (new cards, escalations, answers, crewmate handbacks, completions, and stale-card chases) without polling:
+Register the bot under `mates.items` in `fleet.yaml` with its `name`, `parent`, and `mode: external`. This keeps it in the same routing tree as a local mate without launching a Fleet terminal. Dispatch and handoff create the same Card Server events for either mode. Setting the mode alone does not deliver wakes: run `fleet watch` for the bot's mate name to forward its filtered events (new cards, handoffs, escalations, answers, crewmate handbacks, completions, and stale-card chases).
 
 1. **Create an inbound webhook endpoint** on your bot platform (plus an optional secret header such as `Authorization: Bearer <token>`) that triggers a turn on the `<mate>` bot when hit with an HTTP `POST`.
 2. **Give the captain (or their local setup agent) the webhook URL and header** so they run on the Control Host:
