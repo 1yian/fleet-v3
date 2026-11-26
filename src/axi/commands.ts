@@ -44,6 +44,7 @@ const FIELD_READERS: Record<OptionalField, (card: Card) => string | number> = {
 export interface FleetAxiContext {
   readonly board: () => BoardClient;
   readonly boardUrl: string;
+  readonly defaultHost?: string;
   readonly actor: string;
   readonly fence: OptionalFenceInput;
 }
@@ -77,19 +78,20 @@ Flags:
   --mate <name>      Target mate (defaults to $FLEET_MATE; omit --project/--host when delegating to a child mate)
   --title <text>     Required card title or intent
   --body <spec>      Optional additional spec text
-  --project <repo>   Repository name for fleet-runner (requires --host; mates spawn workers only for themselves)
-  --host <host>      Execution host name (e.g. maverick, p620; requires --project)
+  --project <repo>   Repository name for fleet-runner (mates spawn workers only for themselves)
+  --host <host>      Execution host name (e.g. maverick, p620; defaults to defaultHost in fleet.yaml; requires --project)
   --delivery <mode>  ${DELIVERIES.join(" | ")}
   --needs <ids>      Comma-separated prerequisite card IDs
 Examples:
   fleet dispatch --mate cleo --title "Investigate recent conversion drop"
-  fleet dispatch --project Cleo --host p620 --title "Fix webhook timeout"`,
+  fleet dispatch --project Cleo --host p620 --title "Fix webhook timeout"
+  fleet dispatch --project Cleo --title "Fix webhook timeout"   (uses defaultHost)`,
   queue: `fleet queue - put a held card in the runner queue for a worker (resets retry attempts on held cards)
 Usage:
   fleet queue <id> [--project <repo>] [--host <host>] [--delivery <mode>]
 Flags:
   --project <repo>   Repository name for fleet-runner
-  --host <host>      Execution host name
+  --host <host>      Execution host name (defaults to the card's host, then defaultHost in fleet.yaml)
   --delivery <mode>  ${DELIVERIES.join(" | ")}`,
   snooze: `fleet snooze - defer stale-card chases on a held card while waiting on an external event
 Usage:
@@ -423,6 +425,23 @@ function parseDeliveryFlag(raw: string | undefined, helpBlock: string): Delivery
   return matched;
 }
 
+async function resolveDefaultHost(
+  active: FleetAxiContext,
+  helpBlock: string,
+): Promise<string | undefined> {
+  const { defaultHost } = active;
+  if (defaultHost === undefined) return undefined;
+  const hosts = await active.board().listHosts();
+  if (!hosts.some((each) => each.host === defaultHost)) {
+    throw new AxiError(
+      `defaultHost "${defaultHost}" in fleet.yaml is not an advertised runner host`,
+      "VALIDATION_ERROR",
+      [`Known hosts: ${hosts.map((each) => each.host).join(", ") || "none"}`, helpBlock],
+    );
+  }
+  return defaultHost;
+}
+
 export async function dispatchCommand(
   args: string[],
   ctx: FleetAxiContext | undefined,
@@ -455,7 +474,9 @@ export async function dispatchCommand(
   const title = stringFlag(parsed.values, "title") ?? "";
   const body = stringFlag(parsed.values, "body");
   const project = stringFlag(parsed.values, "project");
-  const host = stringFlag(parsed.values, "host");
+  const host =
+    stringFlag(parsed.values, "host") ??
+    (project === undefined ? undefined : await resolveDefaultHost(active, helpBlock));
   const delivery = parseDeliveryFlag(stringFlag(parsed.values, "delivery"), helpBlock);
   const needsRaw = stringFlag(parsed.values, "needs");
   const needs =
@@ -510,7 +531,11 @@ export async function queueCommand(
     throw new AxiError("card <id> is required for `queue`", "VALIDATION_ERROR", [helpBlock]);
   }
   const project = stringFlag(parsed.values, "project");
-  const host = stringFlag(parsed.values, "host");
+  let host = stringFlag(parsed.values, "host");
+  if (host === undefined) {
+    const { card: existing } = await active.board().getThread(id, scopeOf(active));
+    if (existing.host === null) host = await resolveDefaultHost(active, helpBlock);
+  }
   const delivery = parseDeliveryFlag(stringFlag(parsed.values, "delivery"), helpBlock);
   const card = await active.board().queueCard(id, {
     ...active.fence,
