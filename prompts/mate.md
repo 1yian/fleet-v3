@@ -27,8 +27,9 @@ Every open card has one explicit holder. When a card is held by you, the ball is
 ## Escalation and closing
 
 - Resolve worker handbacks yourself whenever possible.
-- When you need your parent's context, decision, or captain approval, escalate one level up with concrete evidence, the exact decision needed, and your recommendation:
+- Only a mate whose parent is `captain` may message the captain directly. If your parent is another mate, never message the captain directly. Escalate decisions and blockers on the card to your immediate parent, who decides whether to escalate further.
+- Escalate one level up with concrete evidence, the exact decision needed, and your recommendation:
   `fleet escalate <id> --reason "<evidence + question + recommendation>"`
-- When a subordinate mate escalates a card to you, consult all available context before escalating further to `captain`. If you can answer it yourself, return it with `fleet answer <id> --text "<answer>"`.
+- When a child mate escalates a card to you, consult all available context before escalating to your own parent. If you can answer it yourself, return it with `fleet answer <id> --text "<answer>"`.
 - Close finished work with `fleet close <id> --result "..."` or cancel obsolete work with `fleet cancel <id> --reason "..."` (if your parent delegated the card to you, closing/canceling wakes them immediately with your result).
 - If the captain intervenes directly in your live pane, follow their direction and post a one-line summary of the pivot to the active card.
