@@ -388,7 +388,7 @@ function fleetYaml(root: string, name: string, extra: readonly string[]): string
     "  command: [echo]",
     "repos:",
     "  demo:",
-    "    path: /tmp/demo",
+    "    remote: /tmp/demo",
   ];
   writeFileSync(path, [...base, ...extra].join("\n"));
   return path;
@@ -538,6 +538,75 @@ void test("mate CLI defaults dispatch --mate to self, scopes reads to subtree, a
   }
 });
 
+void test("defaultHost in fleet.yaml fills a missing --host for dispatch and queue, and is rejected when unknown", async (t) => {
+  const server = await startTestServer({ parents: { cleo: "captain" } });
+  const dir = makeTempDir("fleet-defaulthost-");
+  const goodConfig = join(dir, "good.yaml");
+  const unknownConfig = join(dir, "unknown.yaml");
+  writeFileSync(goodConfig, "defaultHost: p620\n");
+  writeFileSync(unknownConfig, "defaultHost: ghost\n");
+  const prevConfig = process.env["FLEET_CONFIG"];
+  t.after(() => {
+    if (prevConfig === undefined) delete process.env["FLEET_CONFIG"];
+    else process.env["FLEET_CONFIG"] = prevConfig;
+  });
+
+  try {
+    await server.client.advertiseHost({
+      host: "p620",
+      mode: "local",
+      viewport: "headless",
+      repos: ["Cleo"],
+    });
+
+    process.env["FLEET_CONFIG"] = goodConfig;
+    const dispatched = await captureCli(
+      ["dispatch", "--project", "Cleo", "--title", "Uses default host"],
+      server.url,
+      "cleo",
+    );
+    assert.equal(dispatched.exitCode, 0);
+    assert.match(dispatched.out, /state: queued/u);
+    const viewed = await captureCli(["view", "1"], server.url, "cleo");
+    assert.match(viewed.out, /host: p620/u);
+
+    const held = await captureCli(["dispatch", "--title", "Held card"], server.url, "cleo");
+    assert.equal(held.exitCode, 0);
+    const queued = await captureCli(["queue", "2", "--project", "Cleo"], server.url, "cleo");
+    assert.equal(queued.exitCode, 0);
+    assert.match(queued.out, /host: p620/u);
+
+    process.env["FLEET_CONFIG"] = unknownConfig;
+    const rejected = await captureCli(
+      ["dispatch", "--project", "Cleo", "--title", "Bad default"],
+      server.url,
+      "cleo",
+    );
+    assert.equal(rejected.exitCode, 2);
+    assert.match(rejected.out, /defaultHost .*ghost.* is not an advertised runner host/u);
+
+    const explicit = await captureCli(
+      ["dispatch", "--project", "Cleo", "--host", "p620", "--title", "Explicit host wins"],
+      server.url,
+      "cleo",
+    );
+    assert.equal(explicit.exitCode, 0);
+
+    const bareConfig = join(dir, "bare.yaml");
+    writeFileSync(bareConfig, "boardUrl: http://127.0.0.1:4100\n");
+    process.env["FLEET_CONFIG"] = bareConfig;
+    const missing = await captureCli(
+      ["dispatch", "--project", "Cleo", "--title", "No default"],
+      server.url,
+      "cleo",
+    );
+    assert.equal(missing.exitCode, 1);
+    assert.match(missing.out, /Both project and host are required/u);
+  } finally {
+    await server.stop();
+  }
+});
+
 void test("fleet.yaml resolves relative paths against its own directory regardless of cwd", (t) => {
   const root = mkdtempSync(join(tmpdir(), "fleet-relcfg-"));
   const otherCwd = mkdtempSync(join(tmpdir(), "fleet-othercwd-"));
@@ -553,6 +622,7 @@ void test("fleet.yaml resolves relative paths against its own directory regardle
       "host: maverick",
       "boardUrl: http://127.0.0.1:4100",
       "workspacesRoot: ./workspaces",
+      "projectsRoot: ./projects",
       "server:",
       "  dataDir: ./board",
       "spawn:",
@@ -566,7 +636,7 @@ void test("fleet.yaml resolves relative paths against its own directory regardle
       "      autoStart: false",
       "repos:",
       "  demo:",
-      "    path: ./repos/demo",
+      "    remote: ./origin/demo",
       "",
     ].join("\n"),
   );
@@ -576,10 +646,11 @@ void test("fleet.yaml resolves relative paths against its own directory regardle
   try {
     const loaded = loadConfig(cfgPath);
     assert.equal(loaded.workspacesRoot, join(root, "workspaces"));
+    assert.equal(loaded.projectsRoot, join(root, "projects"));
     assert.equal(loaded.server?.dataDir, join(root, "board"));
     assert.equal(loaded.mates?.stateDir, join(root, "mates"));
     assert.equal(loaded.mates?.items[0]?.cwd, join(root, "jarvis"));
-    assert.equal(loaded.repos["demo"]?.path, join(root, "repos", "demo"));
+    assert.equal(loaded.repos["demo"]?.remote, join(root, "origin", "demo"));
   } finally {
     process.chdir(prevCwd);
   }

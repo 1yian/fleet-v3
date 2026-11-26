@@ -10,7 +10,7 @@ import {
   type HerdrPaneHandle,
 } from "./herdr.ts";
 import {
-  buildWorkerArgv,
+  buildWorkerLaunch,
   makeContainerName,
   runIsolatedCommand,
   type SpawnResult,
@@ -105,7 +105,7 @@ function runWorkerProcess(params: {
       ? { mode: containerMode, name: containerName }
       : undefined;
 
-  const argv = buildWorkerArgv({
+  const { argv, env } = buildWorkerLaunch({
     config: params.config,
     taskId: params.cardId,
     worktreePath: params.workspace.worktreePath,
@@ -113,6 +113,7 @@ function runWorkerProcess(params: {
     tmpDir: params.workspace.tmpDir,
     promptPath: params.promptPath,
     env: params.workerEnv,
+    bootstrap: params.workspace.bootstrap,
     tty: params.pane !== undefined,
     ...(containerName !== undefined ? { containerName } : {}),
   });
@@ -122,7 +123,7 @@ function runWorkerProcess(params: {
       argv,
       cwd: params.workspace.worktreePath,
       tmpDir: params.workspace.tmpDir,
-      env: params.workerEnv,
+      env,
       idleTimeoutMs: params.config.idleTimeoutSeconds * 1000,
       maxWallMs: params.config.maxWallSeconds * 1000,
       signal: params.signal,
@@ -133,7 +134,7 @@ function runWorkerProcess(params: {
   return runIsolatedCommand({
     argv,
     cwd: params.workspace.worktreePath,
-    env: params.workerEnv,
+    env,
     idleTimeoutMs: params.config.idleTimeoutSeconds * 1000,
     maxWallMs: params.config.maxWallSeconds * 1000,
     signal: params.signal,
@@ -365,8 +366,7 @@ async function runClaim(
 
   try {
     const workspace = await prepareWorkspace({
-      workspacesRoot: config.workspacesRoot,
-      channel: claim.card.mate,
+      projectsRoot: config.projectsRoot,
       project,
       taskId: cardId,
       epoch: claim.epoch,

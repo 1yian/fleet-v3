@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -7,11 +7,12 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, relative } from "node:path";
 import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -33,6 +34,8 @@ const WorkerReceiptSchema = z.object({
   worktree: z.string(),
   branch: z.string(),
   checkedOut: z.string(),
+  commit: z.string(),
+  bootstrap: z.string(),
   prompt: z.string(),
 });
 
@@ -94,6 +97,20 @@ function initGitRepo(root: string): string {
   return repoDir;
 }
 
+function readHead(directory: string): string {
+  return execFileSync("git", ["-C", directory, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+}
+
+function managedRepo(root: string, remote?: string): string {
+  const projectRoot = join(root, "projects", "demo");
+  const repoDir = join(projectRoot, "repo");
+  if (remote !== undefined) {
+    mkdirSync(projectRoot, { recursive: true });
+    execFileSync("git", ["clone", "--no-local", remote, repoDir], { stdio: "ignore" });
+  }
+  return repoDir;
+}
+
 function within<T>(promise: Promise<T>, ms: number): Promise<T | "timeout"> {
   const timeout = new Promise<"timeout">((resolve) => {
     setTimeout(() => {
@@ -113,6 +130,7 @@ function makeConfig(
     boardUrl: "http://127.0.0.1:4100",
     matesFilter: [],
     workspacesRoot: join(root, "workspaces"),
+    projectsRoot: join(root, "projects"),
     concurrency: 1,
     leaseSeconds: 60,
     idleTimeoutSeconds: 10,
@@ -132,8 +150,7 @@ function makeConfig(
     },
     repos: {
       demo: {
-        path: repoDir,
-        baseBranch: "main",
+        remote: repoDir,
         delivery: "direct-pr",
       },
     },
@@ -170,9 +187,17 @@ afterEach(() => {
   }
 });
 
-void test("claims queued card, runs isolated worktree worker, advertises host, completes, and cleans up", async () => {
+void test("syncs a managed clone to the origin default before each worker and leaves the captain checkout alone", async () => {
   const root = makeTempDir("fleet-v3-e2e-");
   const repoDir = initGitRepo(root);
+  execFileSync("git", ["-C", repoDir, "branch", "-m", "trunk"]);
+  const captainCheckout = join(root, "captain");
+  execFileSync("git", ["clone", repoDir, captainCheckout], { stdio: "ignore" });
+  writeFileSync(join(captainCheckout, "README.md"), "captain unsaved changes\n");
+  const original = readHead(captainCheckout);
+  const projectRoot = join(root, "projects", "demo");
+  mkdirSync(projectRoot, { recursive: true });
+  writeFileSync(join(projectRoot, "setup.sh"), "export FLEET_E2E_LOCAL_SETUP=ready\n");
   const receiptPath = join(root, "worker-receipt.json");
   const server = await startTestServer();
   const { client } = server;
@@ -202,6 +227,9 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
           .execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" })
           .trim(),
         prompt: process.env.FLEET_PROMPT,
+        bootstrap: process.env.FLEET_E2E_LOCAL_SETUP,
+        commit: require("node:child_process")
+          .execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
       }));
     `;
 
@@ -222,6 +250,8 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
     assert.equal(receipt.card, card.id);
     assert.equal(receipt.argCard, card.id);
     assert.equal(receipt.epoch, "1");
+    assert.equal(receipt.bootstrap, "ready");
+    assert.equal(receipt.commit, original);
     assert.equal(receipt.boardUrl, server.url, "workers always target the claiming board");
     assert.ok(receipt.tokenLength >= 32, "worker receives its claim fencing token");
     assert.equal(
@@ -232,18 +262,61 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
     const checkoutName = basename(receipt.worktree);
     assert.equal(checkoutName, "c-1-a1");
     assert.equal(receipt.branch, "c-1-a1");
-    const repoBranches = execFileSync("git", ["-C", repoDir, "branch", "--list", "c-*"], {
+    const repoBranches = execFileSync("git", ["-C", managedRepo(root), "branch", "--list", "c-*"], {
       encoding: "utf8",
     })
       .split("\n")
       .map((line) => line.replace(/^[*+ ]+/u, "").trim())
       .filter((line) => line.length > 0);
     assert.deepEqual(repoBranches, [receipt.branch], "git holds exactly the advertised branch");
-    assert.notEqual(receipt.worktree, repoDir);
+    assert.equal(receipt.worktree, join(projectRoot, "worktrees", receipt.branch));
     assert.equal(existsSync(receipt.worktree), false);
 
     const thread = await client.getThread(card.id);
     assert.equal(thread.card.state, "done");
+
+    execFileSync("git", ["-C", repoDir, "commit", "--allow-empty", "-m", "Advance trunk"], {
+      stdio: "ignore",
+    });
+    const next = await client.createCard({
+      mate: "cleo",
+      title: "Use the updated origin default",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    assert.equal(await runLoop(client, config, { once: true }), 1);
+    const nextReceipt = WorkerReceiptSchema.parse(JSON.parse(readFileSync(receiptPath, "utf8")));
+    assert.equal(nextReceipt.card, next.id);
+    assert.equal(nextReceipt.commit, readHead(repoDir));
+    assert.notEqual(nextReceipt.commit, original);
+    assert.equal(readHead(managedRepo(root)), nextReceipt.commit);
+    assert.equal(await cardField(client, next.id, "state"), "done");
+
+    renameSync(repoDir, join(root, "offline-origin"));
+    const offline = await client.createCard({
+      mate: "cleo",
+      title: "Reject a stale checkout when origin cannot be fetched",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    rmSync(receiptPath);
+    assert.equal(await runLoop(client, config, { once: true }), 1);
+    const blocked = await client.getThread(offline.id);
+    assert.equal(blocked.card.state, "held");
+    assert.match(blocked.entries.map((entry) => entry.text).join("\n"), /Could not fetch origin/u);
+    assert.equal(existsSync(receiptPath), false);
+    assert.equal(readHead(managedRepo(root)), nextReceipt.commit);
+    assert.equal(readHead(captainCheckout), original);
+    assert.equal(
+      readFileSync(join(captainCheckout, "README.md"), "utf8"),
+      "captain unsaved changes\n",
+    );
+    assert.equal(
+      execFileSync("git", ["-C", captainCheckout, "branch", "--list", "c-*"], { encoding: "utf8" }),
+      "",
+    );
 
     const hosts = await client.listHosts();
     const advertised = hosts.find((each) => each.host === "test-host");
@@ -630,88 +703,139 @@ void test("kills entire worker process group on idle timeout leaving no orphan g
   }
 });
 
-void test("runs real isolated card inside Apple container micro-VM with worktree gitCommonDir and inherited env", async (t) => {
-  if (!isCommandAvailable("container", ["system", "status"])) {
-    t.skip("Apple container runtime not running on this host");
-    return;
-  }
+for (const mode of ["docker", "container"] as const) {
+  void test(`bootstraps an isolated ${mode} worker with mounted and inherited credentials`, async (t) => {
+    if (!isCommandAvailable(mode, mode === "docker" ? ["info"] : ["system", "status"])) {
+      t.skip(`${mode} runtime not running on this host`);
+      return;
+    }
 
-  const root = makeTempDir("fleet-v3-apple-container-");
-  const secretDir = makeTempDir("fleet-v3-apple-secret-");
-  const outDir = makeTempDir("fleet-v3-apple-out-");
-  const repoDir = initGitRepo(root);
-  const receiptFile = join(secretDir, "secret.txt");
-  writeFileSync(receiptFile, "cred-payload\n");
-  const hostOutPath = join(outDir, "container-out.txt");
-  const prevInherited = process.env["FLEET_E2E_INHERITED"];
-  process.env["FLEET_E2E_INHERITED"] = "inherited-ok";
-
-  const server = await startTestServer();
-  const { client } = server;
-
-  try {
-    const card = await client.createCard({
-      mate: "cleo",
-      title: "Verify container worker isolation",
-      host: "test-host",
-      project: "demo",
-      delivery: "direct-pr",
-    });
-
-    const script = [
-      "set -eu",
-      'gitdir=$(sed "s/^gitdir: //" .git)',
-      'test -f "$gitdir/HEAD"',
-      'printf "%s|%s|%s|%s" "$FLEET_CARD" "$FLEET_E2E_INHERITED" "$(cat /run/secret.txt)" "$(cat "$gitdir/HEAD")" > "$FLEET_E2E_OUT"',
-    ].join("; ");
-
-    const config = makeConfig(root, repoDir, {
-      idleTimeoutSeconds: 30,
-      maxWallSeconds: 60,
-      spawn: {
-        mode: "container",
-        viewport: "headless",
-        direnv: false,
-        command: ["sh", "-c", script],
-        container: {
-          image: "docker.io/library/alpine:latest",
-          ssh: false,
-          inheritEnv: ["FLEET_E2E_INHERITED"],
-          mounts: [`${receiptFile}:/run/secret.txt:ro`, `${outDir}:/out`],
-          extraArgs: ["-e", "FLEET_E2E_OUT=/out/container-out.txt"],
-        },
-      },
-    });
-
-    const handled = await runLoop(client, config, { once: true });
-    assert.equal(handled, 1);
-
-    const thread = await client.getThread(card.id);
-    assert.equal(
-      thread.card.state,
-      "done",
-      thread.entries.map((entry) => entry.text).join("\n---\n"),
+    const root = makeTempDir("fleet-v3-apple-container-");
+    const secretDir = makeTempDir("fleet-v3-apple-secret-");
+    const outDir = makeTempDir("fleet-v3-apple-out-");
+    const repoDir = initGitRepo(root);
+    const receiptFile = join(secretDir, "secret.txt");
+    writeFileSync(receiptFile, "cred-payload\n");
+    const bootstrap = join(secretDir, "project bootstrap.sh");
+    writeFileSync(
+      bootstrap,
+      `FLEET_E2E_BOOTSTRAPPED=$(cat /run/secret.txt) || return 1
+export FLEET_E2E_BOOTSTRAPPED
+`,
     );
+    const hostOutPath = join(outDir, "container-out.txt");
+    const prevInherited = process.env["FLEET_E2E_INHERITED"];
+    process.env["FLEET_E2E_INHERITED"] = "inherited-ok";
 
-    const observed = readFileSync(hostOutPath, "utf8").trim();
-    const [observedCard, inherited, secret, headRef] = observed.split("|");
-    assert.equal(observedCard, card.id);
-    assert.equal(inherited, "inherited-ok");
-    assert.equal(secret, "cred-payload");
-    const repoBranches = execFileSync("git", ["-C", repoDir, "branch", "--list", "c-*"], {
-      encoding: "utf8",
-    })
-      .split("\n")
-      .map((line) => line.replace(/^[*+ ]+/u, "").trim())
-      .filter((line) => line.length > 0);
-    assert.equal(repoBranches.length, 1);
-    assert.equal(headRef, `ref: refs/heads/${repoBranches[0] ?? ""}`);
-  } finally {
-    if (prevInherited === undefined) delete process.env["FLEET_E2E_INHERITED"];
-    else process.env["FLEET_E2E_INHERITED"] = prevInherited;
-    await server.stop();
-  }
-});
+    const server = await startTestServer();
+    const { client } = server;
+
+    try {
+      const card = await client.createCard({
+        mate: "cleo",
+        title: "Verify container worker isolation",
+        host: "test-host",
+        project: "demo",
+        delivery: "direct-pr",
+      });
+
+      const script = [
+        "set -eu",
+        'gitdir=$(sed "s/^gitdir: //" .git)',
+        'test -f "$gitdir/HEAD"',
+        'printf "%s|%s|%s|%s" "$FLEET_CARD" "$FLEET_E2E_INHERITED" "$FLEET_E2E_BOOTSTRAPPED" "$(cat "$gitdir/HEAD")" > "$FLEET_E2E_OUT"',
+      ].join("; ");
+
+      const config = makeConfig(root, repoDir, {
+        repos: {
+          demo: { remote: repoDir, bootstrap: relative(root, bootstrap), delivery: "direct-pr" },
+        },
+        idleTimeoutSeconds: 30,
+        maxWallSeconds: 60,
+        spawn: {
+          mode,
+          viewport: "headless",
+          direnv: false,
+          command: ["sh", "-c", script],
+          container: {
+            image: "docker.io/library/alpine:latest",
+            ssh: false,
+            inheritEnv: ["FLEET_E2E_INHERITED"],
+            mounts: [`${receiptFile}:/run/secret.txt:ro`, `${outDir}:/out`],
+            extraArgs: ["-e", "FLEET_E2E_OUT=/out/container-out.txt"],
+          },
+        },
+      });
+
+      const configPath = join(root, "fleet.yaml");
+      writeFileSync(configPath, JSON.stringify({ ...config, boardUrl: server.url }));
+      const runRunner = (): Promise<void> =>
+        new Promise((resolve, reject) => {
+          execFile(
+            process.execPath,
+            [BIN_PATH, "run", "--config", configPath, "--once"],
+            { env: { ...process.env, BOARD_URL: server.url }, timeout: 70_000 },
+            (error) => {
+              if (error === null) resolve();
+              else reject(new Error(error.message, { cause: error }));
+            },
+          );
+        });
+      await runRunner();
+
+      const thread = await client.getThread(card.id);
+      assert.equal(
+        thread.card.state,
+        "done",
+        thread.entries.map((entry) => entry.text).join("\n---\n"),
+      );
+
+      const observed = readFileSync(hostOutPath, "utf8").trim();
+      const [observedCard, inherited, secret, headRef] = observed.split("|");
+      assert.equal(observedCard, card.id);
+      assert.equal(inherited, "inherited-ok");
+      assert.equal(secret, "cred-payload");
+      const repoBranches = execFileSync(
+        "git",
+        ["-C", managedRepo(root), "branch", "--list", "c-*"],
+        {
+          encoding: "utf8",
+        },
+      )
+        .split("\n")
+        .map((line) => line.replace(/^[*+ ]+/u, "").trim())
+        .filter((line) => line.length > 0);
+      assert.equal(repoBranches.length, 1);
+      assert.equal(headRef, `ref: refs/heads/${repoBranches[0] ?? ""}`);
+
+      writeFileSync(
+        bootstrap,
+        `cat /run/secret.txt >&2
+return 1
+`,
+      );
+      const failed = await client.createCard({
+        mate: "cleo",
+        title: "Bootstrap failure prevents harness launch",
+        host: "test-host",
+        project: "demo",
+        delivery: "direct-pr",
+      });
+      rmSync(hostOutPath);
+      await runRunner();
+      const failure = await client.getThread(failed.id);
+      assert.equal(failure.card.state, "held");
+      const report = failure.entries.map((entry) => entry.text).join("\n");
+      assert.match(report, /Worker bootstrap failed/u);
+      assert.doesNotMatch(report, /cred-payload/u);
+      assert.equal(existsSync(hostOutPath), false);
+    } finally {
+      if (prevInherited === undefined) delete process.env["FLEET_E2E_INHERITED"];
+      else process.env["FLEET_E2E_INHERITED"] = prevInherited;
+      await server.stop();
+    }
+  });
+}
 
 void test("runs workers inside live herdr panes in an isolated session, closing on success and keeping on failure", async (t) => {
   if (!isCommandAvailable("herdr", ["--version"])) {
@@ -948,7 +1072,8 @@ void test("shutdown during worktree setup releases the claim without launching t
   const repoDir = initGitRepo(root);
   const setupMarker = join(root, "setup-started");
   const workerMarker = join(root, "worker-launched");
-  const hookPath = join(repoDir, ".git", "hooks", "post-checkout");
+  const checkout = managedRepo(root, repoDir);
+  const hookPath = join(checkout, ".git", "hooks", "post-checkout");
   writeFileSync(hookPath, `#!/bin/sh\ntouch "${setupMarker}"\nsleep 1\n`);
   chmodSync(hookPath, 0o755);
   const server = await startTestServer();
@@ -1065,7 +1190,7 @@ void test("a failed worktree setup leaves no scratch directory or branch behind"
     const config = makeConfig(root, repoDir, {
       repos: {
         demo: {
-          path: repoDir,
+          remote: repoDir,
           baseBranch: "no-such-branch",
           delivery: "direct-pr",
         },
@@ -1075,13 +1200,13 @@ void test("a failed worktree setup leaves no scratch directory or branch behind"
     await runLoop(client, config, { once: true });
 
     assert.equal(await cardField(client, card.id, "state"), "held");
-    const scratchRoot = join(root, "workspaces", "cleo", "demo", "tmp");
+    const scratchRoot = join(root, "projects", "demo", "tmp");
     assert.deepEqual(
       existsSync(scratchRoot) ? readdirSync(scratchRoot) : [],
       [],
       "the failed attempt's scratch directory is removed",
     );
-    const branches = execFileSync("git", ["-C", repoDir, "branch", "--list", "c-*"], {
+    const branches = execFileSync("git", ["-C", managedRepo(root), "branch", "--list", "c-*"], {
       encoding: "utf8",
     });
     assert.equal(branches.trim(), "");
@@ -1093,7 +1218,8 @@ void test("a failed worktree setup leaves no scratch directory or branch behind"
 void test("a checkout whose post-checkout hook fails leaves no worktree, scratch directory, or branch", async () => {
   const root = makeTempDir("fleet-v3-hook-failure-");
   const repoDir = initGitRepo(root);
-  const hookPath = join(repoDir, ".git", "hooks", "post-checkout");
+  const checkout = managedRepo(root, repoDir);
+  const hookPath = join(checkout, ".git", "hooks", "post-checkout");
   writeFileSync(hookPath, "#!/bin/sh\nexit 1\n");
   chmodSync(hookPath, 0o755);
   const server = await startTestServer();
@@ -1110,14 +1236,14 @@ void test("a checkout whose post-checkout hook fails leaves no worktree, scratch
     await runLoop(client, makeConfig(root, repoDir, {}), { once: true });
 
     assert.equal(await cardField(client, card.id, "state"), "held");
-    const projectRoot = join(root, "workspaces", "cleo", "demo");
+    const projectRoot = join(root, "projects", "demo");
     assert.deepEqual(listed(join(projectRoot, "tmp")), []);
     assert.deepEqual(listed(join(projectRoot, "worktrees")), []);
-    const worktrees = execFileSync("git", ["-C", repoDir, "worktree", "list", "--porcelain"], {
+    const worktrees = execFileSync("git", ["-C", checkout, "worktree", "list", "--porcelain"], {
       encoding: "utf8",
     });
     assert.equal(worktrees.split("\n").filter((line) => line.startsWith("worktree ")).length, 1);
-    const branches = execFileSync("git", ["-C", repoDir, "branch", "--list", "c-*"], {
+    const branches = execFileSync("git", ["-C", managedRepo(root), "branch", "--list", "c-*"], {
       encoding: "utf8",
     });
     assert.equal(branches.trim(), "");
@@ -1129,7 +1255,8 @@ void test("a checkout whose post-checkout hook fails leaves no worktree, scratch
 void test("a checkout Git refuses to remove is reported with its path, after a failed setup and after a finished claim", async () => {
   const hookRoot = makeTempDir("fleet-v3-untracked-hook-");
   const hookRepo = initGitRepo(hookRoot);
-  const hookPath = join(hookRepo, ".git", "hooks", "post-checkout");
+  const checkout = managedRepo(hookRoot, hookRepo);
+  const hookPath = join(checkout, ".git", "hooks", "post-checkout");
   writeFileSync(hookPath, "#!/bin/sh\necho junk > untracked.txt\nexit 1\n");
   chmodSync(hookPath, 0o755);
   const setupBoard = await startTestServer();
@@ -1142,7 +1269,7 @@ void test("a checkout Git refuses to remove is reported with its path, after a f
       delivery: "direct-pr",
     });
     await runLoop(setupBoard.client, makeConfig(hookRoot, hookRepo), { once: true });
-    const left = join(hookRoot, "workspaces", "cleo", "demo", "worktrees", "c-1-a1");
+    const left = join(hookRoot, "projects", "demo", "worktrees", "c-1-a1");
     assert.equal(await cardField(setupBoard.client, card.id, "state"), "held");
     assert.ok(existsSync(join(left, "untracked.txt")), "the unforced rollback leaves the checkout");
     const { entries } = await setupBoard.client.getThread(card.id);
@@ -1199,9 +1326,10 @@ void test("a checkout Git refuses to remove is reported with its path, after a f
 void test("a branch left from an earlier board is never overwritten or deleted by a new attempt", async () => {
   const root = makeTempDir("fleet-v3-branch-");
   const repoDir = initGitRepo(root);
+  const checkout = managedRepo(root, repoDir);
   const retained = "c-1-a1";
-  execFileSync("git", ["-C", repoDir, "branch", retained]);
-  const retainedSha = execFileSync("git", ["-C", repoDir, "rev-parse", retained], {
+  execFileSync("git", ["-C", checkout, "branch", retained]);
+  const retainedSha = execFileSync("git", ["-C", checkout, "rev-parse", retained], {
     encoding: "utf8",
   }).trim();
   writeFileSync(join(repoDir, "next.txt"), "advance main\n");
@@ -1224,7 +1352,7 @@ void test("a branch left from an earlier board is never overwritten or deleted b
     const config = makeConfig(root, repoDir, {
       repos: {
         demo: {
-          path: repoDir,
+          remote: repoDir,
           baseBranch: "no-such-branch",
           delivery: "direct-pr",
         },
@@ -1234,7 +1362,7 @@ void test("a branch left from an earlier board is never overwritten or deleted b
   } finally {
     await failing.stop();
   }
-  const afterFailure = execFileSync("git", ["-C", repoDir, "rev-parse", retained], {
+  const afterFailure = execFileSync("git", ["-C", checkout, "rev-parse", retained], {
     encoding: "utf8",
   }).trim();
   assert.equal(
@@ -1271,7 +1399,7 @@ void test("a branch left from an earlier board is never overwritten or deleted b
   const used = readFileSync(receiptPath, "utf8");
   assert.notEqual(used, retained, "the new attempt takes its own branch");
   assert.ok(used.startsWith(`${retained}-`));
-  const afterSuccess = execFileSync("git", ["-C", repoDir, "rev-parse", retained], {
+  const afterSuccess = execFileSync("git", ["-C", checkout, "rev-parse", retained], {
     encoding: "utf8",
   }).trim();
   assert.equal(afterSuccess, retainedSha, "the earlier branch keeps its commit");
@@ -1308,19 +1436,21 @@ async function runOneCard(root: string, repoDir: string, receiptPath: string): P
 void test("a branch name blocked by a ref namespace conflict takes a suffix, while a Git lock failure does not", async () => {
   const conflictRoot = makeTempDir("fleet-v3-namespace-");
   const conflictRepo = initGitRepo(conflictRoot);
+  const conflictCheckout = managedRepo(conflictRoot, conflictRepo);
   const conflictReceipt = join(conflictRoot, "receipt.txt");
-  execFileSync("git", ["-C", conflictRepo, "branch", "c-1-a1/topic"]);
+  execFileSync("git", ["-C", conflictCheckout, "branch", "c-1-a1/topic"]);
   await runOneCard(conflictRoot, conflictRepo, conflictReceipt);
   assert.match(readFileSync(conflictReceipt, "utf8"), /^c-1-a1-[a-zA-Z0-9]{6}$/u);
 
   const lockRoot = makeTempDir("fleet-v3-lock-");
   const lockRepo = initGitRepo(lockRoot);
+  const lockCheckout = managedRepo(lockRoot, lockRepo);
   const lockReceipt = join(lockRoot, "receipt.txt");
-  execFileSync("git", ["-C", lockRepo, "branch", "c-1-a1/topic"]);
-  writeFileSync(join(lockRepo, ".git", "refs", "heads", "c-1-a1.lock"), "");
+  execFileSync("git", ["-C", lockCheckout, "branch", "c-1-a1/topic"]);
+  writeFileSync(join(lockCheckout, ".git", "refs", "heads", "c-1-a1.lock"), "");
   await runOneCard(lockRoot, lockRepo, lockReceipt);
   assert.equal(existsSync(lockReceipt), false, "a Git lock failure must not start a worker");
-  const branches = execFileSync("git", ["-C", lockRepo, "branch", "--list", "c-*"], {
+  const branches = execFileSync("git", ["-C", lockCheckout, "branch", "--list", "c-*"], {
     encoding: "utf8",
   });
   assert.equal(
@@ -1330,15 +1460,13 @@ void test("a branch name blocked by a ref namespace conflict takes a suffix, whi
   );
 });
 
-void test("runner processes on different repos sharing a checkout root never take one checkout name, even before the path exists", async () => {
+void test("runner processes sharing a project root never take one checkout name, even before the path exists", async () => {
   const root = makeTempDir("fleet-v3-shared-root-");
-  mkdirSync(join(root, "a"));
-  mkdirSync(join(root, "b"));
-  const repoA = initGitRepo(join(root, "a"));
-  const repoB = initGitRepo(join(root, "b"));
+  const repoDir = initGitRepo(root);
   const holding = join(root, "a-holding");
   const release = join(root, "release");
-  const hook = join(repoA, ".git", "hooks", "reference-transaction");
+  const checkout = managedRepo(root, repoDir);
+  const hook = join(checkout, ".git", "hooks", "reference-transaction");
   writeFileSync(
     hook,
     [
@@ -1360,7 +1488,6 @@ void test("runner processes on different repos sharing a checkout root never tak
     const startRunner = (
       name: string,
       board: typeof boardA,
-      repoDir: string,
     ): { readonly receipt: string; readonly exited: Promise<number | null> } => {
       const receipt = join(root, `${name}.branch`);
       const configPath = join(root, `${name}.yaml`);
@@ -1396,25 +1523,25 @@ void test("runner processes on different repos sharing a checkout root never tak
       });
     }
 
-    const first = startRunner("a", boardA, repoA);
+    const first = startRunner("a", boardA);
     assert.ok(await waitFor(() => existsSync(holding), 15_000), "runner A reached branch setup");
     assert.equal(
-      existsSync(join(root, "workspaces", "cleo", "demo", "worktrees", "c-1-a1")),
+      existsSync(join(root, "projects", "demo", "worktrees", "c-1-a1")),
       false,
       "the checkout path does not exist while runner A holds its name",
     );
 
-    const second = startRunner("b", boardB, repoB);
+    const second = startRunner("b", boardB);
     assert.equal(
       await within(second.exited, 20_000),
       0,
       "runner B finishes without waiting for runner A's reservation",
     );
     assert.match(readFileSync(second.receipt, "utf8"), /^c-1-a1-[a-zA-Z0-9]{6}$/u);
-    const refsInB = execFileSync("git", ["-C", repoB, "branch", "--list", "c-1-a1"], {
+    const refsInB = execFileSync("git", ["-C", checkout, "branch", "--list", "c-1-a1"], {
       encoding: "utf8",
     });
-    assert.equal(refsInB.trim(), "", "runner B never took the canonical name in its own repo");
+    assert.equal(refsInB.trim(), "", "runner B never took the canonical branch name");
 
     writeFileSync(release, "");
     assert.equal(await within(first.exited, 20_000), 0, "runner A finishes once released");
@@ -1436,8 +1563,9 @@ void test("a checkout another repo creates at the reserved path survives this at
   mkdirSync(join(root, "b"));
   const repoA = initGitRepo(join(root, "a"));
   const repoB = initGitRepo(join(root, "b"));
-  const occupied = join(root, "workspaces", "cleo", "demo", "worktrees", "c-1-a1");
-  const hook = join(repoA, ".git", "hooks", "reference-transaction");
+  const occupied = join(root, "projects", "demo", "worktrees", "c-1-a1");
+  const checkoutA = managedRepo(root, repoA);
+  const hook = join(checkoutA, ".git", "hooks", "reference-transaction");
   writeFileSync(
     hook,
     [
@@ -1472,7 +1600,7 @@ void test("a checkout another repo creates at the reserved path survives this at
     encoding: "utf8",
   });
   assert.ok(worktreesOfB.includes("refs/heads/other"));
-  const branchesOfA = execFileSync("git", ["-C", repoA, "branch", "--list", "c-*"], {
+  const branchesOfA = execFileSync("git", ["-C", checkoutA, "branch", "--list", "c-*"], {
     encoding: "utf8",
   });
   assert.equal(branchesOfA.trim(), "", "the failed attempt's own branch is removed");

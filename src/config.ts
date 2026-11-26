@@ -9,8 +9,9 @@ export type SpawnMode = "local" | "docker" | "container";
 export type KeepPanePolicy = "never" | "on-failure" | "always";
 
 const RepoConfigSchema = z.object({
-  path: z.string().min(1),
-  baseBranch: z.string().min(1).default("main"),
+  remote: z.string().min(1),
+  baseBranch: z.string().min(1).optional(),
+  bootstrap: z.string().min(1).optional(),
   delivery: z.enum(DELIVERIES).default("no-mistakes"),
 });
 
@@ -97,6 +98,7 @@ const VerifyConfigSchema = z.object({
 
 const FleetConfigObjectSchema = z.object({
   boardUrl: z.url().default("http://127.0.0.1:4100"),
+  defaultHost: z.string().min(1).optional(),
   workspacesRoot: z.string().min(1).default("~/.fleet/workspaces"),
   server: ServerConfigSchema.optional(),
   mates: MatesConfigSchema.optional(),
@@ -156,7 +158,8 @@ const RunnerConfigSchema = FleetConfigObjectSchema.extend({
     command: ["no-mistakes", "axi", "run", "--wait", "5m"],
     respondCommand: ["no-mistakes", "axi", "respond", "--wait", "5m", "--action", "fix"],
   }),
-  repos: z.record(z.string().min(1), RepoConfigSchema),
+  projectsRoot: z.string().min(1).default("~/.fleet-v3/projects"),
+  repos: z.record(z.string().regex(/^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/u), RepoConfigSchema),
 })
   .superRefine(checkMateHierarchy)
   .refine(
@@ -282,6 +285,7 @@ function normalizeFleetConfig(parsed: FleetConfig, baseDir: string): FleetConfig
   return {
     boardUrl: process.env["BOARD_URL"] ?? parsed.boardUrl,
     workspacesRoot: expandPath(parsed.workspacesRoot, baseDir),
+    ...(parsed.defaultHost !== undefined ? { defaultHost: parsed.defaultHost } : {}),
     ...(server !== undefined ? { server } : {}),
     ...(mates !== undefined ? { mates } : {}),
   };
@@ -297,7 +301,14 @@ export function loadConfig(configPath?: string): RunnerConfig {
   const parsed = RunnerConfigSchema.parse(data);
   const repos: Record<string, RepoConfig> = {};
   for (const [name, repo] of Object.entries(parsed.repos)) {
-    repos[name] = { ...repo, path: expandPath(repo.path, baseDir) };
+    const remote = /^(?:\.\.?\/|~\/)/u.test(repo.remote)
+      ? expandPath(repo.remote, baseDir)
+      : repo.remote;
+    repos[name] = {
+      ...repo,
+      remote,
+      ...(repo.bootstrap === undefined ? {} : { bootstrap: expandPath(repo.bootstrap, baseDir) }),
+    };
   }
   const container = normalizeContainerConfig(
     parsed.spawn.container ?? parsed.spawn.docker,
@@ -314,6 +325,7 @@ export function loadConfig(configPath?: string): RunnerConfig {
       ...parsed.spawn,
       ...(container !== undefined ? { container } : {}),
     },
+    projectsRoot: expandPath(parsed.projectsRoot, baseDir),
     repos,
   };
 }

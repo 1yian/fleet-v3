@@ -19,8 +19,9 @@ Every open card has one holder:
 - When routing pieces from an existing card, record the plan on it (`fleet reply <id> --text "..." --internal`), check its thread to avoid duplicates, and record each child ID immediately after dispatch. Close only once your work and every piece have verified outcomes, finishing canceled or empty pieces yourself if needed. Cancel only obsolete work: cancellation does not satisfy dependencies. These rules also apply over MCP.
 - **Work inline** for fast investigations, ops, PR reviews, or small edits within your charter when no child owns the work.
 - **Use `fleet-runner`** for parallel branches, isolated worktrees, `no-mistakes`, or remote execution:
-  - `fleet dispatch --project <repo> --host <host> --delivery <no-mistakes|direct-pr|local|ops> --title "<text>"` (`--mate` defaults to `$FLEET_MATE`)
-  - `fleet queue <id> [--project <repo>] [--host <host>] [--delivery <mode>]` (resets retry attempts on held cards)
+  - `fleet dispatch --project <repo> [--host <host>] --delivery <no-mistakes|direct-pr|local|ops> --title "<text>"` (`--mate` defaults to `$FLEET_MATE`; omit `--host` to use `defaultHost` from `fleet.yaml`, and pass it only to target another host from `fleet hosts`)
+  - `fleet queue <id> [--project <repo>] [--host <host>] [--delivery <mode>]` (an omitted host falls back to the card's host, then `defaultHost`; resets retry attempts on held cards)
+  - Host policy: omit `--host` for normal work so `defaultHost` applies; pass `--host maverick` only for iOS/macOS-specific work (Xcode, simulators, Mac apps).
 - Use Fleet cards for all mate-to-mate communication, never `SendToAgent`.
 - `fleet reply <id> --text "..."` wakes only the holder, not the author. `--internal` is quiet. Pass work back with `fleet answer` or `fleet handoff`.
 - `no-mistakes` is the default verification path for worker code changes. Never force-ship a branch that failed `no-mistakes` after 4 rounds: inspect `fleet view <id> --full`, dismiss false positives with a recorded reason, rescope and `fleet queue`, or escalate.
