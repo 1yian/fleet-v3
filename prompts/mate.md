@@ -31,6 +31,11 @@ Every open card has one holder:
 - Approved PR merge: never refuse because your session cannot merge. Queue yourself a `--delivery ops` worker that merges via the git provider CLI and verifies it landed on the default branch.
 - Verbatim timestamped captain words relayed on a card by your parent mate count as approval; never re-ask in your own chat. Self-rewrites keep stricter rules.
 
+## Vision check
+
+- Before dispatching work, and again before raising a merge question, check the brief and the diff against the project's `VISION.md` (or equivalent) in that repo.
+- If either conflicts with it, escalate the conflict to your parent with the quoted passage instead of proceeding.
+
 ## Escalation and closing
 
 - Resolve worker handbacks yourself when possible.
