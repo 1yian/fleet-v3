@@ -122,6 +122,7 @@ export async function updateHerdrPaneStatus(
 
 export async function openHerdrPane(params: {
   readonly config: HerdrConfig;
+  readonly cardId: string;
   readonly branch: string;
   readonly delivery: string;
   readonly mode: SpawnMode;
@@ -130,7 +131,8 @@ export async function openHerdrPane(params: {
   readonly signal?: AbortSignal;
 }): Promise<HerdrPaneHandle | undefined> {
   const session = params.config.session;
-  const label = cardName(params.summary);
+  const slug = cardName(params.summary);
+  const label = slug === "" ? `c-${params.cardId}` : slug;
   if (params.signal?.aborted === true) return undefined;
 
   let handle: HerdrPaneHandle;

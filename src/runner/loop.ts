@@ -257,6 +257,7 @@ function openWorkerPane(
   if (config.spawn.viewport !== "herdr") return Promise.resolve(undefined);
   return openHerdrPane({
     config: resolveHerdrConfig(config.spawn),
+    cardId: claim.card.id,
     branch: workspace.branch,
     delivery,
     mode: config.spawn.mode,
@@ -291,12 +292,21 @@ async function teardownWorkspace(
 ): Promise<void> {
   try {
     await cleanupWorkspace(workspace);
-  } catch (error) {
-    await client.postEntry(cardId, {
-      text: `Runner ${config.host} could not clean up the checkout for card #${cardId}: ${error instanceof Error ? error.message : String(error)}`,
-      by: runnerActor(config.host),
-      kind: "status",
-    });
+  } catch (cleanupError) {
+    const reason = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+    try {
+      await client.postEntry(cardId, {
+        text: `Runner ${config.host} could not clean up the checkout for card #${cardId}: ${reason}`,
+        by: runnerActor(config.host),
+        internal: true,
+        kind: "status",
+      });
+    } catch (postError) {
+      const postReason = postError instanceof Error ? postError.message : String(postError);
+      process.stderr.write(
+        `Runner ${config.host} could not clean up ${workspace.worktreePath} for card #${cardId}: ${reason}; reporting it failed: ${postReason}\n`,
+      );
+    }
   }
 }
 

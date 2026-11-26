@@ -869,6 +869,26 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
           : "fix-those-five-words";
       assert.equal(labels.get(pane.workspace_id), expected);
     }
+
+    const cjkCard = await client.createCard({
+      mate: "cleo",
+      title: "修复登录",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    await runLoop(client, failConfig, { once: true });
+    const panesAfterCjk = HerdrPaneListSchema.parse(JSON.parse(herdrExec("pane", "list")));
+    const cjkPane = panesAfterCjk.result.panes.find(
+      (pane) => pane.tokens.branch === `c-${cjkCard.id}-a1`,
+    );
+    assert.ok(cjkPane !== undefined, "the non-ASCII card keeps its failed pane open");
+    const cjkWorkspaces = HerdrWorkspaceListSchema.parse(JSON.parse(herdrExec("workspace", "list")))
+      .result.workspaces;
+    const cjkLabels = new Map(
+      cjkWorkspaces.map((workspace) => [workspace.workspace_id, workspace.label]),
+    );
+    assert.equal(cjkLabels.get(cjkPane.workspace_id), `c-${cjkCard.id}`);
   } finally {
     tryExecSilent(() => {
       herdrExec("server", "stop");
