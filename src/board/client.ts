@@ -58,8 +58,16 @@ export interface BoardClient {
     id: string,
     input: ClaimFenceInput & { readonly leaseSeconds: number },
   ) => Promise<{ readonly leaseUntil: number }>;
-  readonly releaseClaim: (id: string, input: ClaimFenceInput) => Promise<Card>;
-  readonly finishClaim: (id: string, input: FinishClaimInput) => Promise<Card>;
+  readonly releaseClaim: (
+    id: string,
+    input: ClaimFenceInput,
+    signal?: AbortSignal,
+  ) => Promise<Card>;
+  readonly finishClaim: (
+    id: string,
+    input: FinishClaimInput,
+    signal?: AbortSignal,
+  ) => Promise<Card>;
   readonly advertiseHost: (input: AdvertiseHostInput) => Promise<HostInfo>;
   readonly listHosts: (signal?: AbortSignal) => Promise<HostInfo[]>;
   readonly getCharter: (mate: string, signal?: AbortSignal) => Promise<string>;
@@ -281,21 +289,21 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
         method: "POST",
         body: input,
       }),
-    releaseClaim: async (id, input) => {
+    releaseClaim: async (id, input, signal) => {
       const res = await requestJson(
         cleanBase,
         `/api/cards/${encodeURIComponent(id)}/release`,
         CardWrapSchema,
-        { method: "POST", body: input },
+        { method: "POST", body: input, ...requestOptions(signal) },
       );
       return res.card;
     },
-    finishClaim: async (id, input) => {
+    finishClaim: async (id, input, signal) => {
       const res = await requestJson(
         cleanBase,
         `/api/cards/${encodeURIComponent(id)}/finish`,
         CardWrapSchema,
-        { method: "POST", body: input },
+        { method: "POST", body: input, ...requestOptions(signal) },
       );
       return res.card;
     },

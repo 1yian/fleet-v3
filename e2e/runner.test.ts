@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -16,6 +17,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import type { BoardClient } from "../src/board/client.ts";
 import type { RunnerConfig } from "../src/config.ts";
 import { runLoop } from "../src/runner/loop.ts";
 import { attachFleetPiAdapter } from "../src/adapters/pi.ts";
@@ -1268,9 +1270,8 @@ void test("Git removal stays visible despite scratch and reporting failures, wit
         assert.equal(status.internal, true);
       }
       const report = rejectsReporting ? reports.join("") : (status?.text ?? "");
-      assert.ok(
-        report.includes(`left the checkout at ${join(lockProject, "worktrees", checkout)}`),
-      );
+      const lockCheckoutPath = join(realpathSync(lockProject), "worktrees", checkout);
+      assert.ok(report.includes(`left the checkout at ${lockCheckoutPath}`));
       if (cannotRemoveScratch)
         assert.match(
           report,
@@ -1281,6 +1282,60 @@ void test("Git removal stays visible despite scratch and reporting failures, wit
   } finally {
     restoreScratch(lockProject);
     await lockBoard.stop();
+  }
+});
+
+void test("a finish request the board never answers is bounded, tears the checkout down, and logs no worker output", async (t) => {
+  const root = makeTempDir("fleet-v3-stalled-finish-");
+  const repoDir = initGitRepo(root);
+  const server = await startTestServer();
+  const { client } = server;
+  const secret = "hunter2-private-worker-output";
+  const reports: string[] = [];
+  const stderr = t.mock.method(process.stderr, "write", (chunk: string | Uint8Array) => {
+    reports.push(String(chunk));
+    return true;
+  });
+  const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, "timeout", () => realTimeout(200));
+  const finishes: string[] = [];
+  try {
+    await client.createCard({
+      mate: "cleo",
+      title: "Board stalls on finish",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    const config = makeConfig(root, repoDir, {
+      spawn: {
+        mode: "local",
+        viewport: "headless",
+        direnv: false,
+        command: ["node", "-e", `console.log("${secret}"); process.exit(3)`],
+      },
+    });
+    const stalled: BoardClient = {
+      ...client,
+      finishClaim: (_id, input, signal) => {
+        finishes.push(input.outcome);
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => {
+            reject(new Error("finish request timed out"));
+          });
+        });
+      },
+    };
+    const outcome = await within(runLoop(stalled, config, { once: true }), 10_000);
+    assert.notEqual(outcome, "timeout", "a stalled finish must not block the runner");
+    assert.deepEqual(finishes, ["needs_mate"]);
+    const log = reports.join("");
+    assert.match(log, /could not finish card[\s\S]+finish request timed out[\s\S]+needs_mate/u);
+    assert.ok(!log.includes(secret), "the daemon log must not carry worker output");
+    assert.deepEqual(listed(join(root, "workspaces", "cleo", "demo", "worktrees")), []);
+  } finally {
+    stderr.mock.restore();
+    await server.stop();
   }
 });
 

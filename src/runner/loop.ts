@@ -150,6 +150,18 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const CLAIM_REQUEST_TIMEOUT_MS = 10_000;
+
+async function releaseClaim(client: BoardClient, claim: ClaimReceipt): Promise<void> {
+  await client
+    .releaseClaim(
+      claim.card.id,
+      { epoch: claim.epoch, token: claim.token },
+      AbortSignal.timeout(CLAIM_REQUEST_TIMEOUT_MS),
+    )
+    .catch(() => undefined);
+}
+
 async function finishClaim(
   client: BoardClient,
   config: RunnerConfig,
@@ -158,16 +170,20 @@ async function finishClaim(
   summary: string,
 ): Promise<void> {
   try {
-    await client.finishClaim(claim.card.id, {
-      epoch: claim.epoch,
-      token: claim.token,
-      outcome,
-      summary,
-      actor: runnerActor(config.host),
-    });
+    await client.finishClaim(
+      claim.card.id,
+      {
+        epoch: claim.epoch,
+        token: claim.token,
+        outcome,
+        summary,
+        actor: runnerActor(config.host),
+      },
+      AbortSignal.timeout(CLAIM_REQUEST_TIMEOUT_MS),
+    );
   } catch (error) {
     process.stderr.write(
-      `Runner ${config.host} could not finish card #${claim.card.id} attempt ${String(claim.epoch)}: ${errorMessage(error)}; intended outcome ${outcome}: ${summary}\n`,
+      `Runner ${config.host} could not finish card #${claim.card.id} attempt ${String(claim.epoch)}: ${errorMessage(error)}; intended outcome ${outcome}\n`,
     );
   }
 }
@@ -184,9 +200,7 @@ async function handleRunOutcome(params: {
     return { done: true, failed: true, message: "Lease lost" };
   }
   if (params.run.aborted) {
-    await params.client
-      .releaseClaim(cardId, { epoch: params.claim.epoch, token: params.claim.token })
-      .catch(() => undefined);
+    await releaseClaim(params.client, params.claim);
     return { done: true, failed: true, message: "Aborted" };
   }
   if (params.run.timedOut !== null) {
@@ -316,7 +330,7 @@ async function teardownClaim(
         internal: true,
         kind: "status",
       },
-      AbortSignal.timeout(5000),
+      AbortSignal.timeout(CLAIM_REQUEST_TIMEOUT_MS),
     );
   } catch (error) {
     process.stderr.write(`${text}; reporting it failed: ${errorMessage(error)}\n`);
@@ -401,9 +415,7 @@ async function runClaim(
     if (controller.signal.aborted) {
       keepPane = "never";
       finalPaneMessage = "Shutdown before launch";
-      await client
-        .releaseClaim(cardId, { epoch: claim.epoch, token: claim.token })
-        .catch(() => undefined);
+      await releaseClaim(client, claim);
       return;
     }
 

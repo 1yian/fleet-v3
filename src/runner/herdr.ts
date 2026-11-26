@@ -100,12 +100,12 @@ function cardName(title: string): string {
   return words.slice(0, 4).join("-").slice(0, 40).replace(/-+$/u, "");
 }
 
-export async function updateHerdrPaneStatus(
+function reportPaneAgent(
   handle: HerdrPaneHandle,
   state: "idle" | "working" | "blocked",
   message: string,
-): Promise<void> {
-  await runHerdr(handle.session, [
+): Promise<string> {
+  return runHerdr(handle.session, [
     "pane",
     "report-agent",
     handle.paneId,
@@ -117,7 +117,15 @@ export async function updateHerdrPaneStatus(
     state,
     "--message",
     message.slice(0, 140),
-  ]).catch(() => undefined);
+  ]);
+}
+
+export async function updateHerdrPaneStatus(
+  handle: HerdrPaneHandle,
+  state: "idle" | "working" | "blocked",
+  message: string,
+): Promise<void> {
+  await reportPaneAgent(handle, state, message).catch(() => undefined);
 }
 
 export async function openHerdrPane(params: {
@@ -183,11 +191,15 @@ export async function closeHerdrPane(
     readonly message: string;
   },
 ): Promise<void> {
-  await updateHerdrPaneStatus(handle, options.failed ? "blocked" : "idle", options.message);
+  const failures: string[] = [];
+  const record = (error: unknown): void => {
+    failures.push(error instanceof Error ? error.message : String(error));
+  };
+  await reportPaneAgent(handle, options.failed ? "blocked" : "idle", options.message).catch(record);
   const shouldClose =
     options.keepPane === "never" || (options.keepPane === "on-failure" && !options.failed);
-  if (!shouldClose) return;
-  await runHerdr(handle.session, ["pane", "close", handle.paneId]);
+  if (shouldClose) await runHerdr(handle.session, ["pane", "close", handle.paneId]).catch(record);
+  if (failures.length > 0) throw new Error(failures.join("; "));
 }
 
 function readRecordedPid(pidFile: string): number | undefined {
