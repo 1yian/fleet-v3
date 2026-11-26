@@ -10,7 +10,7 @@ This guide is for non-coding and chat-based agent platforms (such as **Grok Bot*
 
 Ask the captain only for anything missing from their message:
 
-- **Mate name:** defaults to `1stmate` (or a domain name like `cleo` for a `2ndmate`).
+- **Mate name:** defaults to `1stmate` (or a domain name like `docs` for a `2ndmate`).
 - **Option A (shell access):** `BOARD_URL`, the HTTP URL of the captain's Fleet Card Server reachable from your runtime (for example `http://127.0.0.1:4100` on the same machine, or a private Tailscale/tunnel URL).
 - **Option B (no shell access):** the Fleet MCP URL only (for example `http://<reachable-ip>:4102/mcp?mate=<mate>`). You do not need the Card Server URL; `BOARD_URL` stays on the Control Host process that runs `fleet mcp`.
 

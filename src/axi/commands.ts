@@ -54,15 +54,15 @@ export const COMMAND_HELP: Readonly<Record<string, string>> = {
 Usage:
   fleet cards [--mate <name>] [--holder <name>] [--state <state>] [--fields <cols>] [--limit <n>]
 Flags:
-  --mate <name>      Filter to cards owned by one mate (e.g. 1stmate, cleo)
-  --holder <name>    Filter to cards currently held by one actor (e.g. captain, 1stmate, cleo)
+  --mate <name>      Filter to cards owned by one mate (e.g. 1stmate, docs)
+  --holder <name>    Filter to cards currently held by one actor (e.g. captain, 1stmate, docs)
   --state <state>    open (default), all, waiting, queued, running, held, done, canceled
   --fields <cols>    Extra columns: ${OPTIONAL_FIELDS.join(", ")}
   --limit <n>        Max rows to show (default: ${String(LIST_DEFAULT_LIMIT)})
 Examples:
   fleet cards
   fleet cards --holder captain
-  fleet cards --mate cleo --state all --fields project,host,result`,
+  fleet cards --mate docs --state all --fields project,host,result`,
   view: `fleet view - inspect one card and its thread
 Usage:
   fleet view <id> [--full]
@@ -79,13 +79,13 @@ Flags:
   --title <text>     Required card title or intent
   --body <spec>      Optional additional spec text
   --project <repo>   Repository name for fleet-runner (mates spawn workers only for themselves)
-  --host <host>      Execution host name (e.g. maverick, p620; defaults to defaultHost in fleet.yaml; requires --project)
+  --host <host>      Execution host name (e.g. macbook, build-server; defaults to defaultHost in fleet.yaml; requires --project)
   --delivery <mode>  ${DELIVERIES.join(" | ")}
   --needs <ids>      Comma-separated prerequisite card IDs
 Examples:
-  fleet dispatch --mate cleo --title "Investigate recent conversion drop"
-  fleet dispatch --project Cleo --host p620 --title "Fix webhook timeout"
-  fleet dispatch --project Cleo --title "Fix webhook timeout"   (uses defaultHost)`,
+  fleet dispatch --mate docs --title "Investigate recent conversion drop"
+  fleet dispatch --project example-app --host build-server --title "Fix webhook timeout"
+  fleet dispatch --project example-app --title "Fix webhook timeout"   (uses defaultHost)`,
   queue: `fleet queue - put a held card in the runner queue for a worker (resets retry attempts on held cards)
 Usage:
   fleet queue <id> [--project <repo>] [--host <host>] [--delivery <mode>]

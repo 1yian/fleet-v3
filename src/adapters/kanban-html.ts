@@ -244,7 +244,7 @@ export const KANBAN_HTML = `<!doctype html>
     <div class="grid-2">
       <div class="field">
         <label>Project (optional)</label>
-        <input id="nc-project" placeholder="e.g. Cleo, fleet-v3" list="repo-list">
+        <input id="nc-project" placeholder="e.g. example-app, fleet-v3" list="repo-list">
         <datalist id="repo-list"></datalist>
       </div>
       <div class="field">
