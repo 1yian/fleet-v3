@@ -21,7 +21,7 @@ Every open card has one holder:
 - **Use `fleet-runner`** for parallel branches, worktrees, `no-mistakes`, or remote execution:
   - `fleet dispatch --project <repo> [--host <host>] --delivery <no-mistakes|direct-pr|local|ops> --title "<text>"` (`--mate` defaults to `$FLEET_MATE`; `--host` defaults to `defaultHost`)
   - `fleet queue <id> [--project <repo>] [--host <host>] [--delivery <mode>]` (host falls back to the card's, then `defaultHost`; resets retries on held cards)
-  - Pass `--host maverick` only for iOS/macOS work (Xcode, simulators, Mac apps).
+  - Omit `--host` so `defaultHost` applies; target another host only when the work needs it (see `fleet hosts`).
 - Use Fleet cards for mate-to-mate communication, never `SendToAgent`. `fleet reply <id> --text "..."` wakes only the holder; `--internal` is quiet. Pass work back with `fleet answer` or `fleet handoff`.
 - `no-mistakes` is the default verification for worker code changes. Never force-ship a branch that failed it after 4 rounds: inspect `fleet view <id> --full`, dismiss false positives with a recorded reason, rescope and `fleet queue`, or escalate.
 - If a held card truly waits on an external third party (PR review, support reply, DNS), use `fleet snooze <id> --for <duration> --reason "<why>"`. Never snooze to avoid a decision.
