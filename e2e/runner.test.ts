@@ -758,7 +758,12 @@ export FLEET_E2E_BOOTSTRAPPED
 
       const config = makeConfig(root, repoDir, {
         repos: {
-          demo: { remote: repoDir, bootstrap: relative(root, bootstrap), delivery: "direct-pr" },
+          demo: {
+            remote: repoDir,
+            bootstrap: relative(root, bootstrap),
+            delivery: "direct-pr",
+            yolo: false,
+          },
         },
         idleTimeoutSeconds: 30,
         maxWallSeconds: 60,

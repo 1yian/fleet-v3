@@ -55,6 +55,10 @@ function initGitRepo(root: string): string {
   writeFileSync(join(repoDir, "README.md"), "# demo\n");
   execFileSync("git", ["-C", repoDir, "add", "README.md"]);
   execFileSync("git", ["-C", repoDir, "commit", "-m", "init"], { stdio: "ignore" });
+  mkdirSync(join(root, "projects", "demo"), { recursive: true });
+  execFileSync("git", ["clone", "--no-local", repoDir, join(root, "projects", "demo", "repo")], {
+    stdio: "ignore",
+  });
   return repoDir;
 }
 
@@ -64,6 +68,7 @@ function makeConfig(root: string, repoDir: string, boardUrl: string, yolo: boole
     boardUrl,
     matesFilter: [],
     workspacesRoot: join(root, "workspaces"),
+    projectsRoot: join(root, "projects"),
     concurrency: 1,
     leaseSeconds: 60,
     idleTimeoutSeconds: 10,
@@ -82,7 +87,7 @@ function makeConfig(root: string, repoDir: string, boardUrl: string, yolo: boole
       command: ["node", "-e", "process.exit(0)"],
       respondCommand: ["node", "-e", "process.exit(0)"],
     },
-    repos: { demo: { path: repoDir, baseBranch: "main", delivery: "direct-pr", yolo } },
+    repos: { demo: { remote: repoDir, baseBranch: "main", delivery: "direct-pr", yolo } },
   };
 }
 
