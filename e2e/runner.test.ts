@@ -512,10 +512,35 @@ void test("a requeued card runs its next attempt in its own workspace while the 
   }
 });
 
+const GATE_OUTPUT = [
+  "gate: review",
+  "findings[3]{id,severity,file,line,action,description}:",
+  '  r1,warning,src/a.ts,,auto-fix,"Ignored error, again"',
+  "  r2,error,src/b.ts,12,ask-user,New flag bypasses the prompt",
+  "  r3,info,src/c.ts,,no-op,Informational only",
+  "help[1]:",
+  "  Run `no-mistakes axi respond --action approve` to accept this step",
+].join("\n");
+
+function gateVerifier(argvLog: string, outputs: readonly string[]): string[] {
+  return [
+    "node",
+    "-e",
+    `
+      const fs = require("node:fs");
+      const round = Number(process.env.FLEET_REVIEW_ROUND);
+      fs.appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(1)) + "\\n");
+      const outputs = ${JSON.stringify(outputs)};
+      console.log(outputs[Math.min(round, outputs.length) - 1]);
+    `,
+    "--",
+  ];
+}
+
 void test("caps no-mistakes verification at 4 rounds and hands back to mate without force-shipping", async () => {
   const root = makeTempDir("fleet-v3-e2e-");
   const repoDir = initGitRepo(root);
-  const roundsLog = join(root, "rounds.log");
+  const argvLog = join(root, "argv.log");
   const server = await startTestServer();
   const { client } = server;
 
@@ -529,33 +554,28 @@ void test("caps no-mistakes verification at 4 rounds and hands back to mate with
       delivery: "no-mistakes",
     });
 
-    const failVerify = `
-      const fs = require("node:fs");
-      const at = process.argv.indexOf("--intent");
-      const intent = at === -1 ? "none" : process.argv[at + 1];
-      fs.appendFileSync(${JSON.stringify(roundsLog)}, process.env.FLEET_REVIEW_ROUND + "|" + JSON.stringify(intent) + "\\n");
-      console.error("findings: reviewer raised another nitpick");
-      process.exit(1);
-    `;
-
+    const verifier = gateVerifier(argvLog, [GATE_OUTPUT]);
     const config = makeConfig(root, repoDir, {
       maxReviewRounds: 4,
-      verify: {
-        command: ["node", "-e", failVerify, "--"],
-        respondCommand: ["node", "-e", failVerify, "--"],
-      },
+      verify: { command: verifier, respondCommand: verifier },
     });
 
     const handled = await runLoop(client, config, { once: true });
     assert.equal(handled, 1);
 
-    const rounds = readFileSync(roundsLog, "utf8").trim().split("\n");
-    assert.deepEqual(rounds, [
-      `1|${JSON.stringify("Change that never converges in review\n\nReviewer keeps raising nitpicks")}`,
-      '2|"none"',
-      '3|"none"',
-      '4|"none"',
-    ]);
+    const calls = readFileSync(argvLog, "utf8").trim().split("\n");
+    assert.equal(calls.length, 4);
+    assert.equal((JSON.parse(calls[0] ?? "") as string[])[0], "--intent");
+    for (const call of calls.slice(1)) {
+      assert.deepEqual(JSON.parse(call), [
+        "--action",
+        "fix",
+        "--findings",
+        "r1,r2",
+        "--ignore",
+        "r3",
+      ]);
+    }
 
     const thread = await client.getThread(card.id);
     assert.equal(thread.card.state, "held");
@@ -564,6 +584,79 @@ void test("caps no-mistakes verification at 4 rounds and hands back to mate with
       thread.entries.some((entry) => /stopped at round 4\/4/iu.test(entry.text)),
       "expected 4-round handback summary in thread",
     );
+  } finally {
+    await server.stop();
+  }
+});
+
+void test("a review gate is answered with finding IDs until the run passes, and approved once only informational findings remain", async () => {
+  const root = makeTempDir("fleet-v3-e2e-");
+  const repoDir = initGitRepo(root);
+  const argvLog = join(root, "argv.log");
+  const server = await startTestServer();
+  const { client } = server;
+
+  try {
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Change that converges after one fix round",
+      host: "test-host",
+      project: "demo",
+      delivery: "no-mistakes",
+    });
+
+    const informational = [
+      "gate: review",
+      "findings[1]{id,severity,file,line,action,description}:",
+      "  r3,info,src/c.ts,,no-op,Informational only",
+    ].join("\n");
+    const verifier = gateVerifier(argvLog, [GATE_OUTPUT, informational, "outcome: checks-passed"]);
+    const config = makeConfig(root, repoDir, {
+      verify: { command: verifier, respondCommand: verifier },
+    });
+
+    assert.equal(await runLoop(client, config, { once: true }), 1);
+
+    const calls = readFileSync(argvLog, "utf8")
+      .trim()
+      .split("\n")
+      .map((call): unknown => JSON.parse(call));
+    assert.equal((calls[0] as string[])[0], "--intent");
+    assert.deepEqual(calls.slice(1), [
+      ["--action", "fix", "--findings", "r1,r2", "--ignore", "r3"],
+      ["--action", "approve"],
+    ]);
+    assert.equal(await cardField(client, card.id, "state"), "done");
+  } finally {
+    await server.stop();
+  }
+});
+
+void test("a failing verifier with no open gate hands back to the mate immediately", async () => {
+  const root = makeTempDir("fleet-v3-e2e-");
+  const repoDir = initGitRepo(root);
+  const server = await startTestServer();
+  const { client } = server;
+
+  try {
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "Change whose pipeline fails outright",
+      host: "test-host",
+      project: "demo",
+      delivery: "no-mistakes",
+    });
+    const failed = ["node", "-e", 'console.log("outcome: failed"); process.exit(1)'];
+    const config = makeConfig(root, repoDir, {
+      verify: { command: failed, respondCommand: ["node", "-e", "process.exit(0)"] },
+    });
+
+    assert.equal(await runLoop(client, config, { once: true }), 1);
+
+    const thread = await client.getThread(card.id);
+    assert.equal(thread.card.state, "held");
+    assert.equal(thread.card.holder, "cleo");
+    assert.ok(thread.entries.some((entry) => /stopped at round 1\/4/iu.test(entry.text)));
   } finally {
     await server.stop();
   }

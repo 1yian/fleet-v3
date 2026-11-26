@@ -97,7 +97,7 @@ const VerifyConfigSchema = z.object({
   respondCommand: z
     .array(z.string().min(1))
     .min(1)
-    .default(["no-mistakes", "axi", "run", "--yes", "--wait", "5m"]),
+    .default(["no-mistakes", "axi", "respond", "--wait", "5m"]),
 });
 
 const FleetConfigObjectSchema = z.object({
@@ -159,8 +159,8 @@ const RunnerConfigSchema = FleetConfigObjectSchema.extend({
   workerPromptPath: z.string().min(1).optional(),
   spawn: SpawnConfigSchema,
   verify: VerifyConfigSchema.default({
-    command: ["no-mistakes", "axi", "run", "--yes", "--wait", "5m"],
-    respondCommand: ["no-mistakes", "axi", "run", "--yes", "--wait", "5m"],
+    command: ["no-mistakes", "axi", "run", "--wait", "5m"],
+    respondCommand: ["no-mistakes", "axi", "respond", "--wait", "5m"],
   }),
   projectsRoot: z.string().min(1).default("~/.fleet-v3/projects"),
   repos: z.record(z.string().regex(/^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/u), RepoConfigSchema),

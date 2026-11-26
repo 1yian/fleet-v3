@@ -40,7 +40,6 @@ import {
 } from "./board/wake.ts";
 import { extractMateParents, loadFleetConfig, type FleetConfig } from "./config.ts";
 import { diagnoseMate, ensureMatesUp, listMates, runMateChat, stopMates } from "./mates.ts";
-import { publishPromptUpdates } from "./prompt-updates.ts";
 import { VERSION } from "./version.ts";
 
 const DESCRIPTION = "Coordinate parallel multi-machine mates and workers on a minimal Card Server";
@@ -250,13 +249,9 @@ const MATES_HELP = `fleet mates - Manage permanent local and external mates
 Usage:
   fleet mates [status] [--config <path>]           Show status of configured mates
   fleet mates up [name] [--all] [--config <path>]  Idempotently start permanent mate panes
-  fleet mates stop <name|--all> [--config <path>]  Close mate pane(s) in Herdr
-  fleet mates prompt-updates [revision] [--config <path>]  Notify external mates of changed prompts (default: HEAD)`;
+  fleet mates stop <name|--all> [--config <path>]  Close mate pane(s) in Herdr`;
 
-async function matesCommand(
-  args: string[],
-  ctx: FleetAxiContext | undefined,
-): Promise<Record<string, unknown>> {
+async function matesCommand(args: string[]): Promise<Record<string, unknown>> {
   const parsed = parseStrictFlags(
     "mates",
     args,
@@ -298,19 +293,6 @@ async function matesCommand(
         all,
       }),
     };
-  }
-  if (sub === "prompt-updates") {
-    if (all || parsed.positionals.length > 2) {
-      throw new AxiError("Specify at most one Git revision", "VALIDATION_ERROR", [MATES_HELP]);
-    }
-    if (ctx?.actor !== "captain" || ctx.fence.epoch !== undefined) {
-      throw new AxiError(
-        "Publish prompt updates from the Control Host as captain",
-        "VALIDATION_ERROR",
-      );
-    }
-    const cards = await publishPromptUpdates(config, target ?? "HEAD");
-    return { promptUpdates: cards.map(({ id, mate }) => ({ id, mate })) };
   }
   throw new AxiError(`Unknown mates subcommand "${sub}"`, "VALIDATION_ERROR", [MATES_HELP]);
 }

@@ -92,7 +92,7 @@ Wait for the user's answer, then follow the matching branch:
    fleet watch --mate 1stmate --webhook https://bot.example.com/wake --header "Authorization: Bearer <token>"
    ```
 
-   _(Or bare `fleet watch --mate 1stmate` if the bot consumes NDJSON lines on stdout.)_ Use the matching [one-line wake prompt](templates/grok-bot.md) for each mate.
+   _(Or bare `fleet watch --mate 1stmate` if the bot consumes NDJSON lines on stdout.)_ Use the matching [pointer](templates/grok-bot-pointers.md) as each mate's profile and wake routine prompt.
 
    For a Dot, start the events endpoint instead (and install its persistence service from **Reference A**), then publish it through your HTTPS tunnel:
 
@@ -244,8 +244,6 @@ Now ask ONE question:
        > Read `https://github.com/1yian/fleet-v3/blob/main/EXTERNAL_BOT.md` and create a new separate bot for my `<name>` secondmate (`mate: <name>`, `parent: 1stmate`, domain: `<domain>`). Use the `fleet` CLI for every action (`BOARD_URL: <board-url>`). Return its incoming webhook URL and auth header when ready.
      - Wire a dedicated `fleet watch --mate <name> --webhook <bot-webhook-url> [--header "..."]` service (with persistence from **Reference A**) once the bot returns its webhook URL.
   4. Finish with `fleet doctor` and a concise summary of running services and commands.
-
-If any mates are external, configure the [prompt update hook](EXTERNAL_BOT.md#5-publish-prompt-updates-from-the-control-host) once on the Control Host.
 
 ---
 
