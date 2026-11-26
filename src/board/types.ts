@@ -93,7 +93,7 @@ const EntrySchema = z.object({
 });
 export type Entry = z.infer<typeof EntrySchema>;
 
-export const PostedEntrySchema = z.object({ entry: EntrySchema, holder: z.string() });
+export const PostedEntrySchema = z.object({ entry: EntrySchema, holder: z.string().optional() });
 export type PostedEntry = z.infer<typeof PostedEntrySchema>;
 
 export const CardThreadSchema = z.object({

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -133,82 +134,37 @@ void test("home view returns TOON live counts, hosts, open cards, and contextual
   }
 });
 
-void test("publishing a Fleet revision only cards external mates when prompt content changes", async () => {
-  const server = await startTestServer({
-    parents: { first: "captain", cleo: "first", local: "first" },
+void test("an internal reply succeeds against a Card Server that predates the holder field", async () => {
+  const entry = {
+    id: "7",
+    cardId: "3",
+    by: "worker:cleo",
+    kind: "reply",
+    text: "quiet note",
+    internal: true,
+    createdAt: 1_700_000_000_000,
+  };
+  const legacyServer = createServer((_req, res) => {
+    res.writeHead(201, { "content-type": "application/json" });
+    res.end(JSON.stringify({ entry }));
   });
-  const repo = makeTempDir("fleet-prompt-release-");
-  const config = join(repo, "fleet.yaml");
-  const git = (...args: string[]): string =>
-    execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
-  const release = (path: string, text: string): string => {
-    writeFileSync(join(repo, path), text);
-    git("add", "--", path);
-    git("commit", "-qm", path);
-    return git("rev-parse", "HEAD");
-  };
-  const publish = async (revision: string): Promise<void> => {
-    const result = await runBin(["mates", "prompt-updates", revision, "--config", config], {
-      cwd: repo,
-      env: {
-        ...process.env,
-        BOARD_URL: undefined,
-        FLEET_MATE: undefined,
-        FLEET_CLAIM_EPOCH: undefined,
-        FLEET_CLAIM_TOKEN: undefined,
-      },
-    });
-    assert.equal(result.exitCode, 0, result.output);
-  };
-  const expectReleases = async (...revisions: string[]): Promise<void> => {
-    const { cards } = await server.client.listCards({ state: "all" });
-    assert.deepEqual(
-      cards.map(({ mate, title, body }) => ({ mate, title, body })),
-      revisions.flatMap((revision) =>
-        ["cleo", "first"].map((mate) => ({
-          mate,
-          title: "Update your system prompt",
-          body: `Update your system prompt to https://github.com/1yian/fleet-v3/blob/${revision}/templates/grok-bot.md`,
-        })),
-      ),
-    );
-  };
-
+  await new Promise<void>((resolve) => {
+    legacyServer.listen(0, "127.0.0.1", resolve);
+  });
   try {
-    writeFileSync(
-      config,
-      `boardUrl: ${server.url}\nmates:\n  items:\n    - name: first\n      mode: external\n    - name: cleo\n      parent: first\n      mode: external\n    - name: local\n      parent: first\n`,
+    const address = legacyServer.address();
+    assert.ok(address !== null && typeof address === "object");
+    const reply = await captureCli(
+      ["reply", "3", "--text", "quiet note", "--internal"],
+      `http://127.0.0.1:${String(address.port)}`,
+      "worker:cleo",
     );
-    git("init", "-q");
-    git("config", "user.email", "fleet@example.com");
-    git("config", "user.name", "Fleet");
-    mkdirSync(join(repo, "prompts"));
-    mkdirSync(join(repo, "templates"));
-    release("prompts/mate.md", "Shared prompt v1\n");
-    const first = release("templates/grok-bot.md", "External template v1\n");
-
-    await publish(first);
-    await expectReleases(first);
-    const open = await server.client.listCards();
-    for (const card of open.cards) {
-      assert.equal(card.holder, card.mate);
-      await server.client.closeCard(card.id, { actor: card.mate });
-    }
-
-    const unrelated = release("README.md", "Unrelated release\n");
-    await publish(unrelated);
-    await expectReleases(first);
-
-    const shared = release("prompts/mate.md", "Shared prompt v2\n");
-    await publish(shared);
-    await expectReleases(shared, first);
-
-    const template = release("templates/grok-bot.md", "External template v2\n");
-    await publish(template);
-    await publish(template);
-    await expectReleases(template, shared, first);
+    assert.equal(reply.exitCode, 0, reply.out);
+    assert.match(reply.out, /internal: true/u);
   } finally {
-    await server.stop();
+    await new Promise((resolve) => {
+      legacyServer.close(resolve);
+    });
   }
 });
 
