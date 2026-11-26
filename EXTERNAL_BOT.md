@@ -90,7 +90,7 @@ Every wake arrives as `POST <webhook-url>` with `Content-Type: application/json`
 
 Pass the webhook body's `notice` and `cardId` (if present) to the bot and return HTTP `2xx` once the wake is accepted. Keep behavior in the mate prompt and charter, not in the webhook. Use a one-line wake prompt such as:
 
-> Fleet wake: load the `fleet-mate` skill (or `prompts/mate.md`), run `. ./fleet-<mate>.env && fleet view <cardId> --full` in one shell invocation for the `cardId` in the webhook body if present, and handle the wake. Only a mate whose parent is the captain may message the captain directly, for a real decision or finished work. A child mate records results on the card and uses `fleet escalate` (or `fleet_escalate`) for decisions and blockers to its immediate parent, and never messages the captain directly.
+> Fleet wake: load the `fleet-mate` skill (or `prompts/mate.md`), run `. ./fleet-<mate>.env && fleet view <cardId> --full` in one shell invocation for the `cardId` in the webhook body if present, and handle the wake. Only a top-level mate whose charter explicitly states its parent is the captain may message the captain directly, for a real decision or finished work. Any other mate, including one whose parent is unknown or only implied by a default label, is a child: it records results on the card, never messages the captain directly, and uses `fleet escalate` (or `fleet_escalate`) for decisions and blockers to its immediate parent. If the wake has no `cardId`, a child first opens a card assigned to itself (`fleet dispatch --mate <mate> --title "..."`, or `fleet_dispatch`) and escalates that card.
 
 For an MCP-only bot, omit the `fleet-<mate>.env` step and use `fleet_view` instead of the CLI.
 
