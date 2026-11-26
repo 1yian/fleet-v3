@@ -78,10 +78,12 @@ function runGit(
   });
 }
 
-async function removeCheckout(repoPath: string, worktreePath: string): Promise<void> {
-  await runGit(repoPath, ["worktree", "remove", "--force", worktreePath]).catch(() => undefined);
-  await runGit(repoPath, ["worktree", "prune"]).catch(() => undefined);
-  rmSync(worktreePath, { recursive: true, force: true });
+async function removeCheckout(
+  repoPath: string,
+  worktreePath: string,
+  force: boolean,
+): Promise<void> {
+  await runGit(repoPath, ["worktree", "remove", ...(force ? ["--force"] : []), worktreePath]);
 }
 
 function canonicalPath(path: string): string {
@@ -95,11 +97,11 @@ function canonicalPath(path: string): string {
 }
 
 async function isRegisteredCheckout(repoPath: string, worktreePath: string): Promise<boolean> {
-  const listing = await runGit(repoPath, ["worktree", "list", "--porcelain"]);
+  const listing = await runGit(repoPath, ["worktree", "list", "--porcelain", "-z"]);
   const wanted = canonicalPath(worktreePath);
   return listing
-    .split("\n")
-    .some((line) => line.startsWith("worktree ") && canonicalPath(line.slice(9)) === wanted);
+    .split("\0")
+    .some((field) => field.startsWith("worktree ") && canonicalPath(field.slice(9)) === wanted);
 }
 
 async function rollbackWorkspace(
@@ -110,7 +112,7 @@ async function rollbackWorkspace(
   try {
     if (checkout !== undefined) {
       if (await isRegisteredCheckout(repoPath, checkout.worktreePath)) {
-        await removeCheckout(repoPath, checkout.worktreePath);
+        await removeCheckout(repoPath, checkout.worktreePath, false);
       }
       await runGit(repoPath, ["branch", "-D", checkout.branch]).catch(() => undefined);
     }
@@ -200,7 +202,7 @@ export async function prepareWorkspace(params: {
 
 export async function cleanupWorkspace(workspace: TaskWorkspace): Promise<void> {
   try {
-    await removeCheckout(workspace.repoPath, workspace.worktreePath);
+    await removeCheckout(workspace.repoPath, workspace.worktreePath, true);
   } finally {
     try {
       rmSync(workspace.tmpDir, { recursive: true, force: true });

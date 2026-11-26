@@ -1304,6 +1304,10 @@ void test("runner processes on different repos sharing a checkout root never tak
     );
 
     const second = startRunner("b", boardB, repoB);
+    assert.ok(
+      await waitFor(() => existsSync(second.receipt), 20_000),
+      "runner B starts its worker without waiting for runner A's reservation",
+    );
     assert.equal(await second.exited, 0);
     assert.match(readFileSync(second.receipt, "utf8"), /^c-1-a1-[a-zA-Z0-9]{6}$/u);
     const refsInB = execFileSync("git", ["-C", repoB, "branch", "--list", "c-1-a1"], {
