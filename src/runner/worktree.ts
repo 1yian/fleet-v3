@@ -57,12 +57,16 @@ function sanitizeSegment(value: string): string {
   return value.replaceAll(/[^a-zA-Z0-9._-]/gu, "-");
 }
 
-function runGit(cwd: string, args: readonly string[]): Promise<string> {
+function runGit(
+  cwd: string,
+  args: readonly string[],
+  env: Readonly<Record<string, string>> = {},
+): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       "git",
       [...args],
-      { cwd, encoding: "utf8", env: { ...process.env, LC_ALL: "C" } },
+      { cwd, encoding: "utf8", env: { ...process.env, ...env } },
       (error, stdout) => {
         if (error !== null) {
           reject(new Error(error.message, { cause: error }));
@@ -80,6 +84,24 @@ async function removeCheckout(repoPath: string, worktreePath: string): Promise<v
   rmSync(worktreePath, { recursive: true, force: true });
 }
 
+function canonicalPath(path: string): string {
+  let parent = dirname(path);
+  try {
+    parent = realpathSync(parent);
+  } catch {
+    parent = dirname(path);
+  }
+  return join(parent, basename(path));
+}
+
+async function isRegisteredCheckout(repoPath: string, worktreePath: string): Promise<boolean> {
+  const listing = await runGit(repoPath, ["worktree", "list", "--porcelain"]);
+  const wanted = canonicalPath(worktreePath);
+  return listing
+    .split("\n")
+    .some((line) => line.startsWith("worktree ") && canonicalPath(line.slice(9)) === wanted);
+}
+
 async function rollbackWorkspace(
   repoPath: string,
   tmpDir: string,
@@ -87,7 +109,9 @@ async function rollbackWorkspace(
 ): Promise<void> {
   try {
     if (checkout !== undefined) {
-      await removeCheckout(repoPath, checkout.worktreePath);
+      if (await isRegisteredCheckout(repoPath, checkout.worktreePath)) {
+        await removeCheckout(repoPath, checkout.worktreePath);
+      }
       await runGit(repoPath, ["branch", "-D", checkout.branch]).catch(() => undefined);
     }
   } finally {
@@ -138,7 +162,9 @@ export async function prepareWorkspace(params: {
         reservation.close();
         return undefined;
       }
-      await runGit(params.repo.path, ["branch", "--no-track", branch, params.repo.baseBranch]);
+      await runGit(params.repo.path, ["branch", "--no-track", branch, params.repo.baseBranch], {
+        LC_ALL: "C",
+      });
       return { branch, worktreePath, reservation };
     } catch (error) {
       reservation.close();

@@ -1324,6 +1324,54 @@ void test("runner processes on different repos sharing a checkout root never tak
   }
 });
 
+void test("a checkout another repo creates at the reserved path survives this attempt's failed worktree add", async () => {
+  const root = makeTempDir("fleet-v3-late-occupant-");
+  mkdirSync(join(root, "a"));
+  mkdirSync(join(root, "b"));
+  const repoA = initGitRepo(join(root, "a"));
+  const repoB = initGitRepo(join(root, "b"));
+  const occupied = join(root, "workspaces", "cleo", "demo", "worktrees", "c-1-a1");
+  const hook = join(repoA, ".git", "hooks", "reference-transaction");
+  writeFileSync(
+    hook,
+    [
+      "#!/bin/sh",
+      '[ "$1" = prepared ] || exit 0',
+      "grep -q ' refs/heads/c-1-a1$' || exit 0",
+      `[ ! -e ${JSON.stringify(occupied)} ] || exit 0`,
+      `env -i PATH="$PATH" HOME="$HOME" git -C ${JSON.stringify(repoB)} worktree add -q -b other ${JSON.stringify(occupied)}`,
+      `echo uncommitted > ${JSON.stringify(join(occupied, "dirty.txt"))}`,
+      "",
+    ].join("\n"),
+  );
+  chmodSync(hook, 0o755);
+
+  const board = await startTestServer();
+  try {
+    await board.client.createCard({
+      mate: "cleo",
+      title: "Late occupant card",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    await runLoop(board.client, makeConfig(root, repoA), { once: true });
+  } finally {
+    await board.stop();
+  }
+
+  assert.equal(readFileSync(join(occupied, "dirty.txt"), "utf8"), "uncommitted\n");
+  assert.ok(existsSync(join(occupied, "README.md")), "the other repo's checkout is intact");
+  const worktreesOfB = execFileSync("git", ["-C", repoB, "worktree", "list", "--porcelain"], {
+    encoding: "utf8",
+  });
+  assert.ok(worktreesOfB.includes("refs/heads/other"));
+  const branchesOfA = execFileSync("git", ["-C", repoA, "branch", "--list", "c-*"], {
+    encoding: "utf8",
+  });
+  assert.equal(branchesOfA.trim(), "", "the failed attempt's own branch is removed");
+});
+
 void test("runners on one host serving different boards never share a checkout, scratch directory, or branch", async () => {
   const root = makeTempDir("fleet-v3-shared-host-");
   const repoDir = initGitRepo(root);
