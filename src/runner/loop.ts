@@ -250,7 +250,6 @@ async function handleVerification(params: {
 function openWorkerPane(
   config: RunnerConfig,
   claim: ClaimReceipt,
-  project: string,
   workspace: TaskWorkspace,
   delivery: Delivery,
   signal: AbortSignal,
@@ -260,8 +259,7 @@ function openWorkerPane(
     config: resolveHerdrConfig(config.spawn),
     host: config.host,
     channel: claim.card.mate,
-    project,
-    taskId: claim.card.id,
+    launchName: workspace.launchName,
     branch: workspace.branch,
     delivery,
     mode: config.spawn.mode,
@@ -347,12 +345,13 @@ async function runClaim(
       channel: claim.card.mate,
       project,
       taskId: cardId,
+      title: claim.card.title,
       epoch: claim.epoch,
       repo,
     });
     preparedWorkspace = workspace;
 
-    pane = await openWorkerPane(config, claim, project, workspace, delivery, controller.signal);
+    pane = await openWorkerPane(config, claim, workspace, delivery, controller.signal);
     const paneSuffix = pane === undefined ? "" : `, herdr ${pane.paneId}`;
     await client.postEntry(cardId, {
       epoch: claim.epoch,

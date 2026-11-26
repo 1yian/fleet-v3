@@ -157,8 +157,7 @@ export async function openHerdrPane(params: {
   readonly config: HerdrConfig;
   readonly host: string;
   readonly channel: string;
-  readonly project: string;
-  readonly taskId: string;
+  readonly launchName: string;
   readonly branch: string;
   readonly delivery: string;
   readonly mode: SpawnMode;
@@ -168,7 +167,7 @@ export async function openHerdrPane(params: {
 }): Promise<HerdrPaneHandle | undefined> {
   const session = params.config.session;
   const wsLabel = interpolateWorkspaceLabel(params.config.workspace, params.channel, params.host);
-  const tabLabel = `${params.project} #${params.taskId}`;
+  const tabLabel = params.launchName;
   const lockKey = `${session ?? "default"}:${wsLabel}`;
 
   let listRaw: string;

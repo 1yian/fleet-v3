@@ -19,6 +19,12 @@ Read [VISION.md](VISION.md) for the design principles, [SETUP.md](SETUP.md) for 
 - `fleet.example.yaml` - configuration template. One shared `~/.fleet/fleet.yaml` can serve every command (`fleet serve`, `fleet run`, `fleet mates up`) with relative paths resolved against `fleet.yaml`'s directory.
 - `e2e/` - end-to-end tests against real `node:sqlite`, live HTTP/SSE servers, real webhook + MCP stdio channel processes, real git worktrees, Apple containers, and isolated Herdr sessions.
 
+## Worker names
+
+Each launch uses `t-<card-id>-e<epoch>-<title-slug>-<unique-suffix>` for its worktree directory, Herdr tab, and pane title. The Git branch adds `fleet/` to the same name. The lowercase ASCII slug is limited to 40 characters and falls back to `card` if the title produces no slug. Workers stay in the configured Herdr workspace, and permanent mates keep their configured names.
+
+For example, card #19 titled `Restore worker names` could open tab `t-19-e1-restore-worker-names-K3sm4Q` on branch `fleet/t-19-e1-restore-worker-names-K3sm4Q`.
+
 ## Quick start
 
 1. Run `bun install && bun run check`.

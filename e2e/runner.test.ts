@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -51,9 +51,15 @@ const HerdrReceiptSchema = z.object({
   tty: z.boolean(),
 });
 
-const HerdrPaneEntrySchema = z.object({ pane_id: z.string() });
+const HerdrPaneEntrySchema = z.object({
+  tab_id: z.string(),
+  title: z.string(),
+  tokens: z.object({ branch: z.string() }),
+});
 const HerdrPaneListResultSchema = z.object({ panes: z.array(HerdrPaneEntrySchema) });
 const HerdrPaneListSchema = z.object({ result: HerdrPaneListResultSchema });
+const HerdrTabEntrySchema = z.object({ label: z.string() });
+const HerdrTabSchema = z.object({ result: z.object({ tab: HerdrTabEntrySchema }) });
 
 const tempDirs: string[] = [];
 
@@ -151,7 +157,7 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
   try {
     const card = await client.createCard({
       mate: "cleo",
-      title: "Implement demo change",
+      title: `Déjà vu: fix /../ @{} ${"x".repeat(100)}`,
       host: "test-host",
       project: "demo",
       delivery: "direct-pr",
@@ -200,6 +206,9 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
       receipt.branch,
       "the worktree has its advertised branch checked out",
     );
+    const checkoutName = basename(receipt.worktree);
+    assert.match(checkoutName, /^t-1-e1-deja-vu-fix-x{28}-[a-zA-Z0-9]{6}$/u);
+    assert.equal(receipt.branch, `fleet/${checkoutName}`);
     const repoBranches = execFileSync("git", ["-C", repoDir, "branch", "--list", "fleet/*"], {
       encoding: "utf8",
     })
@@ -797,7 +806,7 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
 
     const crashCard = await client.createCard({
       mate: "cleo",
-      title: "Verifier cannot start inside herdr",
+      title: "🧪 /...",
       host: "test-host",
       project: "demo",
       delivery: "no-mistakes",
@@ -817,6 +826,16 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
       2,
       "a runner exception counts as a failure and keeps the pane open",
     );
+    const paneTitles = panesAfterCrash.result.panes.map((pane) => {
+      const { result } = HerdrTabSchema.parse(JSON.parse(herdrExec("tab", "get", pane.tab_id)));
+      assert.equal(result.tab.label, pane.title);
+      assert.equal(pane.tokens.branch, `fleet/${pane.title}`);
+      return pane.title.replace(/-[a-zA-Z0-9]{6}$/u, "");
+    });
+    assert.deepEqual(paneTitles.toSorted(), [
+      `t-${failCard.id}-e1-run-inside-herdr-pane-and-fail`,
+      `t-${crashCard.id}-e1-card`,
+    ]);
   } finally {
     tryExecSilent(() => {
       herdrExec("server", "stop");

@@ -6,6 +6,7 @@ import type { RepoConfig } from "../config.ts";
 export interface TaskWorkspace {
   readonly worktreePath: string;
   readonly tmpDir: string;
+  readonly launchName: string;
   readonly branch: string;
   readonly repoPath: string;
   readonly gitCommonDir: string;
@@ -13,6 +14,18 @@ export interface TaskWorkspace {
 
 function sanitizeSegment(value: string): string {
   return value.replaceAll(/[^a-zA-Z0-9._-]/gu, "-");
+}
+
+function cardTitleSlug(title: string): string {
+  const slug = title
+    .normalize("NFKD")
+    .toLowerCase()
+    .replaceAll(/\p{Mark}/gu, "")
+    .replaceAll(/[^a-z0-9]+/gu, "-")
+    .replaceAll(/^-|-$/gu, "")
+    .slice(0, 40)
+    .replace(/-$/u, "");
+  return slug || "card";
 }
 
 function runGit(cwd: string, args: readonly string[]): Promise<string> {
@@ -42,6 +55,7 @@ export async function prepareWorkspace(params: {
   readonly channel: string;
   readonly project: string;
   readonly taskId: string;
+  readonly title: string;
   readonly epoch: number;
   readonly repo: RepoConfig;
 }): Promise<TaskWorkspace> {
@@ -50,9 +64,9 @@ export async function prepareWorkspace(params: {
   const baseDir = join(params.workspacesRoot, safeChannel, safeProject);
   const scratchRoot = join(baseDir, "tmp");
   mkdirSync(scratchRoot, { recursive: true });
-  const tmpDir = mkdtempSync(
-    join(scratchRoot, `t-${sanitizeSegment(params.taskId)}-e${String(params.epoch)}-`),
-  );
+  const slug = cardTitleSlug(params.title);
+  const prefix = `t-${sanitizeSegment(params.taskId)}-e${String(params.epoch)}-${slug}-`;
+  const tmpDir = mkdtempSync(join(scratchRoot, prefix));
   const launchName = basename(tmpDir);
   const worktreePath = join(baseDir, "worktrees", launchName);
   const branch = `fleet/${launchName}`;
@@ -70,6 +84,7 @@ export async function prepareWorkspace(params: {
     return {
       worktreePath: realpathSync(worktreePath),
       tmpDir: realpathSync(tmpDir),
+      launchName,
       branch,
       repoPath: realpathSync(params.repo.path),
       gitCommonDir,
