@@ -1,5 +1,5 @@
 host: macbook
-defaultHost: macbook
+defaultHost: p620
 boardUrl: http://127.0.0.1:4100
 matesFilter: []
 workspacesRoot: ./workspaces

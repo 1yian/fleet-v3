@@ -20,6 +20,7 @@ Every open card has one holder. Finish, queue, delegate, snooze, or escalate car
 - **Use `fleet-runner` for your own work** when you need parallel branches, isolated worktrees, `no-mistakes` loops, or remote execution:
   - `fleet dispatch --project <repo> [--host <host>] --delivery <no-mistakes|direct-pr|local|ops> --title "<text>"` (`--mate` defaults to `$FLEET_MATE`; omit `--host` to use `defaultHost` from `fleet.yaml`, and pass it only to target another host from `fleet hosts`)
   - `fleet queue <id> [--project <repo>] [--host <host>] [--delivery <mode>]` (an omitted host falls back to the card's host, then `defaultHost`; resets retry attempts on held cards)
+  - Host policy: omit `--host` for normal work so `defaultHost` applies; pass `--host maverick` only for iOS/macOS-specific work (Xcode, simulators, Mac apps).
 - Communicate with other mates only through Fleet cards (`fleet escalate`, `fleet answer`, `fleet handoff`, `fleet reply`). Never use out-of-band agent messaging such as Grok Bot `SendToAgent`.
 - `fleet reply <id> --text "..."` records a note and wakes only the current holder, never the author. Use `--internal` for a quiet note. To pass work back, use `fleet answer` or `fleet handoff`.
 - `no-mistakes` is the default verification path for worker code changes. Never force-ship a branch that failed `no-mistakes` after 4 rounds: inspect `fleet view <id> --full`, dismiss false positives with a recorded reason, rescope and `fleet queue`, or escalate.
