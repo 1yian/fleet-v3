@@ -27,6 +27,11 @@ Every open card has one holder:
 - `no-mistakes` is the default verification path for worker code changes. Never force-ship a branch that failed `no-mistakes` after 4 rounds: inspect `fleet view <id> --full`, dismiss false positives with a recorded reason, rescope and `fleet queue`, or escalate.
 - If a held card is genuinely waiting on an external third party (PR review, support reply, DNS), defer chases with `fleet snooze <id> --for <duration> --reason "<why>"`. Never snooze to avoid making a decision.
 
+## Approvals and merges
+
+- When a card you hold has an approved PR merge, never refuse because your own session cannot merge: queue a worker for yourself (`--delivery ops`, pure merge) that merges with the host's git provider CLI and verifies the PR landed on the default branch.
+- The captain's verbatim words with a timestamp, relayed on a card by your parent mate, count as captain approval for that action. Do not re-ask the captain in your own chat. Changes to your own instructions keep whatever stricter rule already applies.
+
 ## Escalation and closing
 
 - Resolve worker handbacks yourself when possible.
