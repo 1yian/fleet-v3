@@ -1,12 +1,14 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type { RepoConfig } from "../config.ts";
 
 export interface TaskWorkspace {
   readonly worktreePath: string;
   readonly tmpDir: string;
   readonly branch: string;
+  readonly reservation: DatabaseSync;
   readonly repoPath: string;
   readonly gitCommonDir: string;
 }
@@ -14,10 +16,31 @@ export interface TaskWorkspace {
 interface Checkout {
   readonly branch: string;
   readonly worktreePath: string;
+  readonly reservation: DatabaseSync;
 }
 
-function isErrno(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
+const SQLITE_BUSY = 5;
+
+function acquireReservation(lockPath: string): DatabaseSync | undefined {
+  const reservation = new DatabaseSync(lockPath);
+  try {
+    reservation.exec("BEGIN EXCLUSIVE");
+    return reservation;
+  } catch (error) {
+    reservation.close();
+    if (error instanceof Error && "errcode" in error && error.errcode === SQLITE_BUSY) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function isNameCollision(error: unknown, branch: string): boolean {
+  if (!(error instanceof Error)) return false;
+  return (
+    error.message.includes(`a branch named '${branch}' already exists`) ||
+    error.message.includes(`exists; cannot create 'refs/heads/${branch}'`)
+  );
 }
 
 function sanitizeSegment(value: string): string {
@@ -26,32 +49,23 @@ function sanitizeSegment(value: string): string {
 
 function runGit(cwd: string, args: readonly string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile("git", [...args], { cwd, encoding: "utf8" }, (error, stdout) => {
-      if (error !== null) {
-        reject(new Error(error.message, { cause: error }));
-        return;
-      }
-      resolve(stdout.trim());
-    });
+    execFile(
+      "git",
+      [...args],
+      { cwd, encoding: "utf8", env: { ...process.env, LC_ALL: "C" } },
+      (error, stdout) => {
+        if (error !== null) {
+          reject(new Error(error.message, { cause: error }));
+          return;
+        }
+        resolve(stdout.trim());
+      },
+    );
   });
 }
 
-async function branchNameTaken(repoPath: string, branch: string): Promise<boolean> {
-  const refs = await runGit(repoPath, [
-    "for-each-ref",
-    "--count=1",
-    "--format=%(refname)",
-    `refs/heads/${branch}`,
-  ]);
-  return refs !== "";
-}
-
-async function releaseCheckout(repoPath: string, worktreePath: string): Promise<void> {
-  if (existsSync(worktreePath)) {
-    for (const entry of readdirSync(worktreePath)) {
-      rmSync(join(worktreePath, entry), { recursive: true, force: true });
-    }
-  }
+async function removeCheckout(repoPath: string, worktreePath: string): Promise<void> {
+  await runGit(repoPath, ["worktree", "remove", "--force", worktreePath]).catch(() => undefined);
   await runGit(repoPath, ["worktree", "prune"]).catch(() => undefined);
   rmSync(worktreePath, { recursive: true, force: true });
 }
@@ -84,27 +98,29 @@ export async function prepareWorkspace(params: {
   const worktreeRoot = join(baseDir, "worktrees");
   let checkout: Checkout | undefined;
 
+  const lockRoot = join(baseDir, "locks");
+
   const reserveCheckout = async (branch: string): Promise<Checkout | undefined> => {
     const worktreePath = join(worktreeRoot, branch);
+    const reservation = acquireReservation(join(lockRoot, `${branch}.lock`));
+    if (reservation === undefined) return undefined;
     try {
-      mkdirSync(worktreePath);
-    } catch (error) {
-      if (isErrno(error, "EEXIST")) return undefined;
-      throw error;
-    }
-    try {
+      if (existsSync(worktreePath)) {
+        reservation.close();
+        return undefined;
+      }
       await runGit(params.repo.path, ["branch", "--no-track", branch, params.repo.baseBranch]);
+      return { branch, worktreePath, reservation };
     } catch (error) {
-      const taken = await branchNameTaken(params.repo.path, branch).catch(() => false);
-      rmSync(worktreePath, { recursive: true, force: true });
-      if (taken) return undefined;
+      reservation.close();
+      if (isNameCollision(error, branch)) return undefined;
       throw error;
     }
-    return { branch, worktreePath };
   };
 
   try {
     mkdirSync(worktreeRoot, { recursive: true });
+    mkdirSync(lockRoot, { recursive: true });
     checkout = (await reserveCheckout(name)) ?? (await reserveCheckout(basename(tmpDir)));
     if (checkout === undefined) throw new Error(`no free checkout name for ${name}`);
     const { branch, worktreePath } = checkout;
@@ -117,14 +133,16 @@ export async function prepareWorkspace(params: {
       worktreePath: realpathSync(worktreePath),
       tmpDir: realpathSync(tmpDir),
       branch,
+      reservation: checkout.reservation,
       repoPath: realpathSync(params.repo.path),
       gitCommonDir,
     };
   } catch (error) {
     if (checkout !== undefined) {
-      const { branch, worktreePath } = checkout;
-      await releaseCheckout(params.repo.path, worktreePath);
+      const { branch, worktreePath, reservation } = checkout;
+      await removeCheckout(params.repo.path, worktreePath);
       await runGit(params.repo.path, ["branch", "-D", branch]).catch(() => undefined);
+      reservation.close();
     }
     rmSync(tmpDir, { recursive: true, force: true });
     throw error;
@@ -132,6 +150,7 @@ export async function prepareWorkspace(params: {
 }
 
 export async function cleanupWorkspace(workspace: TaskWorkspace): Promise<void> {
-  await releaseCheckout(workspace.repoPath, workspace.worktreePath);
+  await removeCheckout(workspace.repoPath, workspace.worktreePath);
+  workspace.reservation.close();
   rmSync(workspace.tmpDir, { recursive: true, force: true });
 }

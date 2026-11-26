@@ -1217,13 +1217,18 @@ void test("a branch name blocked by a ref namespace conflict takes a suffix, whi
   const lockRoot = makeTempDir("fleet-v3-lock-");
   const lockRepo = initGitRepo(lockRoot);
   const lockReceipt = join(lockRoot, "receipt.txt");
+  execFileSync("git", ["-C", lockRepo, "branch", "c-1-a1/topic"]);
   writeFileSync(join(lockRepo, ".git", "refs", "heads", "c-1-a1.lock"), "");
   await runOneCard(lockRoot, lockRepo, lockReceipt);
   assert.equal(existsSync(lockReceipt), false, "a Git lock failure must not start a worker");
   const branches = execFileSync("git", ["-C", lockRepo, "branch", "--list", "c-*"], {
     encoding: "utf8",
   });
-  assert.equal(branches.trim(), "", "a Git lock failure must not be hidden behind a suffix");
+  assert.equal(
+    branches.trim(),
+    "c-1-a1/topic",
+    "a Git lock failure must not be hidden behind a suffix",
+  );
 });
 
 void test("runners on one host serving different boards never share a checkout, scratch directory, or branch", async () => {
