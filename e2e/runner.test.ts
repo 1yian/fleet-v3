@@ -1231,6 +1231,99 @@ void test("a branch name blocked by a ref namespace conflict takes a suffix, whi
   );
 });
 
+void test("runner processes on different repos sharing a checkout root never take one checkout name, even before the path exists", async () => {
+  const root = makeTempDir("fleet-v3-shared-root-");
+  mkdirSync(join(root, "a"));
+  mkdirSync(join(root, "b"));
+  const repoA = initGitRepo(join(root, "a"));
+  const repoB = initGitRepo(join(root, "b"));
+  const holding = join(root, "a-holding");
+  const release = join(root, "release");
+  const hook = join(repoA, ".git", "hooks", "reference-transaction");
+  writeFileSync(
+    hook,
+    [
+      "#!/bin/sh",
+      '[ "$1" = prepared ] || exit 0',
+      "grep -q ' refs/heads/c-1-a1$' || exit 0",
+      `touch ${JSON.stringify(holding)}`,
+      `while [ ! -e ${JSON.stringify(release)} ]; do sleep 0.05; done`,
+      "",
+    ].join("\n"),
+  );
+  chmodSync(hook, 0o755);
+
+  const boardA = await startTestServer();
+  const boardB = await startTestServer();
+  const runners: Promise<number | null>[] = [];
+  try {
+    const startRunner = (
+      name: string,
+      board: typeof boardA,
+      repoDir: string,
+    ): { readonly receipt: string; readonly exited: Promise<number | null> } => {
+      const receipt = join(root, `${name}.branch`);
+      const configPath = join(root, `${name}.yaml`);
+      const writeReceipt = `require("node:fs").writeFileSync(${JSON.stringify(receipt)}, process.env.FLEET_BRANCH)`;
+      const config = makeConfig(root, repoDir, {
+        boardUrl: board.url,
+        spawn: {
+          mode: "local",
+          viewport: "headless",
+          direnv: false,
+          command: ["node", "-e", writeReceipt],
+        },
+      });
+      writeFileSync(configPath, JSON.stringify(config));
+      const child = spawn(process.execPath, [BIN_PATH, "run", "--once", "--config", configPath], {
+        stdio: "ignore",
+      });
+      const exited = new Promise<number | null>((resolve) => {
+        child.once("close", resolve);
+      });
+      runners.push(exited);
+      return { receipt, exited };
+    };
+
+    for (const board of [boardA, boardB]) {
+      await board.client.createCard({
+        mate: "cleo",
+        title: "Card one on its own board",
+        host: "test-host",
+        project: "demo",
+        delivery: "direct-pr",
+      });
+    }
+
+    const first = startRunner("a", boardA, repoA);
+    assert.ok(await waitFor(() => existsSync(holding), 15_000), "runner A reached branch setup");
+    assert.equal(
+      existsSync(join(root, "workspaces", "cleo", "demo", "worktrees", "c-1-a1")),
+      false,
+      "the checkout path does not exist while runner A holds its name",
+    );
+
+    const second = startRunner("b", boardB, repoB);
+    assert.equal(await second.exited, 0);
+    assert.match(readFileSync(second.receipt, "utf8"), /^c-1-a1-[a-zA-Z0-9]{6}$/u);
+    const refsInB = execFileSync("git", ["-C", repoB, "branch", "--list", "c-1-a1"], {
+      encoding: "utf8",
+    });
+    assert.equal(refsInB.trim(), "", "runner B never took the canonical name in its own repo");
+
+    writeFileSync(release, "");
+    assert.equal(await first.exited, 0);
+    assert.equal(readFileSync(first.receipt, "utf8"), "c-1-a1");
+    assert.equal(await cardField(boardA.client, "1", "state"), "done");
+    assert.equal(await cardField(boardB.client, "1", "state"), "done");
+  } finally {
+    writeFileSync(release, "");
+    await Promise.all(runners);
+    await boardA.stop();
+    await boardB.stop();
+  }
+});
+
 void test("runners on one host serving different boards never share a checkout, scratch directory, or branch", async () => {
   const root = makeTempDir("fleet-v3-shared-host-");
   const repoDir = initGitRepo(root);

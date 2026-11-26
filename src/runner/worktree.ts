@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { RepoConfig } from "../config.ts";
@@ -31,6 +31,16 @@ function acquireReservation(lockPath: string): DatabaseSync | undefined {
     if (error instanceof Error && "errcode" in error && error.errcode === SQLITE_BUSY) {
       return undefined;
     }
+    throw error;
+  }
+}
+
+function isOccupied(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
     throw error;
   }
 }
@@ -70,6 +80,25 @@ async function removeCheckout(repoPath: string, worktreePath: string): Promise<v
   rmSync(worktreePath, { recursive: true, force: true });
 }
 
+async function rollbackWorkspace(
+  repoPath: string,
+  tmpDir: string,
+  checkout: Checkout | undefined,
+): Promise<void> {
+  try {
+    if (checkout !== undefined) {
+      await removeCheckout(repoPath, checkout.worktreePath);
+      await runGit(repoPath, ["branch", "-D", checkout.branch]).catch(() => undefined);
+    }
+  } finally {
+    try {
+      rmSync(tmpDir, { recursive: true, force: true });
+    } finally {
+      checkout?.reservation.close();
+    }
+  }
+}
+
 export function hasEnvrcInAncestry(startDir: string): boolean {
   let current = startDir;
   for (;;) {
@@ -105,7 +134,7 @@ export async function prepareWorkspace(params: {
     const reservation = acquireReservation(join(lockRoot, `${branch}.lock`));
     if (reservation === undefined) return undefined;
     try {
-      if (existsSync(worktreePath)) {
+      if (isOccupied(worktreePath)) {
         reservation.close();
         return undefined;
       }
@@ -138,19 +167,19 @@ export async function prepareWorkspace(params: {
       gitCommonDir,
     };
   } catch (error) {
-    if (checkout !== undefined) {
-      const { branch, worktreePath, reservation } = checkout;
-      await removeCheckout(params.repo.path, worktreePath);
-      await runGit(params.repo.path, ["branch", "-D", branch]).catch(() => undefined);
-      reservation.close();
-    }
-    rmSync(tmpDir, { recursive: true, force: true });
+    await rollbackWorkspace(params.repo.path, tmpDir, checkout).catch(() => undefined);
     throw error;
   }
 }
 
 export async function cleanupWorkspace(workspace: TaskWorkspace): Promise<void> {
-  await removeCheckout(workspace.repoPath, workspace.worktreePath);
-  workspace.reservation.close();
-  rmSync(workspace.tmpDir, { recursive: true, force: true });
+  try {
+    await removeCheckout(workspace.repoPath, workspace.worktreePath);
+  } finally {
+    try {
+      rmSync(workspace.tmpDir, { recursive: true, force: true });
+    } finally {
+      workspace.reservation.close();
+    }
+  }
 }
