@@ -52,12 +52,16 @@ const HerdrReceiptSchema = z.object({
 });
 
 const HerdrPaneEntrySchema = z.object({
+  workspace_id: z.string(),
   tab_id: z.string(),
   title: z.string(),
   tokens: z.object({ branch: z.string() }),
 });
 const HerdrPaneListResultSchema = z.object({ panes: z.array(HerdrPaneEntrySchema) });
 const HerdrPaneListSchema = z.object({ result: HerdrPaneListResultSchema });
+const HerdrWorkspaceEntrySchema = z.object({ workspace_id: z.string(), label: z.string() });
+const HerdrWorkspaceResultSchema = z.object({ workspaces: z.array(HerdrWorkspaceEntrySchema) });
+const HerdrWorkspaceListSchema = z.object({ result: HerdrWorkspaceResultSchema });
 const HerdrTabEntrySchema = z.object({ label: z.string() });
 const HerdrTabSchema = z.object({ result: z.object({ tab: HerdrTabEntrySchema }) });
 
@@ -207,9 +211,9 @@ void test("claims queued card, runs isolated worktree worker, advertises host, c
       "the worktree has its advertised branch checked out",
     );
     const checkoutName = basename(receipt.worktree);
-    assert.match(checkoutName, /^t-1-e1-deja-vu-fix-x{28}-[a-zA-Z0-9]{6}$/u);
-    assert.equal(receipt.branch, `fleet/${checkoutName}`);
-    const repoBranches = execFileSync("git", ["-C", repoDir, "branch", "--list", "fleet/*"], {
+    assert.equal(checkoutName, "c-1-a1");
+    assert.equal(receipt.branch, "c-1-a1");
+    const repoBranches = execFileSync("git", ["-C", repoDir, "branch", "--list", "c-*"], {
       encoding: "utf8",
     })
       .split("\n")
@@ -393,7 +397,8 @@ void test("a requeued card runs its next attempt in its own workspace while the 
     };
     const first = readReceipt("e1.json");
     const second = readReceipt("e2.json");
-    assert.notEqual(first.worktree, second.worktree);
+    assert.equal(basename(first.worktree), `c-${card.id}-a1`);
+    assert.equal(basename(second.worktree), `c-${card.id}-a2`);
     assert.equal(second.existedAtStart, true);
     assert.equal(second.existedAtEnd, true, "cleaning up attempt 1 must not remove attempt 2");
     assert.notEqual(first.staleStatus, 0, "the superseded worker's CLI write must fail");
@@ -671,7 +676,7 @@ void test("runs real isolated card inside Apple container micro-VM with worktree
     assert.equal(observedCard, card.id);
     assert.equal(inherited, "inherited-ok");
     assert.equal(secret, "cred-payload");
-    const repoBranches = execFileSync("git", ["-C", repoDir, "branch", "--list", "fleet/*"], {
+    const repoBranches = execFileSync("git", ["-C", repoDir, "branch", "--list", "c-*"], {
       encoding: "utf8",
     })
       .split("\n")
@@ -744,7 +749,6 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
       viewport: "herdr" as const,
       direnv: false,
       herdr: {
-        workspace: "workers",
         session: sessionName,
         keepPane: "on-failure" as const,
       },
@@ -777,7 +781,7 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
 
     const failCard = await client.createCard({
       mate: "cleo",
-      title: "Run inside herdr pane and fail",
+      title: `Déjà vu: ${"x".repeat(100)} extra words and fail`,
       host: "test-host",
       project: "demo",
       delivery: "direct-pr",
@@ -806,7 +810,7 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
 
     const crashCard = await client.createCard({
       mate: "cleo",
-      title: "🧪 /...",
+      title: "Fix /... those 🧪 five words please",
       host: "test-host",
       project: "demo",
       delivery: "no-mistakes",
@@ -826,16 +830,26 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
       2,
       "a runner exception counts as a failure and keeps the pane open",
     );
-    const paneTitles = panesAfterCrash.result.panes.map((pane) => {
-      const { result } = HerdrTabSchema.parse(JSON.parse(herdrExec("tab", "get", pane.tab_id)));
-      assert.equal(result.tab.label, pane.title);
-      assert.equal(pane.tokens.branch, `fleet/${pane.title}`);
-      return pane.title.replace(/-[a-zA-Z0-9]{6}$/u, "");
-    });
-    assert.deepEqual(paneTitles.toSorted(), [
-      `t-${failCard.id}-e1-run-inside-herdr-pane-and-fail`,
-      `t-${crashCard.id}-e1-card`,
+    const {
+      result: { workspaces },
+    } = HerdrWorkspaceListSchema.parse(JSON.parse(herdrExec("workspace", "list")));
+    const labels = new Map(
+      workspaces.map((workspace) => [workspace.workspace_id, workspace.label]),
+    );
+    assert.deepEqual(panesAfterCrash.result.panes.map((pane) => pane.tokens.branch).toSorted(), [
+      `c-${failCard.id}-a1`,
+      `c-${crashCard.id}-a1`,
     ]);
+    for (const pane of panesAfterCrash.result.panes) {
+      const { result } = HerdrTabSchema.parse(JSON.parse(herdrExec("tab", "get", pane.tab_id)));
+      const expected =
+        pane.tokens.branch === `c-${failCard.id}-a1`
+          ? `d-j-vu-${"x".repeat(33)}`
+          : "fix-those-five-words";
+      assert.equal(labels.get(pane.workspace_id), expected);
+      assert.equal(pane.title, expected);
+      assert.equal(result.tab.label, expected);
+    }
   } finally {
     tryExecSilent(() => {
       herdrExec("server", "stop");
@@ -1016,7 +1030,7 @@ void test("a failed worktree setup leaves no scratch directory or branch behind"
       [],
       "the failed attempt's scratch directory is removed",
     );
-    const branches = execFileSync("git", ["-C", repoDir, "branch", "--list", "fleet/*"], {
+    const branches = execFileSync("git", ["-C", repoDir, "branch", "--list", "c-*"], {
       encoding: "utf8",
     });
     assert.equal(branches.trim(), "");
@@ -1052,7 +1066,7 @@ void test("a checkout whose post-checkout hook fails leaves no worktree, scratch
       encoding: "utf8",
     });
     assert.equal(worktrees.split("\n").filter((line) => line.startsWith("worktree ")).length, 1);
-    const branches = execFileSync("git", ["-C", repoDir, "branch", "--list", "fleet/*"], {
+    const branches = execFileSync("git", ["-C", repoDir, "branch", "--list", "c-*"], {
       encoding: "utf8",
     });
     assert.equal(branches.trim(), "");
@@ -1064,7 +1078,7 @@ void test("a checkout whose post-checkout hook fails leaves no worktree, scratch
 void test("a branch left from an earlier board is never overwritten or deleted by a new attempt", async () => {
   const root = makeTempDir("fleet-v3-branch-");
   const repoDir = initGitRepo(root);
-  const retained = "fleet/t-1-e1";
+  const retained = "c-1-a1";
   execFileSync("git", ["-C", repoDir, "branch", retained]);
   const retainedSha = execFileSync("git", ["-C", repoDir, "rev-parse", retained], {
     encoding: "utf8",
@@ -1203,7 +1217,9 @@ void test("runners on one host serving different boards never share a checkout, 
     const startA = Start.parse(read(`${portA}.start`));
     const startB = Start.parse(read(`${portB}.start`));
     assert.notEqual(startA.worktree, startB.worktree);
-    assert.notEqual(startA.branch, startB.branch);
+    const branches = [startA.branch, startB.branch].toSorted();
+    assert.equal(branches[0], "c-1-a1");
+    assert.match(branches[1] ?? "", /^c-1-a1-[a-zA-Z0-9]{6}$/u);
     assert.notEqual(startA.tmp, startB.tmp);
     assert.equal(startA.head, startA.branch);
     assert.equal(startB.head, startB.branch);

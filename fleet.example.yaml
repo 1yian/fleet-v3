@@ -28,7 +28,6 @@ spawn:
     - "{prompt}"
     - "Read card #{card} with `fleet view {card} --full` and execute it."
   herdr:
-    workspace: workers
     keepPane: on-failure
   container:
     image: fleet-worker:latest

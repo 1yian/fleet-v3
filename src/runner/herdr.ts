@@ -5,13 +5,6 @@ import { z } from "zod";
 import type { HerdrConfig, KeepPanePolicy, SpawnMode } from "../config.ts";
 import { killProcessGroup, stopContainer, type SpawnResult } from "./spawn.ts";
 
-const WorkspaceEntrySchema = z.object({
-  workspace_id: z.string(),
-  label: z.string(),
-});
-const WorkspaceListResultSchema = z.object({ workspaces: z.array(WorkspaceEntrySchema) });
-const WorkspaceListSchema = z.object({ result: WorkspaceListResultSchema });
-
 const WorkspaceIdSchema = z.object({ workspace_id: z.string() });
 const TabIdSchema = z.object({ tab_id: z.string() });
 const PaneIdSchema = z.object({ pane_id: z.string() });
@@ -22,12 +15,6 @@ const WorkspaceCreatedResultSchema = z.object({
   root_pane: PaneIdSchema,
 });
 const WorkspaceCreatedSchema = z.object({ result: WorkspaceCreatedResultSchema });
-
-const TabCreatedResultSchema = z.object({
-  tab: TabIdSchema,
-  root_pane: PaneIdSchema,
-});
-const TabCreatedSchema = z.object({ result: TabCreatedResultSchema });
 
 const ExitReceiptSchema = z.object({
   exitCode: z.number().int().nullable(),
@@ -54,8 +41,6 @@ export interface HerdrPaneHandle {
   readonly tabId: string;
   readonly paneId: string;
 }
-
-const workspaceLocks = new Map<string, Promise<void>>();
 
 const PANE_WRAPPER_SCRIPT = `import { spawn } from "node:child_process";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -110,27 +95,9 @@ export function runHerdr(
   });
 }
 
-async function withWorkspaceLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const previous = workspaceLocks.get(key) ?? Promise.resolve();
-  let release: (() => void) | undefined;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const tail = previous.then(() => gate);
-  workspaceLocks.set(key, tail);
-  await previous;
-  try {
-    return await fn();
-  } finally {
-    release?.();
-    if (workspaceLocks.get(key) === tail) {
-      workspaceLocks.delete(key);
-    }
-  }
-}
-
-function interpolateWorkspaceLabel(template: string, channel: string, host: string): string {
-  return template.replaceAll("{channel}", channel).replaceAll("{host}", host);
+function cardName(title: string): string {
+  const words = title.toLowerCase().match(/[a-z0-9]+/gu) ?? [];
+  return words.slice(0, 4).join("-").slice(0, 40).replace(/-+$/u, "");
 }
 
 export async function updateHerdrPaneStatus(
@@ -155,9 +122,6 @@ export async function updateHerdrPaneStatus(
 
 export async function openHerdrPane(params: {
   readonly config: HerdrConfig;
-  readonly host: string;
-  readonly channel: string;
-  readonly launchName: string;
   readonly branch: string;
   readonly delivery: string;
   readonly mode: SpawnMode;
@@ -166,82 +130,40 @@ export async function openHerdrPane(params: {
   readonly signal?: AbortSignal;
 }): Promise<HerdrPaneHandle | undefined> {
   const session = params.config.session;
-  const wsLabel = interpolateWorkspaceLabel(params.config.workspace, params.channel, params.host);
-  const tabLabel = params.launchName;
-  const lockKey = `${session ?? "default"}:${wsLabel}`;
+  const label = cardName(params.summary);
+  if (params.signal?.aborted === true) return undefined;
 
-  let listRaw: string;
+  let handle: HerdrPaneHandle;
   try {
-    listRaw = await runHerdr(session, ["workspace", "list"]);
+    const raw = await runHerdr(session, [
+      "workspace",
+      "create",
+      "--label",
+      label,
+      "--cwd",
+      params.cwd,
+      "--no-focus",
+    ]);
+    const { result } = WorkspaceCreatedSchema.parse(JSON.parse(raw));
+    handle = {
+      session,
+      workspaceId: result.workspace.workspace_id,
+      tabId: result.tab.tab_id,
+      paneId: result.root_pane.pane_id,
+    };
   } catch {
     return undefined;
   }
 
-  let workspaceId: string;
-  let tabId: string;
-  let paneId: string;
-
-  try {
-    const acquired = await withWorkspaceLock(lockKey, async () => {
-      const latestRaw = await runHerdr(session, ["workspace", "list"]).catch(() => listRaw);
-      if (params.signal?.aborted === true) return undefined;
-      const parsed = WorkspaceListSchema.parse(JSON.parse(latestRaw));
-      const existing = parsed.result.workspaces.find((ws) => ws.label === wsLabel);
-      if (existing !== undefined) {
-        const createdTabRaw = await runHerdr(session, [
-          "tab",
-          "create",
-          "--workspace",
-          existing.workspace_id,
-          "--label",
-          tabLabel,
-          "--cwd",
-          params.cwd,
-          "--no-focus",
-        ]);
-        const createdTab = TabCreatedSchema.parse(JSON.parse(createdTabRaw));
-        return {
-          workspaceId: existing.workspace_id,
-          tabId: createdTab.result.tab.tab_id,
-          paneId: createdTab.result.root_pane.pane_id,
-        };
-      }
-      const createdWsRaw = await runHerdr(session, [
-        "workspace",
-        "create",
-        "--label",
-        wsLabel,
-        "--cwd",
-        params.cwd,
-        "--no-focus",
-      ]);
-      const createdWs = WorkspaceCreatedSchema.parse(JSON.parse(createdWsRaw));
-      await runHerdr(session, ["tab", "rename", createdWs.result.tab.tab_id, tabLabel]).catch(
-        () => undefined,
-      );
-      return {
-        workspaceId: createdWs.result.workspace.workspace_id,
-        tabId: createdWs.result.tab.tab_id,
-        paneId: createdWs.result.root_pane.pane_id,
-      };
-    });
-    if (acquired === undefined) return undefined;
-    workspaceId = acquired.workspaceId;
-    tabId = acquired.tabId;
-    paneId = acquired.paneId;
-  } catch {
-    return undefined;
-  }
-
-  const handle: HerdrPaneHandle = { session, workspaceId, tabId, paneId };
+  await runHerdr(session, ["tab", "rename", handle.tabId, label]).catch(() => undefined);
   await runHerdr(session, [
     "pane",
     "report-metadata",
-    paneId,
+    handle.paneId,
     "--source",
     "fleet-runner",
     "--title",
-    tabLabel,
+    label,
     "--display-agent",
     params.mode,
     "--token",

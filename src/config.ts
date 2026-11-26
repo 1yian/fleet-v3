@@ -26,7 +26,6 @@ const ContainerConfigSchema = z.object({
 });
 
 const HerdrConfigSchema = z.object({
-  workspace: z.string().min(1).default("workers"),
   session: z.string().min(1).optional(),
   keepPane: z.enum(["never", "on-failure", "always"]).default("on-failure"),
 });
@@ -206,7 +205,6 @@ export function resolveContainerConfig(spawn: RunnerConfig["spawn"]): ContainerC
 
 export function resolveHerdrConfig(spawn: RunnerConfig["spawn"]): HerdrConfig {
   return {
-    workspace: spawn.herdr?.workspace ?? "workers",
     ...(spawn.herdr?.session !== undefined ? { session: spawn.herdr.session } : {}),
     keepPane: spawn.herdr?.keepPane ?? "on-failure",
   };

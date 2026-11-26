@@ -21,9 +21,9 @@ Read [VISION.md](VISION.md) for the design principles, [SETUP.md](SETUP.md) for 
 
 ## Worker names
 
-Each launch uses `t-<card-id>-e<epoch>-<title-slug>-<unique-suffix>` for its worktree directory, Herdr tab, and pane title. The Git branch adds `fleet/` to the same name. The lowercase ASCII slug is limited to 40 characters and falls back to `card` if the title produces no slug. Workers stay in the configured Herdr workspace, and permanent mates keep their configured names.
+Each worker gets its own Herdr workspace in the configured session. The workspace, tab, and pane use the first four ASCII alphanumeric runs from the lowercased card title, joined with hyphens and capped at 40 characters. Permanent mate names are unchanged.
 
-For example, card #19 titled `Restore worker names` could open tab `t-19-e1-restore-worker-names-K3sm4Q` on branch `fleet/t-19-e1-restore-worker-names-K3sm4Q`.
+The worktree directory and Git branch use `c-<card-id>-a<claim-epoch>`. A collision adds a short suffix to both. For example, the first claim of card #19, `Restore original worker names today`, opens a Herdr workspace named `restore-original-worker-names` with worktree and branch `c-19-a1`.
 
 ## Quick start
 

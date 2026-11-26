@@ -257,9 +257,6 @@ function openWorkerPane(
   if (config.spawn.viewport !== "herdr") return Promise.resolve(undefined);
   return openHerdrPane({
     config: resolveHerdrConfig(config.spawn),
-    host: config.host,
-    channel: claim.card.mate,
-    launchName: workspace.launchName,
     branch: workspace.branch,
     delivery,
     mode: config.spawn.mode,
@@ -345,7 +342,6 @@ async function runClaim(
       channel: claim.card.mate,
       project,
       taskId: cardId,
-      title: claim.card.title,
       epoch: claim.epoch,
       repo,
     });

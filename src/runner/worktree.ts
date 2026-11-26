@@ -1,12 +1,11 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmdirSync, rmSync } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import type { RepoConfig } from "../config.ts";
 
 export interface TaskWorkspace {
   readonly worktreePath: string;
   readonly tmpDir: string;
-  readonly launchName: string;
   readonly branch: string;
   readonly repoPath: string;
   readonly gitCommonDir: string;
@@ -14,18 +13,6 @@ export interface TaskWorkspace {
 
 function sanitizeSegment(value: string): string {
   return value.replaceAll(/[^a-zA-Z0-9._-]/gu, "-");
-}
-
-function cardTitleSlug(title: string): string {
-  const slug = title
-    .normalize("NFKD")
-    .toLowerCase()
-    .replaceAll(/\p{Mark}/gu, "")
-    .replaceAll(/[^a-z0-9]+/gu, "-")
-    .replaceAll(/^-|-$/gu, "")
-    .slice(0, 40)
-    .replace(/-$/u, "");
-  return slug || "card";
 }
 
 function runGit(cwd: string, args: readonly string[]): Promise<string> {
@@ -55,7 +42,6 @@ export async function prepareWorkspace(params: {
   readonly channel: string;
   readonly project: string;
   readonly taskId: string;
-  readonly title: string;
   readonly epoch: number;
   readonly repo: RepoConfig;
 }): Promise<TaskWorkspace> {
@@ -64,18 +50,29 @@ export async function prepareWorkspace(params: {
   const baseDir = join(params.workspacesRoot, safeChannel, safeProject);
   const scratchRoot = join(baseDir, "tmp");
   mkdirSync(scratchRoot, { recursive: true });
-  const slug = cardTitleSlug(params.title);
-  const prefix = `t-${sanitizeSegment(params.taskId)}-e${String(params.epoch)}-${slug}-`;
-  const tmpDir = mkdtempSync(join(scratchRoot, prefix));
-  const launchName = basename(tmpDir);
-  const worktreePath = join(baseDir, "worktrees", launchName);
-  const branch = `fleet/${launchName}`;
-  let branchCreated = false;
+  const name = `c-${sanitizeSegment(params.taskId)}-a${String(params.epoch)}`;
+  const tmpDir = mkdtempSync(join(scratchRoot, `${name}-`));
+  const worktreeRoot = join(baseDir, "worktrees");
+  let checkout: { branch: string; worktreePath: string } | undefined;
+
+  const reserveCheckout = async (
+    branch: string,
+  ): Promise<{ branch: string; worktreePath: string }> => {
+    const worktreePath = join(worktreeRoot, branch);
+    mkdirSync(worktreePath);
+    try {
+      await runGit(params.repo.path, ["branch", "--no-track", branch, params.repo.baseBranch]);
+    } catch (error) {
+      rmdirSync(worktreePath);
+      throw error;
+    }
+    return { branch, worktreePath };
+  };
 
   try {
-    mkdirSync(dirname(worktreePath), { recursive: true });
-    await runGit(params.repo.path, ["branch", "--no-track", branch, params.repo.baseBranch]);
-    branchCreated = true;
+    mkdirSync(worktreeRoot, { recursive: true });
+    checkout = await reserveCheckout(name).catch(() => reserveCheckout(basename(tmpDir)));
+    const { branch, worktreePath } = checkout;
     await runGit(params.repo.path, ["worktree", "add", worktreePath, branch]);
 
     const rawCommonDir = await runGit(params.repo.path, ["rev-parse", "--git-common-dir"]);
@@ -84,13 +81,13 @@ export async function prepareWorkspace(params: {
     return {
       worktreePath: realpathSync(worktreePath),
       tmpDir: realpathSync(tmpDir),
-      launchName,
       branch,
       repoPath: realpathSync(params.repo.path),
       gitCommonDir,
     };
   } catch (error) {
-    if (branchCreated) {
+    if (checkout !== undefined) {
+      const { branch, worktreePath } = checkout;
       await runGit(params.repo.path, ["worktree", "remove", "--force", worktreePath]).catch(
         () => undefined,
       );
