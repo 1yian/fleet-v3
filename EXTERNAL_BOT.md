@@ -88,11 +88,11 @@ Every wake arrives as `POST <webhook-url>` with `Content-Type: application/json`
 }
 ```
 
-When a wake arrives:
+Pass the webhook body's `notice` and `cardId` (if present) to the bot and return HTTP `2xx` once the wake is accepted. Keep behavior in the mate prompt and charter, not in the webhook. Use a one-line wake prompt such as:
 
-- Deliver `notice` (and `cardId` if present) to the `<mate>` bot.
-- The bot inspects the card (`fleet view <cardId> --full` via CLI, or `fleet_view` via MCP), handles/delegates/closes it, and only pings the captain when a real decision is needed or final work is ready.
-- Return HTTP `2xx` once the wake is accepted.
+> Fleet wake: source `<env file>`, load the `fleet-mate` skill (or `prompts/mate.md`), run `fleet view <cardId> --full` for the `cardId` in the webhook body if present, and handle the wake; message the captain only for a real decision or finished work.
+
+For an MCP-only bot, omit the environment file step and use `fleet_view` instead of the CLI.
 
 _(If your bot runs on the same host and consumes a local stream instead of HTTP webhooks, run bare `fleet watch --mate <mate>` to receive the same JSON envelope as NDJSON lines on stdout.)_
 

@@ -90,7 +90,7 @@ Wait for the user's answer, then follow the matching branch:
    ```bash
    fleet watch --mate 1stmate --webhook https://bot.example.com/wake --header "Authorization: Bearer <token>"
    ```
-   _(Or bare `fleet watch --mate 1stmate` if the bot consumes NDJSON lines on stdout.)_
+   _(Or bare `fleet watch --mate 1stmate` if the bot consumes NDJSON lines on stdout.)_ Use the [one-line wake prompt in the external bot guide](EXTERNAL_BOT.md#3-wire-incoming-wakes-fleet-watch) for both first and domain mates.
 6. Smoke-test `1stmate`:
    ```bash
    fleet dispatch --mate 1stmate --title "Smoke test: reply ok and close this card"
