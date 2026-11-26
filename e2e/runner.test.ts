@@ -44,7 +44,10 @@ const AttemptReceiptSchema = z.object({
   staleOut: z.string(),
 });
 
-const ProbeSchema = z.object({ status: z.number().nullable(), out: z.string() });
+const ProbeSchema = z.object({
+  status: z.number().nullable(),
+  out: z.string(),
+});
 
 const HerdrReceiptSchema = z.object({
   card: z.string(),
@@ -53,17 +56,22 @@ const HerdrReceiptSchema = z.object({
 
 const HerdrPaneEntrySchema = z.object({
   workspace_id: z.string(),
-  tab_id: z.string(),
-  title: z.string(),
   tokens: z.object({ branch: z.string() }),
 });
-const HerdrPaneListResultSchema = z.object({ panes: z.array(HerdrPaneEntrySchema) });
+const HerdrPaneListResultSchema = z.object({
+  panes: z.array(HerdrPaneEntrySchema),
+});
 const HerdrPaneListSchema = z.object({ result: HerdrPaneListResultSchema });
-const HerdrWorkspaceEntrySchema = z.object({ workspace_id: z.string(), label: z.string() });
-const HerdrWorkspaceResultSchema = z.object({ workspaces: z.array(HerdrWorkspaceEntrySchema) });
-const HerdrWorkspaceListSchema = z.object({ result: HerdrWorkspaceResultSchema });
-const HerdrTabEntrySchema = z.object({ label: z.string() });
-const HerdrTabSchema = z.object({ result: z.object({ tab: HerdrTabEntrySchema }) });
+const HerdrWorkspaceEntrySchema = z.object({
+  workspace_id: z.string(),
+  label: z.string(),
+});
+const HerdrWorkspaceResultSchema = z.object({
+  workspaces: z.array(HerdrWorkspaceEntrySchema),
+});
+const HerdrWorkspaceListSchema = z.object({
+  result: HerdrWorkspaceResultSchema,
+});
 
 const tempDirs: string[] = [];
 
@@ -80,7 +88,9 @@ function initGitRepo(root: string): string {
   execFileSync("git", ["-C", repoDir, "config", "user.name", "Fleet Test"]);
   writeFileSync(join(repoDir, "README.md"), "# demo\n");
   execFileSync("git", ["-C", repoDir, "add", "README.md"]);
-  execFileSync("git", ["-C", repoDir, "commit", "-m", "init"], { stdio: "ignore" });
+  execFileSync("git", ["-C", repoDir, "commit", "-m", "init"], {
+    stdio: "ignore",
+  });
   return repoDir;
 }
 
@@ -504,7 +514,10 @@ void test("returns card to mate once crashed or expired attempts exceed maxAttem
         claimBy: "runner-test-host",
       });
       assert.ok(prior !== null);
-      await client.releaseClaim(released.id, { epoch: prior.epoch, token: prior.token });
+      await client.releaseClaim(released.id, {
+        epoch: prior.epoch,
+        token: prior.token,
+      });
     }
     await runLoop(client, workerConfig, { once: true });
     assert.equal(existsSync(ranMarker), true, "clean releases do not spend the retry budget");
@@ -841,14 +854,11 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
       `c-${crashCard.id}-a1`,
     ]);
     for (const pane of panesAfterCrash.result.panes) {
-      const { result } = HerdrTabSchema.parse(JSON.parse(herdrExec("tab", "get", pane.tab_id)));
       const expected =
         pane.tokens.branch === `c-${failCard.id}-a1`
           ? `d-j-vu-${"x".repeat(33)}`
           : "fix-those-five-words";
       assert.equal(labels.get(pane.workspace_id), expected);
-      assert.equal(pane.title, expected);
-      assert.equal(result.tab.label, expected);
     }
   } finally {
     tryExecSilent(() => {
@@ -859,7 +869,10 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
       setTimeout(resolve, 250);
     });
     tryExecSilent(() => {
-      execFileSync("herdr", ["session", "delete", sessionName], { stdio: "ignore", timeout: 5000 });
+      execFileSync("herdr", ["session", "delete", sessionName], {
+        stdio: "ignore",
+        timeout: 5000,
+      });
     });
     await server.stop();
   }
@@ -934,7 +947,10 @@ void test("shutdown during worktree setup releases the claim without launching t
       },
     });
 
-    const run = runLoop(client, config, { once: true, signal: controller.signal });
+    const run = runLoop(client, config, {
+      once: true,
+      signal: controller.signal,
+    });
     assert.ok(await waitFor(() => existsSync(setupMarker), 10_000), "worktree setup must start");
     controller.abort();
     await run;
@@ -1018,7 +1034,13 @@ void test("a failed worktree setup leaves no scratch directory or branch behind"
       delivery: "direct-pr",
     });
     const config = makeConfig(root, repoDir, {
-      repos: { demo: { path: repoDir, baseBranch: "no-such-branch", delivery: "direct-pr" } },
+      repos: {
+        demo: {
+          path: repoDir,
+          baseBranch: "no-such-branch",
+          delivery: "direct-pr",
+        },
+      },
     });
 
     await runLoop(client, config, { once: true });
@@ -1085,7 +1107,9 @@ void test("a branch left from an earlier board is never overwritten or deleted b
   }).trim();
   writeFileSync(join(repoDir, "next.txt"), "advance main\n");
   execFileSync("git", ["-C", repoDir, "add", "next.txt"]);
-  execFileSync("git", ["-C", repoDir, "commit", "-m", "advance"], { stdio: "ignore" });
+  execFileSync("git", ["-C", repoDir, "commit", "-m", "advance"], {
+    stdio: "ignore",
+  });
   const receiptPath = join(root, "branch-receipt.json");
 
   const failing = await startTestServer();
@@ -1099,7 +1123,13 @@ void test("a branch left from an earlier board is never overwritten or deleted b
     });
     assert.equal(card.id, "1");
     const config = makeConfig(root, repoDir, {
-      repos: { demo: { path: repoDir, baseBranch: "no-such-branch", delivery: "direct-pr" } },
+      repos: {
+        demo: {
+          path: repoDir,
+          baseBranch: "no-such-branch",
+          delivery: "direct-pr",
+        },
+      },
     });
     await runLoop(failing.client, config, { once: true });
   } finally {
@@ -1211,7 +1241,11 @@ void test("runners on one host serving different boards never share a checkout, 
       tmp: z.string(),
       head: z.string(),
     });
-    const End = z.object({ worktree: z.boolean(), tmp: z.boolean(), head: z.string() });
+    const End = z.object({
+      worktree: z.boolean(),
+      tmp: z.boolean(),
+      head: z.string(),
+    });
     const portA = new URL(boardA.url).port;
     const portB = new URL(boardB.url).port;
     const startA = Start.parse(read(`${portA}.start`));

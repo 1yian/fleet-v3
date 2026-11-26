@@ -21,7 +21,7 @@ Read [VISION.md](VISION.md) for the design principles, [SETUP.md](SETUP.md) for 
 
 ## Worker names
 
-Each worker gets its own Herdr workspace in the configured session. The workspace, tab, and pane use the first four ASCII alphanumeric runs from the lowercased card title, joined with hyphens and capped at 40 characters. Permanent mate names are unchanged.
+Each worker gets its own Herdr workspace in the configured session. The workspace label uses the first four ASCII alphanumeric runs from the lowercased card title, joined with hyphens and capped at 40 characters. Permanent mate names are unchanged.
 
 The worktree directory and Git branch use `c-<card-id>-a<claim-epoch>`. A collision adds a short suffix to both. For example, the first claim of card #19, `Restore original worker names today`, opens a Herdr workspace named `restore-original-worker-names` with worktree and branch `c-19-a1`.
 

@@ -155,15 +155,12 @@ export async function openHerdrPane(params: {
     return undefined;
   }
 
-  await runHerdr(session, ["tab", "rename", handle.tabId, label]).catch(() => undefined);
   await runHerdr(session, [
     "pane",
     "report-metadata",
     handle.paneId,
     "--source",
     "fleet-runner",
-    "--title",
-    label,
     "--display-agent",
     params.mode,
     "--token",
