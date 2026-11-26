@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import type { RepoConfig } from "../config.ts";
 
@@ -7,7 +7,6 @@ export interface TaskWorkspace {
   readonly worktreePath: string;
   readonly tmpDir: string;
   readonly branch: string;
-  readonly reservation: string;
   readonly repoPath: string;
   readonly gitCommonDir: string;
 }
@@ -15,7 +14,6 @@ export interface TaskWorkspace {
 interface Checkout {
   readonly branch: string;
   readonly worktreePath: string;
-  readonly reservation: string;
 }
 
 function isErrno(error: unknown, code: string): boolean {
@@ -38,13 +36,24 @@ function runGit(cwd: string, args: readonly string[]): Promise<string> {
   });
 }
 
-async function branchExists(repoPath: string, branch: string): Promise<boolean> {
-  try {
-    await runGit(repoPath, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
-    return true;
-  } catch {
-    return false;
+async function branchNameTaken(repoPath: string, branch: string): Promise<boolean> {
+  const refs = await runGit(repoPath, [
+    "for-each-ref",
+    "--count=1",
+    "--format=%(refname)",
+    `refs/heads/${branch}`,
+  ]);
+  return refs !== "";
+}
+
+async function releaseCheckout(repoPath: string, worktreePath: string): Promise<void> {
+  if (existsSync(worktreePath)) {
+    for (const entry of readdirSync(worktreePath)) {
+      rmSync(join(worktreePath, entry), { recursive: true, force: true });
+    }
   }
+  await runGit(repoPath, ["worktree", "prune"]).catch(() => undefined);
+  rmSync(worktreePath, { recursive: true, force: true });
 }
 
 export function hasEnvrcInAncestry(startDir: string): boolean {
@@ -73,35 +82,29 @@ export async function prepareWorkspace(params: {
   const name = `c-${sanitizeSegment(params.taskId)}-a${String(params.epoch)}`;
   const tmpDir = mkdtempSync(join(scratchRoot, `${name}-`));
   const worktreeRoot = join(baseDir, "worktrees");
-  const reservationRoot = join(baseDir, "reservations");
   let checkout: Checkout | undefined;
 
   const reserveCheckout = async (branch: string): Promise<Checkout | undefined> => {
-    const reservation = join(reservationRoot, branch);
     const worktreePath = join(worktreeRoot, branch);
     try {
-      mkdirSync(reservation);
+      mkdirSync(worktreePath);
     } catch (error) {
       if (isErrno(error, "EEXIST")) return undefined;
       throw error;
     }
-    if (existsSync(worktreePath)) {
-      rmSync(reservation, { recursive: true, force: true });
-      return undefined;
-    }
     try {
       await runGit(params.repo.path, ["branch", "--no-track", branch, params.repo.baseBranch]);
     } catch (error) {
-      rmSync(reservation, { recursive: true, force: true });
-      if (await branchExists(params.repo.path, branch)) return undefined;
+      const taken = await branchNameTaken(params.repo.path, branch).catch(() => false);
+      rmSync(worktreePath, { recursive: true, force: true });
+      if (taken) return undefined;
       throw error;
     }
-    return { branch, worktreePath, reservation };
+    return { branch, worktreePath };
   };
 
   try {
     mkdirSync(worktreeRoot, { recursive: true });
-    mkdirSync(reservationRoot, { recursive: true });
     checkout = (await reserveCheckout(name)) ?? (await reserveCheckout(basename(tmpDir)));
     if (checkout === undefined) throw new Error(`no free checkout name for ${name}`);
     const { branch, worktreePath } = checkout;
@@ -114,20 +117,14 @@ export async function prepareWorkspace(params: {
       worktreePath: realpathSync(worktreePath),
       tmpDir: realpathSync(tmpDir),
       branch,
-      reservation: checkout.reservation,
       repoPath: realpathSync(params.repo.path),
       gitCommonDir,
     };
   } catch (error) {
     if (checkout !== undefined) {
-      const { branch, worktreePath, reservation } = checkout;
-      await runGit(params.repo.path, ["worktree", "remove", "--force", worktreePath]).catch(
-        () => undefined,
-      );
-      rmSync(worktreePath, { recursive: true, force: true });
-      await runGit(params.repo.path, ["worktree", "prune"]).catch(() => undefined);
+      const { branch, worktreePath } = checkout;
+      await releaseCheckout(params.repo.path, worktreePath);
       await runGit(params.repo.path, ["branch", "-D", branch]).catch(() => undefined);
-      rmSync(reservation, { recursive: true, force: true });
     }
     rmSync(tmpDir, { recursive: true, force: true });
     throw error;
@@ -135,11 +132,6 @@ export async function prepareWorkspace(params: {
 }
 
 export async function cleanupWorkspace(workspace: TaskWorkspace): Promise<void> {
-  await runGit(workspace.repoPath, ["worktree", "remove", "--force", workspace.worktreePath]).catch(
-    () => undefined,
-  );
-  await runGit(workspace.repoPath, ["worktree", "prune"]).catch(() => undefined);
-  rmSync(workspace.worktreePath, { recursive: true, force: true });
-  rmSync(workspace.reservation, { recursive: true, force: true });
+  await releaseCheckout(workspace.repoPath, workspace.worktreePath);
   rmSync(workspace.tmpDir, { recursive: true, force: true });
 }

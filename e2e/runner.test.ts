@@ -1178,6 +1178,54 @@ void test("a branch left from an earlier board is never overwritten or deleted b
   assert.equal(afterSuccess, retainedSha, "the earlier branch keeps its commit");
 });
 
+async function runOneCard(root: string, repoDir: string, receiptPath: string): Promise<void> {
+  const config = makeConfig(root, repoDir, {
+    spawn: {
+      mode: "local",
+      viewport: "headless",
+      direnv: false,
+      command: [
+        "node",
+        "-e",
+        `require("node:fs").writeFileSync(${JSON.stringify(receiptPath)}, process.env.FLEET_BRANCH)`,
+      ],
+    },
+  });
+  const board = await startTestServer();
+  try {
+    await board.client.createCard({
+      mate: "cleo",
+      title: "Namespace conflict card",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    await runLoop(board.client, config, { once: true });
+  } finally {
+    await board.stop();
+  }
+}
+
+void test("a branch name blocked by a ref namespace conflict takes a suffix, while a Git lock failure does not", async () => {
+  const conflictRoot = makeTempDir("fleet-v3-namespace-");
+  const conflictRepo = initGitRepo(conflictRoot);
+  const conflictReceipt = join(conflictRoot, "receipt.txt");
+  execFileSync("git", ["-C", conflictRepo, "branch", "c-1-a1/topic"]);
+  await runOneCard(conflictRoot, conflictRepo, conflictReceipt);
+  assert.match(readFileSync(conflictReceipt, "utf8"), /^c-1-a1-[a-zA-Z0-9]{6}$/u);
+
+  const lockRoot = makeTempDir("fleet-v3-lock-");
+  const lockRepo = initGitRepo(lockRoot);
+  const lockReceipt = join(lockRoot, "receipt.txt");
+  writeFileSync(join(lockRepo, ".git", "refs", "heads", "c-1-a1.lock"), "");
+  await runOneCard(lockRoot, lockRepo, lockReceipt);
+  assert.equal(existsSync(lockReceipt), false, "a Git lock failure must not start a worker");
+  const branches = execFileSync("git", ["-C", lockRepo, "branch", "--list", "c-*"], {
+    encoding: "utf8",
+  });
+  assert.equal(branches.trim(), "", "a Git lock failure must not be hidden behind a suffix");
+});
+
 void test("runners on one host serving different boards never share a checkout, scratch directory, or branch", async () => {
   const root = makeTempDir("fleet-v3-shared-host-");
   const repoDir = initGitRepo(root);
