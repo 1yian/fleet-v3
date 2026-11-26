@@ -109,17 +109,11 @@ function fenceFromEnv(): OptionalFenceInput {
   return { epoch, token };
 }
 
-function resolveBoardUrl(explicit: string | undefined): string {
-  let boardUrl = explicit ?? process.env["BOARD_URL"];
-  const configPath = findDefaultConfig();
-  if (boardUrl === undefined && configPath !== undefined) {
-    boardUrl = loadFleetConfig(configPath).boardUrl;
-  }
-  return boardUrl ?? "http://127.0.0.1:4100";
-}
-
 function boardContext(options: RunFleetCliOptions): FleetAxiContext {
-  const boardUrl = resolveBoardUrl(options.boardUrl);
+  const configPath = findDefaultConfig();
+  const config = configPath === undefined ? undefined : loadFleetConfig(configPath);
+  const boardUrl =
+    options.boardUrl ?? process.env["BOARD_URL"] ?? config?.boardUrl ?? "http://127.0.0.1:4100";
   const fence = fenceFromEnv();
   const mate = process.env["FLEET_MATE"];
   const envActor =
@@ -131,6 +125,7 @@ function boardContext(options: RunFleetCliOptions): FleetAxiContext {
   return {
     board: () => createHttpBoardClient(boardUrl),
     boardUrl,
+    ...(config?.defaultHost !== undefined ? { defaultHost: config.defaultHost } : {}),
     actor: options.actor ?? envActor,
     fence,
   };
@@ -228,7 +223,7 @@ async function webCommand(
     },
     helpBlock,
   );
-  const boardUrl = ctx?.boardUrl ?? resolveBoardUrl(undefined);
+  const boardUrl = ctx?.boardUrl ?? "http://127.0.0.1:4100";
   const host = stringFlag(parsed.values, "host") ?? "127.0.0.1";
   const port = parsePort(stringFlag(parsed.values, "port") ?? "4101", helpBlock);
   const { startKanbanServer } = await import("./adapters/kanban.ts");

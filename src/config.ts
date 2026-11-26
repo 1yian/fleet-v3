@@ -97,6 +97,7 @@ const VerifyConfigSchema = z.object({
 
 const FleetConfigObjectSchema = z.object({
   boardUrl: z.url().default("http://127.0.0.1:4100"),
+  defaultHost: z.string().min(1).optional(),
   workspacesRoot: z.string().min(1).default("~/.fleet/workspaces"),
   server: ServerConfigSchema.optional(),
   mates: MatesConfigSchema.optional(),
@@ -282,6 +283,7 @@ function normalizeFleetConfig(parsed: FleetConfig, baseDir: string): FleetConfig
   return {
     boardUrl: process.env["BOARD_URL"] ?? parsed.boardUrl,
     workspacesRoot: expandPath(parsed.workspacesRoot, baseDir),
+    ...(parsed.defaultHost !== undefined ? { defaultHost: parsed.defaultHost } : {}),
     ...(server !== undefined ? { server } : {}),
     ...(mates !== undefined ? { mates } : {}),
   };
