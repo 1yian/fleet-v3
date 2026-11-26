@@ -1,0 +1,7 @@
+review:
+  path_instructions:
+    - path: "*"
+      instructions: |
+        Treat the repository's VISION.md as binding design law. Read it before judging the change.
+        Any change that contradicts a principle or stated rule in VISION.md must be reported as a finding with severity "error" and action "ask-user", quoting the violated passage from VISION.md.
+        Never classify a VISION.md violation as "auto-fix" or "no-op", and never propose an automatic fix for it: the run must park for a human decision so no pull request is opened.
