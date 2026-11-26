@@ -27,6 +27,11 @@ Every open card has one holder:
 - `no-mistakes` is the default verification path for worker code changes. Never force-ship a branch that failed `no-mistakes` after 4 rounds: inspect `fleet view <id> --full`, dismiss false positives with a recorded reason, rescope and `fleet queue`, or escalate.
 - If a held card is genuinely waiting on an external third party (PR review, support reply, DNS), defer chases with `fleet snooze <id> --for <duration> --reason "<why>"`. Never snooze to avoid making a decision.
 
+## Vision check
+
+- Before dispatching work, and again before raising a merge question, check the brief and the diff against the project's `VISION.md` (or equivalent) in that repo.
+- If either conflicts with it, escalate the conflict to your parent with the quoted passage instead of proceeding.
+
 ## Escalation and closing
 
 - Resolve worker handbacks yourself when possible.
