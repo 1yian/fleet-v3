@@ -1,6 +1,11 @@
 import { fileURLToPath } from "node:url";
 import type { BoardClient } from "../board/client.ts";
-import { runnerActor, type ClaimReceipt, type Delivery } from "../board/types.ts";
+import {
+  runnerActor,
+  type ClaimReceipt,
+  type Delivery,
+  type FinishClaimInput,
+} from "../board/types.ts";
 import { resolveHerdrConfig, type RunnerConfig } from "../config.ts";
 import {
   closeHerdrPane,
@@ -141,6 +146,48 @@ function runWorkerProcess(params: {
   });
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+const CLAIM_REQUEST_TIMEOUT_MS = 10_000;
+
+async function releaseClaim(client: BoardClient, claim: ClaimReceipt): Promise<void> {
+  await client
+    .releaseClaim(
+      claim.card.id,
+      { epoch: claim.epoch, token: claim.token },
+      AbortSignal.timeout(CLAIM_REQUEST_TIMEOUT_MS),
+    )
+    .catch(() => undefined);
+}
+
+async function finishClaim(
+  client: BoardClient,
+  config: RunnerConfig,
+  claim: ClaimReceipt,
+  outcome: FinishClaimInput["outcome"],
+  summary: string,
+): Promise<void> {
+  try {
+    await client.finishClaim(
+      claim.card.id,
+      {
+        epoch: claim.epoch,
+        token: claim.token,
+        outcome,
+        summary,
+        actor: runnerActor(config.host),
+      },
+      AbortSignal.timeout(CLAIM_REQUEST_TIMEOUT_MS),
+    );
+  } catch (error) {
+    process.stderr.write(
+      `Runner ${config.host} could not finish card #${claim.card.id} attempt ${String(claim.epoch)}: ${errorMessage(error)}; intended outcome ${outcome}\n`,
+    );
+  }
+}
+
 async function handleRunOutcome(params: {
   readonly client: BoardClient;
   readonly config: RunnerConfig;
@@ -153,33 +200,19 @@ async function handleRunOutcome(params: {
     return { done: true, failed: true, message: "Lease lost" };
   }
   if (params.run.aborted) {
-    await params.client
-      .releaseClaim(cardId, { epoch: params.claim.epoch, token: params.claim.token })
-      .catch(() => undefined);
+    await releaseClaim(params.client, params.claim);
     return { done: true, failed: true, message: "Aborted" };
   }
   if (params.run.timedOut !== null) {
     const tail = params.run.outputTail.slice(-1000);
     const summary = `Worker hit ${params.run.timedOut} timeout on ${params.config.host}.${tail.length > 0 ? `\n\n${tail}` : ""}`;
-    await params.client.finishClaim(cardId, {
-      epoch: params.claim.epoch,
-      token: params.claim.token,
-      outcome: "needs_mate",
-      summary,
-      actor: runnerActor(params.config.host),
-    });
+    await finishClaim(params.client, params.config, params.claim, "needs_mate", summary);
     return { done: true, failed: true, message: `Timed out (${params.run.timedOut})` };
   }
   if (params.run.exitCode !== 0) {
     const tail = params.run.outputTail.slice(-1000);
     const summary = `Worker exited ${String(params.run.exitCode)} on ${params.config.host}.${tail.length > 0 ? `\n\n${tail}` : ""}`;
-    await params.client.finishClaim(cardId, {
-      epoch: params.claim.epoch,
-      token: params.claim.token,
-      outcome: "needs_mate",
-      summary,
-      actor: runnerActor(params.config.host),
-    });
+    await finishClaim(params.client, params.config, params.claim, "needs_mate", summary);
     return { done: true, failed: true, message: `Exited ${String(params.run.exitCode)}` };
   }
   const latest = await params.client.getThread(cardId);
@@ -226,13 +259,13 @@ async function handleVerification(params: {
   }
 
   if (verified.status === "needs-mate") {
-    await params.client.finishClaim(cardId, {
-      epoch: params.claim.epoch,
-      token: params.claim.token,
-      outcome: "needs_mate",
-      summary: `Verification stopped at round ${String(verified.rounds)}/${String(params.config.maxReviewRounds)}: ${verified.reason}\n\n${verified.output.slice(-1500)}`,
-      actor: runnerActor(params.config.host),
-    });
+    await finishClaim(
+      params.client,
+      params.config,
+      params.claim,
+      "needs_mate",
+      `Verification stopped at round ${String(verified.rounds)}/${String(params.config.maxReviewRounds)}: ${verified.reason}\n\n${verified.output.slice(-1500)}`,
+    );
     return { ok: false, message: verified.reason };
   }
 
@@ -267,46 +300,40 @@ function openWorkerPane(
   });
 }
 
-async function abandonLaunch(
-  client: BoardClient,
-  claim: ClaimReceipt,
-  pane: HerdrPaneHandle | undefined,
-): Promise<void> {
-  if (pane !== undefined) {
-    await closeHerdrPane(pane, {
-      failed: false,
-      keepPane: "never",
-      message: "Shutdown before launch",
-    });
-  }
-  await client
-    .releaseClaim(claim.card.id, { epoch: claim.epoch, token: claim.token })
-    .catch(() => undefined);
-}
-
-async function teardownWorkspace(
+async function teardownClaim(
   client: BoardClient,
   config: RunnerConfig,
-  cardId: string,
+  claim: ClaimReceipt,
   workspace: TaskWorkspace,
+  closePane: (() => Promise<void>) | undefined,
 ): Promise<void> {
+  const failures: string[] = [];
+  try {
+    await closePane?.();
+  } catch (error) {
+    failures.push(`Could not close the Herdr pane: ${errorMessage(error)}`);
+  }
   try {
     await cleanupWorkspace(workspace);
-  } catch (cleanupError) {
-    const reason = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-    try {
-      await client.postEntry(cardId, {
-        text: `Runner ${config.host} could not clean up the checkout for card #${cardId}: ${reason}`,
+  } catch (error) {
+    failures.push(`Could not clean up the checkout: ${errorMessage(error)}`);
+  }
+  if (failures.length === 0) return;
+
+  const text = `Runner ${config.host} teardown for card #${claim.card.id} attempt ${String(claim.epoch)} at ${workspace.worktreePath}: ${failures.join("; ")}`;
+  try {
+    await client.postEntry(
+      claim.card.id,
+      {
+        text,
         by: runnerActor(config.host),
         internal: true,
         kind: "status",
-      });
-    } catch (postError) {
-      const postReason = postError instanceof Error ? postError.message : String(postError);
-      process.stderr.write(
-        `Runner ${config.host} could not clean up ${workspace.worktreePath} for card #${cardId}: ${reason}; reporting it failed: ${postReason}\n`,
-      );
-    }
+      },
+      AbortSignal.timeout(CLAIM_REQUEST_TIMEOUT_MS),
+    );
+  } catch (error) {
+    process.stderr.write(`${text}; reporting it failed: ${errorMessage(error)}\n`);
   }
 }
 
@@ -320,24 +347,24 @@ async function runClaim(
   const project = claim.card.project;
 
   if (claim.card.attempts > config.maxAttempts) {
-    await client.finishClaim(cardId, {
-      epoch: claim.epoch,
-      token: claim.token,
-      outcome: "needs_mate",
-      summary: `Stopped after ${String(claim.card.attempts - 1)} failed or expired attempts on ${config.host}. Review the thread, fix the blocker and run \`fleet queue ${cardId}\` to reset attempts and retry, or close/escalate.`,
-      actor: runnerActor(config.host),
-    });
+    await finishClaim(
+      client,
+      config,
+      claim,
+      "needs_mate",
+      `Stopped after ${String(claim.card.attempts - 1)} failed or expired attempts on ${config.host}. Review the thread, fix the blocker and run \`fleet queue ${cardId}\` to reset attempts and retry, or close/escalate.`,
+    );
     return;
   }
 
   if (project === null || config.repos[project] === undefined) {
-    await client.finishClaim(cardId, {
-      epoch: claim.epoch,
-      token: claim.token,
-      outcome: "needs_mate",
-      summary: `Host ${config.host} has no registered repo for project=${project ?? "(missing)"}.`,
-      actor: runnerActor(config.host),
-    });
+    await finishClaim(
+      client,
+      config,
+      claim,
+      "needs_mate",
+      `Host ${config.host} has no registered repo for project=${project ?? "(missing)"}.`,
+    );
     return;
   }
 
@@ -361,6 +388,7 @@ async function runClaim(
   let pane: HerdrPaneHandle | undefined;
   let preparedWorkspace: TaskWorkspace | undefined;
   let failed = false;
+  let keepPane = herdrConfig.keepPane;
   let finalPaneMessage = `Completed on ${config.host}`;
 
   try {
@@ -385,9 +413,9 @@ async function runClaim(
       kind: "status",
     });
     if (controller.signal.aborted) {
-      const unlaunched = pane;
-      pane = undefined;
-      await abandonLaunch(client, claim, unlaunched);
+      keepPane = "never";
+      finalPaneMessage = "Shutdown before launch";
+      await releaseClaim(client, claim);
       return;
     }
 
@@ -436,55 +464,38 @@ async function runClaim(
       }
     }
 
-    await client.finishClaim(cardId, {
-      epoch: claim.epoch,
-      token: claim.token,
-      outcome: "done",
-      summary: `Completed on ${config.host} (${workspace.branch})`,
-      actor: runnerActor(config.host),
-    });
+    await finishClaim(
+      client,
+      config,
+      claim,
+      "done",
+      `Completed on ${config.host} (${workspace.branch})`,
+    );
   } catch (error) {
     failed = true;
-    finalPaneMessage = error instanceof Error ? error.message : String(error);
-    throw error;
+    finalPaneMessage = errorMessage(error);
+    await finishClaim(
+      client,
+      config,
+      claim,
+      "needs_mate",
+      `Runner on ${config.host} failed before the worker could finish: ${finalPaneMessage}`,
+    );
   } finally {
     stopRenewal();
     outerSignal?.removeEventListener("abort", onOuterAbort);
-    try {
-      if (pane !== undefined) {
-        await closeHerdrPane(pane, {
-          failed,
-          keepPane: herdrConfig.keepPane,
-          message: finalPaneMessage,
-        });
-      }
-    } finally {
-      if (preparedWorkspace !== undefined) {
-        await teardownWorkspace(client, config, cardId, preparedWorkspace);
-      }
+    if (preparedWorkspace !== undefined) {
+      const workerPane = pane;
+      await teardownClaim(
+        client,
+        config,
+        claim,
+        preparedWorkspace,
+        workerPane === undefined
+          ? undefined
+          : () => closeHerdrPane(workerPane, { failed, keepPane, message: finalPaneMessage }),
+      );
     }
-  }
-}
-
-async function executeClaim(
-  client: BoardClient,
-  config: RunnerConfig,
-  claim: ClaimReceipt,
-  outerSignal?: AbortSignal,
-): Promise<void> {
-  try {
-    await runClaim(client, config, claim, outerSignal);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    await client
-      .finishClaim(claim.card.id, {
-        epoch: claim.epoch,
-        token: claim.token,
-        outcome: "needs_mate",
-        summary: `Runner on ${config.host} failed before the worker could finish: ${reason}`,
-        actor: runnerActor(config.host),
-      })
-      .catch(() => undefined);
   }
 }
 
@@ -518,7 +529,7 @@ export async function runLoop(
   if (options.once === true) {
     const claimed = await claimNextReady(client, config, 0, options.signal);
     if (claimed === null) return 0;
-    await executeClaim(client, config, claimed, options.signal);
+    await runClaim(client, config, claimed, options.signal);
     return 1;
   }
 
@@ -534,7 +545,7 @@ export async function runLoop(
           options.signal,
         );
         if (claimed === null) continue;
-        await executeClaim(client, config, claimed, options.signal);
+        await runClaim(client, config, claimed, options.signal);
         handled += 1;
       } catch {
         if (isAborted()) break;

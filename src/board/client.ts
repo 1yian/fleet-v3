@@ -38,7 +38,11 @@ export interface BoardClient {
   readonly listCards: (query?: ListCardsQuery, signal?: AbortSignal) => Promise<CardPage>;
   readonly createCard: (input: CreateCardInput) => Promise<Card>;
   readonly getThread: (id: string, scope?: string) => Promise<CardThread>;
-  readonly postEntry: (id: string, input: PostEntryInput) => Promise<PostedEntry>;
+  readonly postEntry: (
+    id: string,
+    input: PostEntryInput,
+    signal?: AbortSignal,
+  ) => Promise<PostedEntry>;
   readonly queueCard: (id: string, input: QueueCardInput) => Promise<Card>;
   readonly escalateCard: (id: string, input: EscalateCardInput) => Promise<Card>;
   readonly handoffCard: (id: string, input: HandoffCardInput) => Promise<Card>;
@@ -54,8 +58,16 @@ export interface BoardClient {
     id: string,
     input: ClaimFenceInput & { readonly leaseSeconds: number },
   ) => Promise<{ readonly leaseUntil: number }>;
-  readonly releaseClaim: (id: string, input: ClaimFenceInput) => Promise<Card>;
-  readonly finishClaim: (id: string, input: FinishClaimInput) => Promise<Card>;
+  readonly releaseClaim: (
+    id: string,
+    input: ClaimFenceInput,
+    signal?: AbortSignal,
+  ) => Promise<Card>;
+  readonly finishClaim: (
+    id: string,
+    input: FinishClaimInput,
+    signal?: AbortSignal,
+  ) => Promise<Card>;
   readonly advertiseHost: (input: AdvertiseHostInput) => Promise<HostInfo>;
   readonly listHosts: (signal?: AbortSignal) => Promise<HostInfo[]>;
   readonly getCharter: (mate: string, signal?: AbortSignal) => Promise<string>;
@@ -195,10 +207,11 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
       const qs = scope !== undefined ? `?scope=${encodeURIComponent(scope)}` : "";
       return requestJson(cleanBase, `/api/cards/${encodeURIComponent(id)}${qs}`, CardThreadSchema);
     },
-    postEntry: (id, input) =>
+    postEntry: (id, input, signal) =>
       requestJson(cleanBase, `/api/cards/${encodeURIComponent(id)}/entries`, PostedEntrySchema, {
         method: "POST",
         body: input,
+        ...requestOptions(signal),
       }),
     queueCard: async (id, input) => {
       const res = await requestJson(
@@ -276,21 +289,21 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
         method: "POST",
         body: input,
       }),
-    releaseClaim: async (id, input) => {
+    releaseClaim: async (id, input, signal) => {
       const res = await requestJson(
         cleanBase,
         `/api/cards/${encodeURIComponent(id)}/release`,
         CardWrapSchema,
-        { method: "POST", body: input },
+        { method: "POST", body: input, ...requestOptions(signal) },
       );
       return res.card;
     },
-    finishClaim: async (id, input) => {
+    finishClaim: async (id, input, signal) => {
       const res = await requestJson(
         cleanBase,
         `/api/cards/${encodeURIComponent(id)}/finish`,
         CardWrapSchema,
-        { method: "POST", body: input },
+        { method: "POST", body: input, ...requestOptions(signal) },
       );
       return res.card;
     },

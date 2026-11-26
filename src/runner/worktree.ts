@@ -107,33 +107,61 @@ function canonicalPath(path: string): string {
   return join(parent, basename(path));
 }
 
-async function isRegisteredCheckout(repoPath: string, worktreePath: string): Promise<boolean> {
+async function registeredCheckouts(repoPath: string): Promise<Map<string, string | undefined>> {
   const listing = await runGit(repoPath, ["worktree", "list", "--porcelain", "-z"]);
-  const wanted = canonicalPath(worktreePath);
-  return listing
-    .split("\0")
-    .some((field) => field.startsWith("worktree ") && canonicalPath(field.slice(9)) === wanted);
-}
-
-async function rollbackWorkspace(
-  repoPath: string,
-  tmpDir: string,
-  checkout: Checkout | undefined,
-): Promise<void> {
-  try {
-    if (checkout !== undefined) {
-      if (await isRegisteredCheckout(repoPath, checkout.worktreePath)) {
-        await removeCheckout(repoPath, checkout.worktreePath, false);
-      }
-      await runGit(repoPath, ["branch", "-D", checkout.branch]).catch(() => undefined);
-    }
-  } finally {
-    try {
-      rmSync(tmpDir, { recursive: true, force: true });
-    } finally {
-      checkout?.reservation.close();
+  const checkouts = new Map<string, string | undefined>();
+  for (const record of listing.split("\0\0")) {
+    const [worktree, ...fields] = record.split("\0");
+    if (worktree?.startsWith("worktree ") === true) {
+      const branch = fields.find((field) => field.startsWith("branch "));
+      checkouts.set(canonicalPath(worktree.slice(9)), branch?.slice(7));
     }
   }
+  return checkouts;
+}
+
+type CleanupStep = readonly [label: string | null, run: () => void | Promise<void>];
+
+async function collectFailures(steps: readonly CleanupStep[]): Promise<unknown[]> {
+  const failures: unknown[] = [];
+  for (const [label, step] of steps) {
+    try {
+      await step();
+    } catch (error) {
+      failures.push(
+        label === null ? error : new Error(`${label}: ${errorMessage(error)}`, { cause: error }),
+      );
+    }
+  }
+  return failures;
+}
+
+function primaryFailure(primary: unknown, secondary: readonly unknown[]): unknown {
+  if (secondary.length === 0) return primary;
+  const failures = [primary, ...secondary];
+  return new AggregateError(failures, failures.map((error) => errorMessage(error)).join("; "), {
+    cause: primary,
+  });
+}
+
+function workspaceCleanup(tmpDir: string, reservation?: DatabaseSync): readonly CleanupStep[] {
+  return [
+    [
+      `Could not remove scratch directory ${tmpDir}`,
+      () => {
+        rmSync(tmpDir, { recursive: true, force: true });
+      },
+    ],
+    ["Could not close checkout reservation", () => reservation?.close()],
+  ];
+}
+
+async function rollbackCheckout(repoPath: string, checkout: Checkout): Promise<void> {
+  const registered = await registeredCheckouts(repoPath);
+  if (registered.get(canonicalPath(checkout.worktreePath)) === `refs/heads/${checkout.branch}`) {
+    await removeCheckout(repoPath, checkout.worktreePath, false);
+  }
+  await runGit(repoPath, ["branch", "-D", checkout.branch]);
 }
 
 export function hasEnvrcInAncestry(startDir: string): boolean {
@@ -171,19 +199,33 @@ export async function prepareWorkspace(params: {
     const reservation = acquireReservation(join(lockRoot, `${branch}.lock`));
     if (reservation === undefined) return undefined;
     try {
-      if (isOccupied(worktreePath)) {
-        reservation.close();
-        return undefined;
+      const occupied = isOccupied(worktreePath);
+      const registered = occupied ? undefined : await registeredCheckouts(params.repo.path);
+      if (!occupied && registered?.has(canonicalPath(worktreePath)) !== true) {
+        try {
+          await runGit(params.repo.path, ["branch", "--no-track", branch, params.repo.baseBranch], {
+            LC_ALL: "C",
+          });
+          return { branch, worktreePath, reservation };
+        } catch (error) {
+          if (!isNameCollision(error, branch)) throw error;
+        }
       }
-      await runGit(params.repo.path, ["branch", "--no-track", branch, params.repo.baseBranch], {
-        LC_ALL: "C",
-      });
-      return { branch, worktreePath, reservation };
     } catch (error) {
-      reservation.close();
-      if (isNameCollision(error, branch)) return undefined;
-      throw error;
+      throw primaryFailure(
+        error,
+        await collectFailures([
+          [
+            "Could not close checkout reservation",
+            () => {
+              reservation.close();
+            },
+          ],
+        ]),
+      );
     }
+    reservation.close();
+    return undefined;
   };
 
   try {
@@ -206,25 +248,26 @@ export async function prepareWorkspace(params: {
       gitCommonDir,
     };
   } catch (error) {
-    try {
-      await rollbackWorkspace(params.repo.path, tmpDir, checkout);
-    } catch (cleanupError) {
-      throw new Error(`${errorMessage(error)}; cleanup failed: ${errorMessage(cleanupError)}`, {
-        cause: cleanupError,
-      });
-    }
-    throw error;
+    const cleanupErrors = await collectFailures([
+      [
+        "Could not roll back checkout",
+        async () => {
+          if (checkout !== undefined) await rollbackCheckout(params.repo.path, checkout);
+        },
+      ],
+      ...workspaceCleanup(tmpDir, checkout?.reservation),
+    ]);
+    throw primaryFailure(error, cleanupErrors);
   }
 }
 
 export async function cleanupWorkspace(workspace: TaskWorkspace): Promise<void> {
-  try {
-    await removeCheckout(workspace.repoPath, workspace.worktreePath, true);
-  } finally {
-    try {
-      rmSync(workspace.tmpDir, { recursive: true, force: true });
-    } finally {
-      workspace.reservation.close();
-    }
+  const failures = await collectFailures([
+    [null, () => removeCheckout(workspace.repoPath, workspace.worktreePath, true)],
+    ...workspaceCleanup(workspace.tmpDir, workspace.reservation),
+  ]);
+  if (failures.length > 0) {
+    const [primary, ...secondary] = failures;
+    throw primaryFailure(primary, secondary);
   }
 }
