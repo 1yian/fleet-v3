@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { realpathSync, statSync } from "node:fs";
 import {
   expandMountSpec,
   resolveContainerConfig,
@@ -87,7 +88,22 @@ function appendSshArgs(args: string[], mode: Exclude<SpawnMode, "local">): void 
   }
 }
 
-function buildContainerArgv(params: {
+const CONTAINER_BOOTSTRAP = "/run/fleet-bootstrap.sh";
+const BOOTSTRAP_SHELL = `
+trap 'printf "%s\\n" "Worker bootstrap failed." >&2; exit 1' EXIT
+bootstrap() { . "$1"; set +x; }
+bootstrap "$1" >/dev/null 2>&1
+trap - EXIT
+shift
+exec "$@"
+`;
+
+interface WorkerLaunch {
+  readonly argv: string[];
+  readonly env: Record<string, string>;
+}
+
+function buildContainerLaunch(params: {
   readonly mode: Exclude<SpawnMode, "local">;
   readonly config: RunnerConfig;
   readonly worktreePath: string;
@@ -98,7 +114,8 @@ function buildContainerArgv(params: {
   readonly tty?: boolean;
   readonly containerName?: string;
   readonly command: readonly string[];
-}): string[] {
+  readonly bootstrap: string | undefined;
+}): WorkerLaunch {
   const container = resolveContainerConfig(params.config.spawn);
   if (container === undefined) {
     throw new Error(`spawn.container is required when spawn.mode is ${params.mode}`);
@@ -121,6 +138,9 @@ function buildContainerArgv(params: {
   if (params.gitCommonDir !== undefined) {
     args.push("-v", `${params.gitCommonDir}:${params.gitCommonDir}`);
   }
+  if (params.bootstrap !== undefined) {
+    args.push("-v", `${params.bootstrap}:${CONTAINER_BOOTSTRAP}:ro`);
+  }
   if (container.runtime !== undefined) args.push("--runtime", container.runtime);
   if (container.cpus !== undefined) args.push("--cpus", String(container.cpus));
   if (container.memory !== undefined) args.push("--memory", container.memory);
@@ -129,19 +149,26 @@ function buildContainerArgv(params: {
   for (const mount of container.mounts) {
     args.push("-v", expandMountSpec(mount));
   }
+  const env = { ...params.env };
   for (const envName of container.inheritEnv) {
     if (params.env[envName] !== undefined) continue;
     const hostValue = process.env[envName];
-    if (hostValue !== undefined) args.push("-e", `${envName}=${hostValue}`);
+    if (hostValue === undefined) continue;
+    if (params.mode === "docker") {
+      env[envName] = hostValue;
+      args.push("-e", envName);
+    } else {
+      args.push("-e", `${envName}=${hostValue}`);
+    }
   }
   for (const [key, value] of Object.entries(params.env)) {
     args.push("-e", `${key}=${value}`);
   }
   args.push(...container.extraArgs, container.image, ...params.command);
-  return args;
+  return { argv: args, env };
 }
 
-export function buildWorkerArgv(params: {
+export function buildWorkerLaunch(params: {
   readonly config: RunnerConfig;
   readonly taskId: string;
   readonly worktreePath: string;
@@ -151,7 +178,12 @@ export function buildWorkerArgv(params: {
   readonly env: Record<string, string>;
   readonly tty?: boolean;
   readonly containerName?: string;
-}): string[] {
+  readonly bootstrap: string | undefined;
+}): WorkerLaunch {
+  const bootstrap = params.bootstrap === undefined ? undefined : realpathSync(params.bootstrap);
+  if (bootstrap !== undefined && !statSync(bootstrap).isFile()) {
+    throw new Error(`Worker bootstrap must be a file: ${bootstrap}`);
+  }
   const interpolated = params.config.spawn.command.map((part) =>
     part
       .replaceAll("{card}", params.taskId)
@@ -160,15 +192,27 @@ export function buildWorkerArgv(params: {
   );
 
   const mode = params.config.spawn.mode;
+  const command =
+    bootstrap === undefined
+      ? interpolated
+      : [
+          "sh",
+          "-ec",
+          BOOTSTRAP_SHELL,
+          "fleet-bootstrap",
+          mode === "local" ? bootstrap : CONTAINER_BOOTSTRAP,
+          ...interpolated,
+        ];
   if (mode === "docker" || mode === "container") {
-    return buildContainerArgv({
+    return buildContainerLaunch({
       mode,
       config: params.config,
       worktreePath: params.worktreePath,
       tmpDir: params.tmpDir,
       promptPath: params.promptPath,
       env: params.env,
-      command: interpolated,
+      command,
+      bootstrap,
       ...(params.gitCommonDir !== undefined ? { gitCommonDir: params.gitCommonDir } : {}),
       ...(params.tty !== undefined ? { tty: params.tty } : {}),
       ...(params.containerName !== undefined ? { containerName: params.containerName } : {}),
@@ -177,9 +221,12 @@ export function buildWorkerArgv(params: {
 
   if (params.config.spawn.direnv && hasEnvrcInAncestry(params.worktreePath)) {
     const assignments = Object.entries(params.env).map(([key, value]) => `${key}=${value}`);
-    return ["direnv", "exec", params.worktreePath, "env", ...assignments, ...interpolated];
+    return {
+      argv: ["direnv", "exec", params.worktreePath, "env", ...assignments, ...command],
+      env: params.env,
+    };
   }
-  return interpolated;
+  return { argv: command, env: params.env };
 }
 
 export function runIsolatedCommand(options: RunCommandOptions): Promise<SpawnResult> {

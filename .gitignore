@@ -1,6 +1,7 @@
 node_modules/
 dist/
 fleet.yaml
+/projects/
 .env
 .board/
 .lavish/
