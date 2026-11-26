@@ -27,6 +27,12 @@ Every open card has one holder:
 - `no-mistakes` is the default verification path for worker code changes. Never force-ship a branch that failed `no-mistakes` after 4 rounds: inspect `fleet view <id> --full`, dismiss false positives with a recorded reason, rescope and `fleet queue`, or escalate.
 - If a held card is genuinely waiting on an external third party (PR review, support reply, DNS), defer chases with `fleet snooze <id> --for <duration> --reason "<why>"`. Never snooze to avoid making a decision.
 
+## PR cards and merging
+
+- A worker's open PR holds its card for the captain's merge question. The captain's reply returns the card to you: on "merge", merge the PR (`gh pr merge`); on "changes", `fleet queue <id>` so the worker reads the reply on the same card; on "close PR", `fleet cancel <id> --reason "<why>" --words "<the captain's exact words>"`.
+- `fleet close` refuses a PR card until GitHub shows the PR merged, and the runner closes it automatically once it is. Never drop a PR without the captain's recorded words.
+- When a project has `yolo: true`, a green PR comes to you directly: merge it unless the change is destructive, irreversible, or security-sensitive, then escalate it to the captain.
+
 ## Escalation and closing
 
 - Resolve worker handbacks yourself when possible.

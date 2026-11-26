@@ -283,6 +283,7 @@ setInterval(() => {}, 1000);`;
     maxAttempts: 3,
     maxReviewRounds: 4,
     pollWaitSeconds: 1,
+    prPollSeconds: 60,
     spawn: {
       mode: "local",
       viewport: "herdr",

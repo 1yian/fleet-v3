@@ -19,6 +19,7 @@ import {
   parseDurationMs,
 } from "../board/types.ts";
 import { loadConfig } from "../config.ts";
+import { cancelCardWithPullRequest, closeCardVerified } from "../runner/github.ts";
 import { runLoop } from "../runner/loop.ts";
 import { boolFlag, parseStrictFlags, stringFlag } from "./parse.ts";
 
@@ -125,15 +126,18 @@ Usage:
 Flags:
   --text <message>   Required answer text`,
   close: `fleet close - mark a card done and unblock waiting dependents (captain and mates only; workers exit cleanly or hand off)
+A card with a PR closes Done only after GitHub shows the PR merged.
 Usage:
   fleet close <id> [--result "<summary>"]
 Flags:
   --result <text>    Optional completion summary`,
   cancel: `fleet cancel - cancel an open or obsolete card
+A card with a PR needs the captain's words; the PR is closed on GitHub and the card ends as not landed.
 Usage:
-  fleet cancel <id> --reason "<why>"
+  fleet cancel <id> --reason "<why>" [--words "<captain's words>"]
 Flags:
-  --reason <text>    Required cancellation reason`,
+  --reason <text>    Required cancellation reason
+  --words <text>     The captain's own words approving the drop (required when the card has a PR)`,
   hosts: `fleet hosts - list runner hosts advertised on the Card Server
 Usage:
   fleet hosts`,
@@ -406,6 +410,7 @@ export async function viewCommand(
       ...(card.snoozeUntil !== null
         ? { snoozeUntil: new Date(card.snoozeUntil).toISOString() }
         : {}),
+      ...(card.pr !== null ? { pr: card.pr } : {}),
       ...(card.result.length > 0 ? { result: card.result } : {}),
     },
     entries: formattedEntries.length > 0 ? formattedEntries : "0 entries",
@@ -736,7 +741,7 @@ export async function closeCommand(
     throw new AxiError("card <id> is required for `close`", "VALIDATION_ERROR", [helpBlock]);
   }
   const result = stringFlag(parsed.values, "result");
-  const card = await active.board().closeCard(id, {
+  const card = await closeCardVerified(active.board(), id, {
     ...active.fence,
     ...(result !== undefined ? { result } : {}),
     actor: active.actor,
@@ -753,7 +758,7 @@ export async function cancelCommand(
   const parsed = parseStrictFlags(
     "cancel",
     args,
-    { reason: { type: "string", required: true } },
+    { reason: { type: "string", required: true }, words: { type: "string" } },
     helpBlock,
   );
   const [id] = parsed.positionals;
@@ -761,9 +766,11 @@ export async function cancelCommand(
     throw new AxiError("card <id> is required for `cancel`", "VALIDATION_ERROR", [helpBlock]);
   }
   const reason = stringFlag(parsed.values, "reason") ?? "";
-  const card = await active.board().cancelCard(id, {
+  const words = stringFlag(parsed.values, "words");
+  const card = await cancelCardWithPullRequest(active.board(), id, {
     ...active.fence,
     reason,
+    ...(words !== undefined ? { words } : {}),
     actor: active.actor,
   });
   return { card: { id: card.id, state: card.state, reason: card.result } };
