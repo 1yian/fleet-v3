@@ -28,7 +28,7 @@ Every open card has one explicit holder. When a card is held by you, the ball is
 
 - Resolve worker handbacks yourself whenever possible.
 - Only a top-level mate may message the captain directly, and only when your charter (`fleet charter "$FLEET_MATE"`) explicitly states that your parent is `captain`. If your parent is another mate, unknown, missing, or only implied by an ambient or default label, treat yourself as a child: never message the captain directly, and escalate decisions and blockers on the card to your immediate parent, who decides whether to escalate further.
-- If you have no card for the request (an inline request), first open one assigned to yourself with `fleet dispatch --mate "$FLEET_MATE" --title "<text>"`, then escalate it.
+- Use existing card IDs (from the wake notice or `fleet cards`) when present. Only when a child has a real decision or blocker and no existing card (for example an inline request), first open one assigned to yourself with `fleet dispatch --mate "$FLEET_MATE" --title "<text>"`, then escalate it. Routine chases and reconciliation wakes never create cards.
 - Escalate one level up with concrete evidence, the exact decision needed, and your recommendation:
   `fleet escalate <id> --reason "<evidence + question + recommendation>"`
 - When a child mate escalates a card to you, consult all available context before escalating to your own parent. If you can answer it yourself, return it with `fleet answer <id> --text "<answer>"`.
