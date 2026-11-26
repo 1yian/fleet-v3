@@ -12,6 +12,7 @@ import {
   parseDurationMs,
 } from "../board/types.ts";
 import { createLineWriter } from "../board/wake.ts";
+import { cancelCardWithPullRequest, closeCardVerified } from "../runner/github.ts";
 import { VERSION } from "../version.ts";
 
 const PROTOCOL_VERSION = "2025-06-18";
@@ -253,23 +254,28 @@ const FLEET_MCP_TOOLS: readonly McpToolSpec[] = [
       .object({ id: cardId, text: z.string().optional().describe("Optional final outcome note") })
       .strict(),
     async (args, ctx) => {
-      const card = await ctx.client.closeCard(args.id, {
+      const card = await closeCardVerified(ctx.client, args.id, {
         actor: ctx.mate,
-        ...(args.text !== undefined ? { text: args.text } : {}),
+        ...(args.text !== undefined ? { result: args.text } : {}),
       });
       return { card };
     },
   ),
   defineTool(
     "fleet_cancel",
-    "Cancel an open or obsolete card with a reason.",
+    "Cancel an open or obsolete card with a reason. A card with a PR also needs the captain's words, and its PR is closed on GitHub.",
     z
-      .object({ id: cardId, reason: z.string().min(1).describe("Reason for cancellation") })
+      .object({
+        id: cardId,
+        reason: z.string().min(1).describe("Reason for cancellation"),
+        words: z.string().optional().describe("The captain's own words approving the PR drop"),
+      })
       .strict(),
     async (args, ctx) => {
-      const card = await ctx.client.cancelCard(args.id, {
+      const card = await cancelCardWithPullRequest(ctx.client, args.id, {
         actor: ctx.mate,
         reason: args.reason,
+        ...(args.words !== undefined ? { words: args.words } : {}),
       });
       return { card };
     },

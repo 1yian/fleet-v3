@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, relative } from "node:path";
+import { basename, delimiter, join, relative } from "node:path";
 import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -78,6 +78,14 @@ const HerdrWorkspaceListSchema = z.object({
 
 const tempDirs: string[] = [];
 
+const FAKE_GH_DIR = mkdtempSync(join(tmpdir(), "fleet-v3-fake-gh-"));
+writeFileSync(
+  join(FAKE_GH_DIR, "gh"),
+  `#!/usr/bin/env node\nconst sub = process.argv[3];\nprocess.stdout.write(sub === "list" ? "[]" : "{}");\n`,
+);
+chmodSync(join(FAKE_GH_DIR, "gh"), 0o755);
+process.env["PATH"] = `${FAKE_GH_DIR}${delimiter}${process.env["PATH"] ?? ""}`;
+
 function makeTempDir(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   tempDirs.push(dir);
@@ -138,6 +146,7 @@ function makeConfig(
     maxAttempts: 3,
     maxReviewRounds: 4,
     pollWaitSeconds: 1,
+    prPollSeconds: 60,
     spawn: {
       mode: "local",
       viewport: "headless",
@@ -152,6 +161,7 @@ function makeConfig(
       demo: {
         remote: repoDir,
         delivery: "direct-pr",
+        yolo: false,
       },
     },
     ...overrides,
@@ -748,7 +758,12 @@ export FLEET_E2E_BOOTSTRAPPED
 
       const config = makeConfig(root, repoDir, {
         repos: {
-          demo: { remote: repoDir, bootstrap: relative(root, bootstrap), delivery: "direct-pr" },
+          demo: {
+            remote: repoDir,
+            bootstrap: relative(root, bootstrap),
+            delivery: "direct-pr",
+            yolo: false,
+          },
         },
         idleTimeoutSeconds: 30,
         maxWallSeconds: 60,
@@ -1193,6 +1208,7 @@ void test("a failed worktree setup leaves no scratch directory or branch behind"
           remote: repoDir,
           baseBranch: "no-such-branch",
           delivery: "direct-pr",
+          yolo: false,
         },
       },
     });
@@ -1355,6 +1371,7 @@ void test("a branch left from an earlier board is never overwritten or deleted b
           remote: repoDir,
           baseBranch: "no-such-branch",
           delivery: "direct-pr",
+          yolo: false,
         },
       },
     });
