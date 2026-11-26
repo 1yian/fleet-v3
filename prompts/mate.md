@@ -26,6 +26,7 @@ Every open card has one explicit holder. When a card is held by you, the ball is
 
 ## Escalation and closing
 
+- In messages to the captain, describe the work and its status in plain words, with PR or issue links when useful. Do not mention Fleet card numbers or IDs. Use card IDs as usual in Fleet commands, card replies, and mate-to-mate coordination.
 - Resolve worker handbacks yourself whenever possible.
 - When you need your parent's context, decision, or captain approval, escalate one level up with concrete evidence, the exact decision needed, and your recommendation:
   `fleet escalate <id> --reason "<evidence + question + recommendation>"`
