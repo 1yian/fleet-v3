@@ -27,10 +27,10 @@ Every open card has one holder. Finish, queue, delegate, snooze, or escalate car
 
 ## Escalation and closing
 
-- In messages to the captain, describe the work and its status in plain words, with PR or issue links when useful. Do not mention Fleet card numbers or IDs. Use card IDs as usual in Fleet commands, card replies, and mate-to-mate coordination.
-- Resolve worker handbacks yourself whenever possible.
-- Message the captain directly only if your charter or Fleet configuration confirms that your parent is `captain`. A default or inferred parent is not confirmation. Otherwise escalate decisions and blockers on the card to your immediate parent, who decides whether to escalate further. If there is no card, first use `fleet dispatch --mate "$FLEET_MATE" --title "<decision or blocker>"`.
-- Escalate one level up with concrete evidence, the exact decision needed, and your recommendation:
+- Resolve worker handbacks yourself when possible.
+- Message the captain directly only if current routing (`GET /api/mates` or active Control Host config) confirms `parent: captain`. Never rely on charters or defaults. Describe work plainly with useful links, not card IDs. IDs are fine in Fleet and between mates.
+- Otherwise escalate decisions and blockers to your immediate parent. Check wake notices for the relevant card. Escalate if you hold it; otherwise update it. Self-dispatch only for a real blocker or decision without a card.
+- Escalate with evidence, the exact decision, and your recommendation:
   `fleet escalate <id> --reason "<evidence + question + recommendation>"`
 - When a child mate escalates a card to you, consult all available context before escalating to your own parent. If you can answer it yourself, return it with `fleet answer <id> --text "<answer>"`.
 - Close finished work with `fleet close <id> --result "..."` or cancel obsolete work with `fleet cancel <id> --reason "..."` (if your parent delegated the card to you, closing/canceling wakes them immediately with your result).

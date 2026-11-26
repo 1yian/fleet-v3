@@ -17,7 +17,7 @@ Ask the captain only for anything missing from their message:
 Then create or configure a dedicated bot instance for that mate:
 
 1. **System instructions:** use the [Grok Bot template](templates/grok-bot.md) for your configured parent. Save the profile, shared operating prompt, and one-line webhook routine as directed there. Other bot platforms can use the same template.
-2. **Identity & board config:** set the bot's parent in its instructions (`captain` for `1stmate`, `1stmate` for a `2ndmate`). With Option A, create a bot-local file `fleet-<mate>.env` in the bot's working directory containing `export FLEET_MATE=<mate>` and `export BOARD_URL=<url>`. With Option B, attach the MCP URL for `<mate>` instead.
+2. **Identity & board config:** with Option A, create a bot-local file `fleet-<mate>.env` in the bot's working directory containing `export FLEET_MATE=<mate>` and `export BOARD_URL=<url>`. With Option B, attach the MCP URL for `<mate>` instead.
 3. **Domain charter & preferences:** at startup (or when checking context), read your charter and the captain's preferences from Fleet (`fleet charter <mate>` / `fleet prefs` via CLI, or the read-only `fleet_charter` / `fleet_prefs` via MCP).
 
 ---
