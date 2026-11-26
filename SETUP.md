@@ -7,7 +7,7 @@ This playbook is designed to be executed directly by an agent (Pi/`ypi`, Claude 
 - **Ask ONE question at a time.** Never dump a multi-question survey or an upfront architecture lecture.
 - **Explain a concept only when it is relevant to the current question** (1-2 plain sentences max).
 - **Ask permission before installing dependencies** on any machine.
-- **Never install Fleet hooks globally** into `~/.pi/agent/extensions/` or `~/.claude/`, and never commit mate hooks into the `fleet-v3` repo. All mutable state (`fleet.yaml`, `board/`, `1stmate/`, `mates/`, `optchat/`, `workspaces/`, `logs/`) lives under **`~/.fleet`**.
+- **Never install Fleet hooks globally** into `~/.pi/agent/extensions/` or `~/.claude/`, and never commit mate hooks into the `fleet-v3` repo. All mutable state (`fleet.yaml`, `board/`, `1stmate/`, `mates/`, `optchat/`, `workspaces/`, `logs/`) lives under **`~/.fleet`**, except project clones, worktrees, and setup scripts, which live under `~/.fleet-v3/projects`.
 - **Never download, install, or search for desktop installers for Grok Bot, Dots, or Muse.** Those are external bot platforms the captain already uses; hand them the [`EXTERNAL_BOT.md`](https://github.com/1yian/fleet-v3/blob/main/EXTERNAL_BOT.md) link so the bot configures itself (or if **you** are that bot running with shell access on the host, execute both `SETUP.md` and `EXTERNAL_BOT.md` directly without making the captain copy-paste).
 
 ---
