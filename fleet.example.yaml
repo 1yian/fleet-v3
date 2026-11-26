@@ -66,6 +66,9 @@ mates:
       parent: 1stmate
       cwd: ~/Projects/example-app
       autoStart: true
+    - name: support-bot
+      parent: 1stmate
+      mode: external
 
 repos:
   example-app:
