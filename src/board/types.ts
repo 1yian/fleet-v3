@@ -82,7 +82,7 @@ export const CardSchema = z.object({
 });
 export type Card = z.infer<typeof CardSchema>;
 
-export const EntrySchema = z.object({
+const EntrySchema = z.object({
   id: z.string(),
   cardId: z.string(),
   by: z.string(),
@@ -92,6 +92,9 @@ export const EntrySchema = z.object({
   createdAt: z.number().int(),
 });
 export type Entry = z.infer<typeof EntrySchema>;
+
+export const PostedEntrySchema = z.object({ entry: EntrySchema, holder: z.string() });
+export type PostedEntry = z.infer<typeof PostedEntrySchema>;
 
 export const CardThreadSchema = z.object({
   card: CardSchema,

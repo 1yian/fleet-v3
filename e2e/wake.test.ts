@@ -181,10 +181,19 @@ void test("fleet watch streams filtered NDJSON wakes and rejects invalid flags",
       assert.equal(strField(created, "actor"), "1stmate");
       assert.match(strField(created, "notice"), /Watch NDJSON card/u);
 
-      await server.client.postEntry(card.id, {
-        by: "cleo",
-        text: "Self note should not wake cleo",
-      });
+      const selfReply = await runBinOnce(
+        ["reply", card.id, "--text", "Self note should not wake cleo"],
+        { BOARD_URL: server.url, FLEET_MATE: "cleo" },
+        ["FLEET_CLAIM_EPOCH", "FLEET_CLAIM_TOKEN"],
+      );
+      assert.equal(selfReply.exitCode, 0, selfReply.output);
+      assert.match(selfReply.stdout, /nobody was woken/u);
+      assert.match(selfReply.stdout, /fleet answer or fleet handoff/u);
+      const posted = await server.client.getThread(card.id);
+      assert.deepEqual(
+        posted.entries.map((entry) => entry.text),
+        ["Self note should not wake cleo"],
+      );
       await server.client.postEntry(card.id, {
         by: "1stmate",
         text: "Internal note should not wake cleo",
@@ -206,6 +215,27 @@ void test("fleet watch streams filtered NDJSON wakes and rejects invalid flags",
         received.some((item) => strField(item, "notice").includes("Internal note")),
         false,
       );
+
+      const canceled = await server.client.createCard({ mate: "cleo", title: "Canceled card" });
+      await server.client.closeCard(card.id, { actor: "cleo" });
+      await server.client.cancelCard(canceled.id, { actor: "cleo", reason: "Obsolete" });
+      for (const terminal of [card, canceled]) {
+        const before = await server.client.getThread(terminal.id);
+        await assert.rejects(
+          server.client.postEntry(terminal.id, { by: "1stmate", text: "Too late" }),
+          { status: 409, code: "card_terminal" },
+        );
+        await server.client.postEntry(terminal.id, {
+          by: "1stmate",
+          text: "Quiet follow-up",
+          internal: true,
+        });
+        const after = await server.client.getThread(terminal.id);
+        assert.deepEqual(
+          after.entries.map((entry) => entry.text),
+          [...before.entries.map((entry) => entry.text), "Quiet follow-up"],
+        );
+      }
     } finally {
       rl.close();
       child.kill("SIGTERM");

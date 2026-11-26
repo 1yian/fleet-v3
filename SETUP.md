@@ -90,7 +90,7 @@ Wait for the user's answer, then follow the matching branch:
    ```bash
    fleet watch --mate 1stmate --webhook https://bot.example.com/wake --header "Authorization: Bearer <token>"
    ```
-   _(Or bare `fleet watch --mate 1stmate` if the bot consumes NDJSON lines on stdout.)_ Use the [one-line wake prompt in the external bot guide](EXTERNAL_BOT.md#3-wire-incoming-wakes-fleet-watch) for both first and domain mates.
+   _(Or bare `fleet watch --mate 1stmate` if the bot consumes NDJSON lines on stdout.)_ Use the matching [one-line wake prompt](templates/grok-bot.md) for each mate.
 6. Smoke-test `1stmate`:
    ```bash
    fleet dispatch --mate 1stmate --title "Smoke test: reply ok and close this card"
@@ -209,6 +209,8 @@ Now ask ONE question:
        > Read `https://github.com/1yian/fleet-v3/blob/main/EXTERNAL_BOT.md` and create a new separate bot for my `<name>` secondmate (`mate: <name>`, `parent: 1stmate`, domain: `<domain>`). Prefer the `fleet` CLI if you have shell access (Option A, `BOARD_URL: <board-url>`), otherwise connect via MCP only (Option B, `http://<reachable-ip>:4102/mcp?mate=<name>`). Return its incoming webhook URL and auth header when ready.
      - Wire a dedicated `fleet watch --mate <name> --webhook <bot-webhook-url> [--header "..."]` service (with persistence from **Reference A**) once the bot returns its webhook URL.
   4. Finish with `fleet doctor` and a concise summary of running services and commands.
+
+If any mates are external, configure the [prompt update hook](EXTERNAL_BOT.md#5-publish-prompt-updates-from-the-control-host) once on the Control Host.
 
 ---
 

@@ -6,7 +6,7 @@ import {
   CardSchema,
   CardThreadSchema,
   ClaimReceiptSchema,
-  EntrySchema,
+  PostedEntrySchema,
   HostInfoSchema,
   OverviewSchema,
   type AdvertiseHostInput,
@@ -22,7 +22,7 @@ import {
   type ClaimReceipt,
   type CloseCardInput,
   type CreateCardInput,
-  type Entry,
+  type PostedEntry,
   type EscalateCardInput,
   type FinishClaimInput,
   type HandoffCardInput,
@@ -38,7 +38,7 @@ export interface BoardClient {
   readonly listCards: (query?: ListCardsQuery, signal?: AbortSignal) => Promise<CardPage>;
   readonly createCard: (input: CreateCardInput) => Promise<Card>;
   readonly getThread: (id: string, scope?: string) => Promise<CardThread>;
-  readonly postEntry: (id: string, input: PostEntryInput) => Promise<Entry>;
+  readonly postEntry: (id: string, input: PostEntryInput) => Promise<PostedEntry>;
   readonly queueCard: (id: string, input: QueueCardInput) => Promise<Card>;
   readonly escalateCard: (id: string, input: EscalateCardInput) => Promise<Card>;
   readonly handoffCard: (id: string, input: HandoffCardInput) => Promise<Card>;
@@ -78,7 +78,6 @@ const ErrorBodySchema = z.object({
 });
 const CardWrapSchema = z.object({ card: CardSchema });
 const HealthSchema = z.object({ latestEventId: z.number().int() });
-const EntryWrapSchema = z.object({ entry: EntrySchema });
 const ClaimWrapSchema = z.object({ claim: ClaimReceiptSchema.nullable() });
 const RenewWrapSchema = z.object({ leaseUntil: z.number().int() });
 const HostWrapSchema = z.object({ host: HostInfoSchema });
@@ -196,15 +195,11 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
       const qs = scope !== undefined ? `?scope=${encodeURIComponent(scope)}` : "";
       return requestJson(cleanBase, `/api/cards/${encodeURIComponent(id)}${qs}`, CardThreadSchema);
     },
-    postEntry: async (id, input) => {
-      const res = await requestJson(
-        cleanBase,
-        `/api/cards/${encodeURIComponent(id)}/entries`,
-        EntryWrapSchema,
-        { method: "POST", body: input },
-      );
-      return res.entry;
-    },
+    postEntry: (id, input) =>
+      requestJson(cleanBase, `/api/cards/${encodeURIComponent(id)}/entries`, PostedEntrySchema, {
+        method: "POST",
+        body: input,
+      }),
     queueCard: async (id, input) => {
       const res = await requestJson(
         cleanBase,

@@ -313,15 +313,14 @@ async function handlePostEntry(
   res: ServerResponse,
 ): Promise<void> {
   const body = EntryBodySchema.parse(await readJsonBody(req));
-  sendJson(res, 201, {
-    entry: store.postEntry(cardId, {
-      ...fenceOf(body),
-      text: body.text,
-      ...(body.by !== undefined ? { by: body.by } : {}),
-      ...(body.internal !== undefined ? { internal: body.internal } : {}),
-      ...(body.kind !== undefined ? { kind: body.kind } : {}),
-    }),
+  const posted = store.postEntry(cardId, {
+    ...fenceOf(body),
+    text: body.text,
+    ...(body.by !== undefined ? { by: body.by } : {}),
+    ...(body.internal !== undefined ? { internal: body.internal } : {}),
+    ...(body.kind !== undefined ? { kind: body.kind } : {}),
   });
+  sendJson(res, 201, posted);
 }
 
 async function handleQueueCard(

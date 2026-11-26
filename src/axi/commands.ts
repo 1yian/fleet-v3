@@ -99,12 +99,13 @@ Flags:
   --reason <text>    Optional reason (e.g. waiting on external PR review)
 Examples:
   fleet snooze 42 --for 2h --reason "Waiting for Stripe support reply"`,
-  reply: `fleet reply - post an entry on a card thread
+  reply: `fleet reply - post an entry without transferring the card
 Usage:
   fleet reply <id> --text "<message>" [--internal]
 Flags:
   --text <message>   Required reply text
-  --internal         Mark entry internal (quiet coordination note)`,
+  --internal         Mark entry internal (quiet coordination note)
+A public reply wakes only the current holder, not yourself. Use fleet answer or fleet handoff to pass work back.`,
   escalate: `fleet escalate - hand a card up to the parent mate (or captain)
 Usage:
   fleet escalate <id> --reason "<evidence, question, and recommendation>" 
@@ -550,13 +551,22 @@ export async function replyCommand(
   }
   const text = stringFlag(parsed.values, "text") ?? "";
   const internal = boolFlag(parsed.values, "internal");
-  const entry = await active.board().postEntry(id, {
+  const { entry, holder } = await active.board().postEntry(id, {
     ...active.fence,
     text,
     by: active.actor,
     internal,
   });
-  return { reply: { id: entry.id, cardId: entry.cardId, internal: entry.internal } };
+  const isHolder = holder === entry.by || (holder === "worker" && active.fence.epoch !== undefined);
+  return {
+    reply: { id: entry.id, cardId: entry.cardId, internal: entry.internal },
+    ...(!entry.internal && isHolder
+      ? {
+          warning:
+            "Reply saved, but nobody was woken because you hold this card. Use fleet answer or fleet handoff to pass work back.",
+        }
+      : {}),
+  };
 }
 
 export async function escalateCommand(
