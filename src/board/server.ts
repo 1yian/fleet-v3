@@ -69,8 +69,10 @@ const FenceBodySchema = z.object({
 const FinishBodySchema = z.object({
   epoch: z.number().int().positive(),
   token: z.string().min(1),
-  outcome: z.enum(["done", "needs_mate"]),
+  outcome: z.enum(["done", "needs_mate", "awaiting_merge"]),
   summary: z.string(),
+  pr: z.url().optional(),
+  yolo: z.boolean().optional(),
   actor: z.string().min(1).optional(),
 });
 
@@ -104,12 +106,14 @@ const AnswerBodySchema = z.object({
 const CloseBodySchema = z.object({
   ...FenceFields,
   result: z.string().optional(),
+  merged: z.boolean().optional(),
   actor: z.string().min(1).optional(),
 });
 
 const CancelBodySchema = z.object({
   ...FenceFields,
   reason: z.string().min(1),
+  words: z.string().optional(),
   actor: z.string().min(1).optional(),
 });
 
@@ -461,6 +465,7 @@ async function routeCardTerminalOrFenceAction(
       card: store.closeCard(cardId, {
         ...fenceOf(body),
         ...(body.result !== undefined ? { result: body.result } : {}),
+        ...(body.merged !== undefined ? { merged: body.merged } : {}),
         ...(body.actor !== undefined ? { actor: body.actor } : {}),
       }),
     });
@@ -472,6 +477,7 @@ async function routeCardTerminalOrFenceAction(
       card: store.cancelCard(cardId, {
         ...fenceOf(body),
         reason: body.reason,
+        ...(body.words !== undefined ? { words: body.words } : {}),
         ...(body.actor !== undefined ? { actor: body.actor } : {}),
       }),
     });
@@ -495,6 +501,8 @@ async function routeCardTerminalOrFenceAction(
         token: body.token,
         outcome: body.outcome,
         summary: body.summary,
+        ...(body.pr !== undefined ? { pr: body.pr } : {}),
+        ...(body.yolo !== undefined ? { yolo: body.yolo } : {}),
         ...(body.actor !== undefined ? { actor: body.actor } : {}),
       }),
     });
