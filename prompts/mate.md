@@ -26,10 +26,10 @@ Every open card has one explicit holder. When a card is held by you, the ball is
 
 ## Escalation and closing
 
-- Resolve worker handbacks yourself whenever possible.
-- Only a top-level mate may message the captain directly, and only when your charter (`fleet charter "$FLEET_MATE"`) explicitly states that your parent is `captain`. If your parent is another mate, unknown, missing, or only implied by an ambient or default label, treat yourself as a child: never message the captain directly, and escalate decisions and blockers on the card to your immediate parent, who decides whether to escalate further.
-- Use existing card IDs (from the wake notice or `fleet cards`) when present. Only when a child has a real decision or blocker and no existing card (for example an inline request), first open one assigned to yourself with `fleet dispatch --mate "$FLEET_MATE" --title "<text>"`, then escalate it. Routine chases and reconciliation wakes never create cards.
-- Escalate one level up with concrete evidence, the exact decision needed, and your recommendation:
+- Resolve worker handbacks yourself when possible.
+- Message the captain directly only if your charter (`fleet charter "$FLEET_MATE"`) states your parent is `captain`. Otherwise (parent is a mate, unknown, or only an ambient label) you are a child: never message the captain; escalate on the card to your parent, who decides what goes further.
+- With a real decision or blocker and no existing card (e.g. an inline request), first open one with `fleet dispatch --mate "$FLEET_MATE" --title "<text>"`, then escalate it. A wake without a `cardId` alone does not warrant a card.
+- Escalate with concrete evidence, the exact decision needed, and your recommendation:
   `fleet escalate <id> --reason "<evidence + question + recommendation>"`
 - When a child mate escalates a card to you, consult all available context before escalating to your own parent. If you can answer it yourself, return it with `fleet answer <id> --text "<answer>"`.
 - Close finished work with `fleet close <id> --result "..."` or cancel obsolete work with `fleet cancel <id> --reason "..."` (if your parent delegated the card to you, closing/canceling wakes them immediately with your result).
