@@ -320,6 +320,7 @@ setInterval(() => {}, 1000);`;
         },
       ],
     },
+    projectsRoot: join(root, "projects"),
     repos: {},
   };
 

@@ -1,5 +1,13 @@
 import { execFile } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+} from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { RepoConfig } from "../config.ts";
@@ -11,6 +19,7 @@ export interface TaskWorkspace {
   readonly reservation: DatabaseSync;
   readonly repoPath: string;
   readonly gitCommonDir: string;
+  readonly bootstrap: string | undefined;
 }
 
 interface Checkout {
@@ -65,12 +74,18 @@ function runGit(
   cwd: string,
   args: readonly string[],
   env: Readonly<Record<string, string>> = {},
+  timeout?: number,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       "git",
       [...args],
-      { cwd, encoding: "utf8", env: { ...process.env, ...env } },
+      {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, ...env },
+        timeout,
+      },
       (error, stdout) => {
         if (error !== null) {
           reject(new Error(error.message, { cause: error }));
@@ -136,6 +151,83 @@ async function rollbackWorkspace(
   }
 }
 
+const cloneSyncs = new Map<string, Promise<string>>();
+
+async function gitNetwork(
+  cwd: string,
+  args: readonly string[],
+  operation: string,
+  repoPath: string,
+): Promise<void> {
+  try {
+    await runGit(cwd, args, { GIT_TERMINAL_PROMPT: "0" }, 120_000);
+  } catch (error) {
+    throw new Error(
+      `Could not ${operation} for ${repoPath}. Check the remote and runner Git access.`,
+      { cause: error },
+    );
+  }
+}
+
+async function syncClone(repoPath: string, repo: RepoConfig): Promise<string> {
+  if (!existsSync(repoPath)) {
+    const root = dirname(repoPath);
+    const staging = mkdtempSync(join(root, ".clone-"));
+    try {
+      await gitNetwork(
+        root,
+        ["clone", "--no-local", "--origin", "origin", "--", repo.remote, staging],
+        "clone origin",
+        repoPath,
+      );
+      renameSync(staging, repoPath);
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
+  }
+
+  const origin = await runGit(repoPath, ["config", "--local", "--get", "remote.origin.url"]);
+  if (origin !== repo.remote) {
+    throw new Error(`Origin at ${repoPath} does not match the configured remote.`);
+  }
+  await gitNetwork(repoPath, ["fetch", "--prune", "origin"], "fetch origin", repoPath);
+  let base = repo.baseBranch;
+  if (base === undefined) {
+    await gitNetwork(
+      repoPath,
+      ["remote", "set-head", "origin", "--auto"],
+      "resolve the default branch",
+      repoPath,
+    );
+    const ref = await runGit(repoPath, ["symbolic-ref", "refs/remotes/origin/HEAD"]);
+    base = ref.slice("refs/remotes/origin/".length);
+  }
+  const commit = await runGit(repoPath, [
+    "rev-parse",
+    "--verify",
+    `refs/remotes/origin/${base}^{commit}`,
+  ]);
+  if ((await runGit(repoPath, ["branch", "--show-current"])) !== base) {
+    await runGit(repoPath, ["switch", "--", base]);
+  }
+  await runGit(repoPath, ["merge-base", "--is-ancestor", "HEAD", commit]).catch(() => {
+    throw new Error(`Managed branch ${base} at ${repoPath} cannot fast-forward to origin/${base}.`);
+  });
+  await runGit(repoPath, ["merge", "--ff-only", commit]);
+  return commit;
+}
+
+async function syncProject(repoPath: string, repo: RepoConfig): Promise<string> {
+  const previous = cloneSyncs.get(repoPath) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(() => syncClone(repoPath, repo));
+  cloneSyncs.set(repoPath, current);
+  try {
+    return await current;
+  } finally {
+    if (cloneSyncs.get(repoPath) === current) cloneSyncs.delete(repoPath);
+  }
+}
+
 export function hasEnvrcInAncestry(startDir: string): boolean {
   let current = startDir;
   for (;;) {
@@ -147,16 +239,19 @@ export function hasEnvrcInAncestry(startDir: string): boolean {
 }
 
 export async function prepareWorkspace(params: {
-  readonly workspacesRoot: string;
-  readonly channel: string;
+  readonly projectsRoot: string;
   readonly project: string;
   readonly taskId: string;
   readonly epoch: number;
   readonly repo: RepoConfig;
 }): Promise<TaskWorkspace> {
-  const safeChannel = sanitizeSegment(params.channel);
-  const safeProject = sanitizeSegment(params.project);
-  const baseDir = join(params.workspacesRoot, safeChannel, safeProject);
+  const projectPath = join(params.projectsRoot, params.project);
+  mkdirSync(projectPath, { recursive: true });
+  const baseDir = realpathSync(projectPath);
+  const repoPath = join(baseDir, "repo");
+  const baseCommit = await syncProject(repoPath, params.repo);
+  const setupPath = join(baseDir, "setup.sh");
+  const bootstrap = params.repo.bootstrap ?? (existsSync(setupPath) ? setupPath : undefined);
   const scratchRoot = join(baseDir, "tmp");
   mkdirSync(scratchRoot, { recursive: true });
   const name = `c-${sanitizeSegment(params.taskId)}-a${String(params.epoch)}`;
@@ -175,7 +270,7 @@ export async function prepareWorkspace(params: {
         reservation.close();
         return undefined;
       }
-      await runGit(params.repo.path, ["branch", "--no-track", branch, params.repo.baseBranch], {
+      await runGit(repoPath, ["branch", "--no-track", branch, baseCommit], {
         LC_ALL: "C",
       });
       return { branch, worktreePath, reservation };
@@ -192,22 +287,23 @@ export async function prepareWorkspace(params: {
     checkout = (await reserveCheckout(name)) ?? (await reserveCheckout(basename(tmpDir)));
     if (checkout === undefined) throw new Error(`no free checkout name for ${name}`);
     const { branch, worktreePath } = checkout;
-    await runGit(params.repo.path, ["worktree", "add", worktreePath, branch]);
+    await runGit(repoPath, ["worktree", "add", worktreePath, branch]);
 
-    const rawCommonDir = await runGit(params.repo.path, ["rev-parse", "--git-common-dir"]);
-    const gitCommonDir = realpathSync(resolvePath(params.repo.path, rawCommonDir));
+    const rawCommonDir = await runGit(repoPath, ["rev-parse", "--git-common-dir"]);
+    const gitCommonDir = realpathSync(resolvePath(repoPath, rawCommonDir));
 
     return {
       worktreePath: realpathSync(worktreePath),
       tmpDir: realpathSync(tmpDir),
       branch,
       reservation: checkout.reservation,
-      repoPath: realpathSync(params.repo.path),
+      repoPath,
       gitCommonDir,
+      bootstrap,
     };
   } catch (error) {
     try {
-      await rollbackWorkspace(params.repo.path, tmpDir, checkout);
+      await rollbackWorkspace(repoPath, tmpDir, checkout);
     } catch (cleanupError) {
       throw new Error(`${errorMessage(error)}; cleanup failed: ${errorMessage(cleanupError)}`, {
         cause: cleanupError,

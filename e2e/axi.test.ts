@@ -388,7 +388,7 @@ function fleetYaml(root: string, name: string, extra: readonly string[]): string
     "  command: [echo]",
     "repos:",
     "  demo:",
-    "    path: /tmp/demo",
+    "    remote: /tmp/demo",
   ];
   writeFileSync(path, [...base, ...extra].join("\n"));
   return path;
@@ -553,6 +553,7 @@ void test("fleet.yaml resolves relative paths against its own directory regardle
       "host: maverick",
       "boardUrl: http://127.0.0.1:4100",
       "workspacesRoot: ./workspaces",
+      "projectsRoot: ./projects",
       "server:",
       "  dataDir: ./board",
       "spawn:",
@@ -566,7 +567,7 @@ void test("fleet.yaml resolves relative paths against its own directory regardle
       "      autoStart: false",
       "repos:",
       "  demo:",
-      "    path: ./repos/demo",
+      "    remote: ./origin/demo",
       "",
     ].join("\n"),
   );
@@ -576,10 +577,11 @@ void test("fleet.yaml resolves relative paths against its own directory regardle
   try {
     const loaded = loadConfig(cfgPath);
     assert.equal(loaded.workspacesRoot, join(root, "workspaces"));
+    assert.equal(loaded.projectsRoot, join(root, "projects"));
     assert.equal(loaded.server?.dataDir, join(root, "board"));
     assert.equal(loaded.mates?.stateDir, join(root, "mates"));
     assert.equal(loaded.mates?.items[0]?.cwd, join(root, "jarvis"));
-    assert.equal(loaded.repos["demo"]?.path, join(root, "repos", "demo"));
+    assert.equal(loaded.repos["demo"]?.remote, join(root, "origin", "demo"));
   } finally {
     process.chdir(prevCwd);
   }

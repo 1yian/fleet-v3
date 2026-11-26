@@ -2,6 +2,7 @@ host: macbook
 boardUrl: http://127.0.0.1:4100
 matesFilter: []
 workspacesRoot: ./workspaces
+projectsRoot: ~/.fleet-v3/projects
 concurrency: 4
 leaseSeconds: 900
 idleTimeoutSeconds: 1800
@@ -71,6 +72,5 @@ mates:
 
 repos:
   example-app:
-    path: ~/Projects/example-app
-    baseBranch: main
+    remote: git@github.com:example/example-app.git
     delivery: no-mistakes

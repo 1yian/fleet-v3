@@ -140,7 +140,7 @@ Wait for the user's answer, then:
 2. Confirm with the user:
    - Which repos to register under `repos:` (and default delivery: `no-mistakes`, `direct-pr`, or `local`), plus `herdr` panes (`viewport: herdr`, recommended on desktop) vs. `headless`.
    - Permission to install any missing dependencies on each execution host.
-3. Once approved, configure `~/.fleet/fleet.yaml` on each execution host (`host:`, `boardUrl:`, `workspacesRoot: ./workspaces`, `spawn:`, `repos:`):
+3. Once approved, configure `~/.fleet/fleet.yaml` on each execution host (`host:`, `boardUrl:`, `projectsRoot: ~/.fleet-v3/projects`, `spawn:`, `repos:`):
    - **`ypi` crewmate (`viewport: herdr`):**
      ```yaml
      spawn:
@@ -181,12 +181,38 @@ Wait for the user's answer, then:
      ```bash
      ssh -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -R 127.0.0.1:4100:127.0.0.1:4100 user@remote-host
      ```
-     Install `fleet` on the remote host (same clone + `bun install` + symlink), verify `curl -sf http://127.0.0.1:4100/api/health`, and write its `~/.fleet/fleet.yaml` with its unique `host:` name and local `repos:`.
+     Install `fleet` on the remote host (same clone + `bun install` + symlink), verify `curl -sf http://127.0.0.1:4100/api/health`, and write its `~/.fleet/fleet.yaml` with its unique `host:` name and project remotes under `repos:`.
 4. Start `fleet run` on each execution host (with `launchd` or `systemd` persistence from **Reference A**), verify `fleet hosts` lists every host, and smoke-test a real crewmate worktree run:
    ```bash
    FLEET_MATE=1stmate fleet dispatch --project <repo> --host <host> --delivery local --title "Smoke test: print git status and exit cleanly"
    ```
    Wait for the runner to claim and finish that exact card ID, and confirm completion with `fleet view <card-id> --full`.
+
+### Managed Git checkouts and private bootstrap
+
+Register each project by its upstream remote. To upgrade an existing host, wait for its running cards to finish before stopping the old runner. Replace `repos.<project>.path` with `remote`, using `git -C <old-path> remote get-url origin`. Remove `baseBranch` to follow the remote default, or keep it if the project intentionally starts from another branch. Restart the runner with the updated config. Fleet does not move or delete old worktrees, branches, or personal checkouts. Keep them until any unfinished work has been recovered. `workspacesRoot` only controls the default mate state directory.
+
+```yaml
+projectsRoot: ~/.fleet-v3/projects
+repos:
+  example-app:
+    remote: git@github.com:example/example-app.git
+    delivery: no-mistakes
+```
+
+Fleet stores a project's managed clone at `<projectsRoot>/<project>/repo`, attempts at `<project>/worktrees`, and attempt scratch and locks in sibling directories. It creates the clone on first use, fetches origin and fast-forwards the base before every worktree, and hands the card back if it cannot sync. Do not use the managed clone for personal changes. Configure non-interactive Git access on the runner host via a credential helper or SSH agent. Do not include credentials in remote URLs.
+
+Put the optional `setup.sh` next to `repo/`, in the project's private Fleet directory, not in the project repository. Provision it on each runner host and keep it idempotent. Set `repos.<project>.bootstrap` to override the location with an absolute path or a path relative to `fleet.yaml`. Fleet sources the script with `sh` in the new worktree before starting the worker command. In Docker and Apple `container` mode, Fleet mounts the script read-only and runs it in the same container as the worker, so installs and exports remain available. Use an image with `sh` and an entrypoint that runs Fleet's command.
+
+Supply credentials at runtime through private file mounts or environment injection. For containers, use `spawn.container.mounts` or `inheritEnv`. Do not put credentials in scripts, source control, images, or command arguments. The setup script checks that required inputs are present and returns nonzero if setup fails. For example, a private script can check an injected credential path and install the project's locked dependencies:
+
+```sh
+test -r "${PROJECT_CREDENTIAL_FILE:?inject the credential file path at launch}" || return 1
+command -v uv >/dev/null || return 1
+uv sync --locked || return 1
+```
+
+Fleet suppresses setup output and reports `Worker bootstrap failed.` without starting the worker. Debug the private script with the same runtime configuration if setup fails. Post-worker `no-mistakes` verification still runs on the host and needs its own tooling and credentials.
 
 ---
 
