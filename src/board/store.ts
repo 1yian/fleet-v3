@@ -36,6 +36,7 @@ import {
   type HostInfo,
   type ListCardsQuery,
   type OptionalFenceInput,
+  type PostedEntry,
   type PostEntryInput,
   type QueueCardInput,
   type SnoozeCardInput,
@@ -1089,7 +1090,7 @@ export class CardStore {
     });
   }
 
-  public postEntry(rawId: string, input: PostEntryInput): Entry {
+  public postEntry(rawId: string, input: PostEntryInput): PostedEntry {
     const id = parseCardId(rawId);
     const text = input.text.trim();
     if (text.length === 0) throw new BoardError(400, "empty_text", "Entry text is required");
@@ -1102,6 +1103,9 @@ export class CardStore {
       const by = input.by ?? "captain";
       this.assertScope(by, row, fenced);
       const internal = input.internal === true;
+      if (!internal && (row.state === "done" || row.state === "canceled")) {
+        throw new BoardError(409, "card_terminal", `Card #${String(id)} is ${row.state}`);
+      }
       if (!internal && row.snooze_until !== null) {
         this.db.prepare("UPDATE cards SET snooze_until = NULL WHERE id = ?").run(id);
       }
@@ -1129,7 +1133,7 @@ export class CardStore {
         },
         createdAt: now,
       });
-      return { result: entry, events: [event] };
+      return { result: { entry, holder: row.holder }, events: [event] };
     });
   }
 

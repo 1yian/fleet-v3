@@ -164,7 +164,7 @@ const FLEET_MCP_TOOLS: readonly McpToolSpec[] = [
   ),
   defineTool(
     "fleet_reply",
-    "Post a reply entry on a card thread (visible by default; set internal for a quiet note that does not wake the holder).",
+    "Post a reply without transferring the card. A public reply wakes only the current holder, not yourself. Use fleet_answer or fleet_handoff to pass work back.",
     z
       .object({
         id: cardId,
@@ -173,7 +173,7 @@ const FLEET_MCP_TOOLS: readonly McpToolSpec[] = [
       })
       .strict(),
     async (args, ctx) => {
-      const entry = await ctx.client.postEntry(args.id, {
+      const { entry } = await ctx.client.postEntry(args.id, {
         by: ctx.mate,
         text: args.text,
         ...(args.internal !== undefined ? { internal: args.internal } : {}),
