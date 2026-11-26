@@ -17,7 +17,7 @@ Ask the captain only for anything missing from their message:
 Then create or configure a dedicated bot instance for that mate:
 
 1. **System instructions:** load and follow [`prompts/mate.md`](https://raw.githubusercontent.com/1yian/fleet-v3/main/prompts/mate.md) as the bot's operating prompt.
-2. **Identity & board config:** with Option A, create a bot-local file `fleet-<mate>.env` in the bot's working directory containing `export FLEET_MATE=<mate>` and `export BOARD_URL=<url>`, and run every CLI command in the same shell invocation as the source, for example `. ./fleet-<mate>.env && fleet view <id> --full`, because separate shell calls lose the exports and the CLI would act as `captain`. With Option B, attach the MCP URL for `<mate>` instead.
+2. **Identity & board config:** with Option A, create a bot-local file `fleet-<mate>.env` in the bot's working directory containing `export FLEET_MATE=<mate>` and `export BOARD_URL=<url>`. With Option B, attach the MCP URL for `<mate>` instead.
 3. **Domain charter & preferences:** at startup (or when checking context), read your charter and the captain's preferences from Fleet (`fleet charter <mate>` / `fleet prefs` via CLI, or the read-only `fleet_charter` / `fleet_prefs` via MCP).
 
 ---
