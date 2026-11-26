@@ -283,6 +283,23 @@ async function abandonLaunch(
     .catch(() => undefined);
 }
 
+async function teardownWorkspace(
+  client: BoardClient,
+  config: RunnerConfig,
+  cardId: string,
+  workspace: TaskWorkspace,
+): Promise<void> {
+  try {
+    await cleanupWorkspace(workspace);
+  } catch (error) {
+    await client.postEntry(cardId, {
+      text: `Runner ${config.host} could not clean up the checkout for card #${cardId}: ${error instanceof Error ? error.message : String(error)}`,
+      by: runnerActor(config.host),
+      kind: "status",
+    });
+  }
+}
+
 async function runClaim(
   client: BoardClient,
   config: RunnerConfig,
@@ -432,7 +449,9 @@ async function runClaim(
         });
       }
     } finally {
-      if (preparedWorkspace !== undefined) await cleanupWorkspace(preparedWorkspace);
+      if (preparedWorkspace !== undefined) {
+        await teardownWorkspace(client, config, cardId, preparedWorkspace);
+      }
     }
   }
 }

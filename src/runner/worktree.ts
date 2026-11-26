@@ -53,6 +53,10 @@ function isNameCollision(error: unknown, branch: string): boolean {
   );
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function sanitizeSegment(value: string): string {
   return value.replaceAll(/[^a-zA-Z0-9._-]/gu, "-");
 }
@@ -83,7 +87,14 @@ async function removeCheckout(
   worktreePath: string,
   force: boolean,
 ): Promise<void> {
-  await runGit(repoPath, ["worktree", "remove", ...(force ? ["--force"] : []), worktreePath]);
+  try {
+    await runGit(repoPath, ["worktree", "remove", ...(force ? ["--force"] : []), worktreePath]);
+  } catch (error) {
+    throw new Error(
+      `git worktree remove failed and left the checkout at ${worktreePath}: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
 }
 
 function canonicalPath(path: string): string {
@@ -195,7 +206,13 @@ export async function prepareWorkspace(params: {
       gitCommonDir,
     };
   } catch (error) {
-    await rollbackWorkspace(params.repo.path, tmpDir, checkout).catch(() => undefined);
+    try {
+      await rollbackWorkspace(params.repo.path, tmpDir, checkout);
+    } catch (cleanupError) {
+      throw new Error(`${errorMessage(error)}; cleanup failed: ${errorMessage(cleanupError)}`, {
+        cause: cleanupError,
+      });
+    }
     throw error;
   }
 }

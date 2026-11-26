@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -92,6 +92,15 @@ function initGitRepo(root: string): string {
     stdio: "ignore",
   });
   return repoDir;
+}
+
+function within<T>(promise: Promise<T>, ms: number): Promise<T | "timeout"> {
+  const timeout = new Promise<"timeout">((resolve) => {
+    setTimeout(() => {
+      resolve("timeout");
+    }, ms).unref();
+  });
+  return Promise.race([promise, timeout]);
 }
 
 function makeConfig(
@@ -1097,6 +1106,76 @@ void test("a checkout whose post-checkout hook fails leaves no worktree, scratch
   }
 });
 
+void test("a checkout Git refuses to remove is reported with its path, after a failed setup and after a finished claim", async () => {
+  const hookRoot = makeTempDir("fleet-v3-untracked-hook-");
+  const hookRepo = initGitRepo(hookRoot);
+  const hookPath = join(hookRepo, ".git", "hooks", "post-checkout");
+  writeFileSync(hookPath, "#!/bin/sh\necho junk > untracked.txt\nexit 1\n");
+  chmodSync(hookPath, 0o755);
+  const setupBoard = await startTestServer();
+  try {
+    const card = await setupBoard.client.createCard({
+      mate: "cleo",
+      title: "Hook leaves an untracked file",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    await runLoop(setupBoard.client, makeConfig(hookRoot, hookRepo), { once: true });
+    const left = join(hookRoot, "workspaces", "cleo", "demo", "worktrees", "c-1-a1");
+    assert.equal(await cardField(setupBoard.client, card.id, "state"), "held");
+    assert.ok(existsSync(join(left, "untracked.txt")), "the unforced rollback leaves the checkout");
+    const { entries } = await setupBoard.client.getThread(card.id);
+    const report = entries.map((entry) => entry.text).join("\n");
+    assert.ok(report.includes("git worktree add"), "the setup failure is reported");
+    assert.ok(
+      report.includes(`left the checkout at ${left}`),
+      "the cleanup failure names the left-behind path",
+    );
+  } finally {
+    await setupBoard.stop();
+  }
+
+  const lockRoot = makeTempDir("fleet-v3-locked-checkout-");
+  const lockRepo = initGitRepo(lockRoot);
+  const lockBoard = await startTestServer();
+  try {
+    const card = await lockBoard.client.createCard({
+      mate: "cleo",
+      title: "Worker locks its checkout",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    const lockWorker =
+      'const wt = process.env.FLEET_WORKTREE; require("node:child_process").execFileSync("git", ["-C", wt, "worktree", "lock", wt]);';
+    await runLoop(
+      lockBoard.client,
+      makeConfig(lockRoot, lockRepo, {
+        spawn: {
+          mode: "local",
+          viewport: "headless",
+          direnv: false,
+          command: ["node", "-e", lockWorker],
+        },
+      }),
+      { once: true },
+    );
+    assert.equal(await cardField(lockBoard.client, card.id, "state"), "done");
+    const { entries } = await lockBoard.client.getThread(card.id);
+    assert.ok(
+      entries.some(
+        (entry) =>
+          entry.text.includes("could not clean up the checkout") &&
+          entry.text.includes("left the checkout at"),
+      ),
+      "teardown failure is reported on the card after the claim finished",
+    );
+  } finally {
+    await lockBoard.stop();
+  }
+});
+
 void test("a branch left from an earlier board is never overwritten or deleted by a new attempt", async () => {
   const root = makeTempDir("fleet-v3-branch-");
   const repoDir = initGitRepo(root);
@@ -1255,6 +1334,7 @@ void test("runner processes on different repos sharing a checkout root never tak
 
   const boardA = await startTestServer();
   const boardB = await startTestServer();
+  const children: ChildProcess[] = [];
   const runners: Promise<number | null>[] = [];
   try {
     const startRunner = (
@@ -1281,6 +1361,7 @@ void test("runner processes on different repos sharing a checkout root never tak
       const exited = new Promise<number | null>((resolve) => {
         child.once("close", resolve);
       });
+      children.push(child);
       runners.push(exited);
       return { receipt, exited };
     };
@@ -1304,11 +1385,11 @@ void test("runner processes on different repos sharing a checkout root never tak
     );
 
     const second = startRunner("b", boardB, repoB);
-    assert.ok(
-      await waitFor(() => existsSync(second.receipt), 20_000),
-      "runner B starts its worker without waiting for runner A's reservation",
+    assert.equal(
+      await within(second.exited, 20_000),
+      0,
+      "runner B finishes without waiting for runner A's reservation",
     );
-    assert.equal(await second.exited, 0);
     assert.match(readFileSync(second.receipt, "utf8"), /^c-1-a1-[a-zA-Z0-9]{6}$/u);
     const refsInB = execFileSync("git", ["-C", repoB, "branch", "--list", "c-1-a1"], {
       encoding: "utf8",
@@ -1316,12 +1397,13 @@ void test("runner processes on different repos sharing a checkout root never tak
     assert.equal(refsInB.trim(), "", "runner B never took the canonical name in its own repo");
 
     writeFileSync(release, "");
-    assert.equal(await first.exited, 0);
+    assert.equal(await within(first.exited, 20_000), 0, "runner A finishes once released");
     assert.equal(readFileSync(first.receipt, "utf8"), "c-1-a1");
     assert.equal(await cardField(boardA.client, "1", "state"), "done");
     assert.equal(await cardField(boardB.client, "1", "state"), "done");
   } finally {
     writeFileSync(release, "");
+    for (const child of children) child.kill("SIGKILL");
     await Promise.all(runners);
     await boardA.stop();
     await boardB.stop();
