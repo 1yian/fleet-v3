@@ -2,7 +2,7 @@
 
 This guide is for non-coding and chat-based agent platforms (such as **Grok Bot**, **Dots**, **Muse**, or any webhook-capable bot) acting as a Fleet **`1stmate`** or domain **`2ndmate`**.
 
-**If you are an external bot reading this page for the captain:** follow the steps below to create and configure the captain's dedicated Fleet mate bot (`1stmate`, or the requested domain `2ndmate`), wire its prompt and Card Server access, and return its incoming webhook URL so the captain's Control Host can push wakes to it via `fleet watch`.
+**If you are an external bot reading this page for the captain:** follow the steps below to create a dedicated Fleet mate bot (`1stmate`, or a new separate bot for the requested domain `2ndmate`), wire its prompt and Fleet access, and return its incoming webhook URL so the captain's Control Host can push wakes to it via `fleet watch`. If you also have shell access on the Control Host and the captain asked you to set up Fleet itself, run [`SETUP.md`](https://github.com/1yian/fleet-v3/blob/main/SETUP.md) together with this guide directly.
 
 ---
 
@@ -35,12 +35,12 @@ Run `fleet` commands with `FLEET_MATE=<mate>` and `BOARD_URL=<url>`:
 - `fleet view <id> --full` - inspect a card and its full thread
 - `fleet dispatch --title "..." --body "..." [--mate <child>] [--project <repo> --host <host> --delivery no-mistakes|direct-pr|local]` - delegate to a `2ndmate` or spawn an isolated `crewmate` on a runner host
 - `fleet queue <id> --project <repo> --host <host>` - send an existing held card to a `crewmate`
-- `fleet reply <id> --text "..."` - post a thread entry
+- `fleet reply <id> --text "..." [--internal]` - post a thread entry (use `--internal` for quiet coordination notes)
 - `fleet escalate <id> --reason "..."` - escalate to your parent (`captain` for `1stmate`, or `1stmate` for a `2ndmate`)
 - `fleet handoff <id> --to <mate> [--text "..."]` - pass a card to another mate
 - `fleet answer <id> --text "..."` - answer an escalated card from a child mate
 - `fleet snooze <id> --for 30m` - pause stale-card chases while waiting externally
-- `fleet close <id> [--text "..."]` / `fleet cancel <id> --reason "..."` - finish or cancel a card
+- `fleet close <id> [--result "..."]` / `fleet cancel <id> --reason "..."` - finish or cancel a card
 - `fleet hosts` / `fleet charter <mate>` / `fleet prefs`
 
 ### Option B (Fallback without shell access): Fleet MCP Server (`fleet mcp`)
@@ -102,7 +102,7 @@ _(If your bot runs on the same host and consumes a local stream instead of HTTP 
 
 If the captain also wants domain `2ndmate`s on this platform (for example multiple bots on Grok Bot):
 
-- Create one separate bot instance per `2ndmate` (`FLEET_MATE=<domain>`).
+- **Create a new, separate bot instance** for each `2ndmate` (`FLEET_MATE=<domain>`, `parent: 1stmate`) with its own domain charter and its own incoming webhook URL - do not reuse the `1stmate` bot for a `2ndmate`.
 - On the Control Host, each `2ndmate` is registered in `~/.fleet/fleet.yaml` with `parent: 1stmate` and `mode: external`, and gets its own `fleet watch --mate <domain> --webhook <bot-webhook-url>` service.
 
 ---
