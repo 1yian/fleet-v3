@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { runFleetCli } from "../src/cli.ts";
 import { loadConfig } from "../src/config.ts";
 import { VERSION } from "../src/version.ts";
-import { startTestServer } from "./support.ts";
+import { startTestServer, waitFor, watchEvents } from "./support.ts";
 
 const BIN_PATH = fileURLToPath(new URL("../src/bin.ts", import.meta.url));
 const tempDirs: string[] = [];
@@ -602,6 +602,70 @@ void test("defaultHost in fleet.yaml fills a missing --host for dispatch and que
     );
     assert.equal(missing.exitCode, 1);
     assert.match(missing.out, /Both project and host are required/u);
+  } finally {
+    await server.stop();
+  }
+});
+
+void test("fleet ask makes every captain question a captain-held card whose answer closes it and wakes the asker", async () => {
+  const server = await startTestServer({ parents: { jarvis: "captain", cleo: "jarvis" } });
+  const { client, url } = server;
+
+  try {
+    const asked = await captureCli(
+      [
+        "ask",
+        "--title",
+        "Ship the pricing change?",
+        "--brief",
+        "Context: churn is up. Options: A, B. Recommend A.",
+      ],
+      url,
+      "jarvis",
+    );
+    assert.equal(asked.exitCode, 0);
+    assert.match(asked.out, /holder: captain/u);
+    assert.match(asked.out, /Decision #1 - Ship the pricing change\?/u);
+    assert.match(asked.out, /Recommend A\./u);
+
+    const awaiting = await captureCli(["cards", "--holder", "captain"], url);
+    assert.match(awaiting.out, /Ship the pricing change\?/u);
+    const awaitingOverview = await client.getOverview();
+    assert.equal(awaitingOverview.counts.needsCaptain, 1);
+
+    const shown = await captureCli(["ask", "1"], url, "jarvis");
+    assert.equal(shown.exitCode, 0);
+    assert.match(shown.out, /Recommend A\./u);
+    const thread = await client.getThread("1");
+    assert.deepEqual(
+      thread.entries.map((entry) => [entry.kind, entry.internal, entry.text]),
+      [
+        ["ask", false, "Context: churn is up. Options: A, B. Recommend A."],
+        ["status", true, "Shown to captain"],
+      ],
+    );
+
+    const notCaptainAsk = await client.createCard({ mate: "cleo", title: "Plain card" });
+    const rejected = await captureCli(["ask", notCaptainAsk.id], url, "cleo");
+    assert.match(rejected.out, /not an open captain ask/u);
+
+    const watch = watchEvents(client, { holder: "jarvis", after: await client.latestEventId() });
+    const answered = await captureCli(["answer", "1", "--text", "Go with A"], url);
+    assert.equal(answered.exitCode, 0);
+    assert.match(answered.out, /state: done/u);
+    assert.equal(await waitFor(() => watch.events.some((e) => e.type === "card.answered")), true);
+    await watch.stop();
+    const wake = watch.events.find((e) => e.type === "card.answered");
+    assert.equal(wake?.payload["text"], "Go with A");
+
+    const after = await captureCli(["cards", "--holder", "captain"], url);
+    assert.match(after.out, /0 open cards found/u);
+    const settledOverview = await client.getOverview();
+    assert.equal(settledOverview.counts.needsCaptain, 0);
+    const closed = await client.getThread("1");
+    assert.equal(closed.card.state, "done");
+    assert.equal(closed.card.result, "Go with A");
+    assert.equal(closed.entries.at(-1)?.kind, "answer");
   } finally {
     await server.stop();
   }

@@ -6,10 +6,10 @@ import {
   BoardError,
   CARD_STATES,
   DELIVERIES,
-  ENTRY_KINDS,
   HolderFilterSchema,
   HolderNameSchema,
   MateNameSchema,
+  POSTABLE_ENTRY_KINDS,
   type BoardEvent,
   type CardState,
   type ClaimReceipt,
@@ -29,6 +29,13 @@ const CreateCardBodySchema = z.object({
   host: z.string().min(1).optional(),
   delivery: z.enum(DELIVERIES).optional(),
   needs: z.array(z.string()).optional(),
+  actor: z.string().min(1).optional(),
+});
+
+const AskCardBodySchema = z.object({
+  mate: MateNameSchema,
+  title: z.string().min(1),
+  brief: z.string().min(1),
   actor: z.string().min(1).optional(),
 });
 
@@ -72,7 +79,7 @@ const EntryBodySchema = z.object({
   text: z.string().min(1),
   by: z.string().min(1).optional(),
   internal: z.boolean().optional(),
-  kind: z.enum(ENTRY_KINDS).optional(),
+  kind: z.enum(POSTABLE_ENTRY_KINDS).optional(),
 });
 
 const EscalateBodySchema = z.object({
@@ -653,6 +660,26 @@ async function routeResourceRequest(
   return false;
 }
 
+async function routeAskRequest(
+  store: CardStore,
+  method: string,
+  path: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<boolean> {
+  if (method !== "POST" || path !== "/api/asks") return false;
+  const body = AskCardBodySchema.parse(await readJsonBody(req));
+  sendJson(res, 201, {
+    card: store.askCard({
+      mate: body.mate,
+      title: body.title,
+      brief: body.brief,
+      ...(body.actor !== undefined ? { actor: body.actor } : {}),
+    }),
+  });
+  return true;
+}
+
 async function routeApiRequest(
   store: CardStore,
   staleAfterMs: number,
@@ -663,6 +690,7 @@ async function routeApiRequest(
   const method = req.method ?? "GET";
   const path = url.pathname;
   if (await routeCollectionRequest(store, staleAfterMs, method, path, url, req, res)) return;
+  if (await routeAskRequest(store, method, path, req, res)) return;
   if (await routeResourceRequest(store, method, path, url, req, res)) return;
   sendJson(res, 404, { error: "not_found", message: `No route for ${method} ${path}` });
 }

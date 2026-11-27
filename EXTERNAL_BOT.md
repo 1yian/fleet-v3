@@ -37,9 +37,10 @@ Run each `fleet` command as `. ./fleet-<mate>.env && fleet ...` in one shell inv
 - `fleet dispatch --title "..." --body "..." [--mate <child>] [--project <repo> --host <host> --delivery no-mistakes|direct-pr|local]` - delegate to a `2ndmate` or spawn an isolated `crewmate` on a runner host
 - `fleet queue <id> --project <repo> --host <host>` - send an existing held card to a `crewmate`
 - `fleet reply <id> --text "..." [--internal]` - post a thread entry (use `--internal` for quiet coordination notes)
+- `fleet ask --title "..." --brief "..."` - put every question or decision for the captain on a captain-held card; show the returned `chatText` to the captain, run `fleet ask <id>` for each later showing, and record the captain's reply with `fleet answer <id> --text "..."`, which closes it
 - `fleet escalate <id> --reason "..."` - escalate to your parent (`captain` for `1stmate`, or `1stmate` for a `2ndmate`)
 - `fleet handoff <id> --to <mate> [--text "..."]` - pass a card to another mate
-- `fleet answer <id> --text "..."` - answer an escalated card from a child mate
+- `fleet answer <id> --text "..."` - answer an escalated card from a child mate, or record the captain's answer on an ask card (closes it)
 - `fleet snooze <id> --for 30m` - pause stale-card chases while waiting externally
 - `fleet close <id> [--result "..."]` / `fleet cancel <id> --reason "..."` - finish or cancel a card
 - `fleet hosts` / `fleet charter <mate>` / `fleet prefs`

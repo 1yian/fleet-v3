@@ -11,6 +11,7 @@ import {
   charterCommand,
   closeCommand,
   COMMAND_HELP,
+  askCommand,
   dispatchCommand,
   escalateCommand,
   handoffCommand,
@@ -55,6 +56,7 @@ Usage:
   fleet cards [flags]          List cards across mates and holders
   fleet view <id> [--full]     Inspect a card and its thread
   fleet dispatch [flags]       Delegate a card to a child mate or spawn a worker
+  fleet ask [flags]            Put a question to the captain as a captain-held card
   fleet queue <id> [flags]     Put a held card into the runner queue for a worker
   fleet reply <id> [flags]     Post an entry on a card thread
   fleet escalate <id> [flags]  Escalate a card to the parent mate (or captain)
@@ -727,6 +729,7 @@ export async function runFleetCli(options: RunFleetCliOptions = {}): Promise<voi
       cards: cardsCommand,
       view: viewCommand,
       dispatch: dispatchCommand,
+      ask: askCommand,
       queue: queueCommand,
       reply: replyCommand,
       escalate: escalateCommand,
