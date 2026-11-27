@@ -1,6 +1,7 @@
 import type { Writable } from "node:stream";
 import { z } from "zod";
 import type { BoardClient } from "./client.ts";
+import { extractPullRequestUrls, isPullRequestMerged } from "./pullrequests.ts";
 import type { BoardEvent } from "./types.ts";
 
 export interface WakeMessage {
@@ -38,6 +39,7 @@ const ChaseItemSchema = z.object({
   state: z.string(),
   ageMs: z.number(),
   stalledChild: z.string().optional(),
+  heldBy: z.string().optional(),
 });
 
 const ChasePayloadSchema = z.object({
@@ -56,10 +58,46 @@ function formatChaseNotice(event: BoardEvent): string | undefined {
   const lines = parsed.data.cards.map((card) => {
     const mins = Math.max(1, Math.round(card.ageMs / 60_000));
     const status =
-      card.stalledChild !== undefined ? `stalled with ${card.stalledChild}` : card.state;
+      card.stalledChild !== undefined
+        ? `stalled with ${card.stalledChild}`
+        : card.heldBy !== undefined
+          ? `held by ${card.heldBy}`
+          : card.state;
     return `- #${card.id} [${status}, ${String(mins)}m]: ${card.title}`;
   });
-  return `[fleet] Cards needing attention:\n${lines.join("\n")}\nReview each with \`fleet view <id> --full\` and close, queue, snooze, hand off, or escalate.`;
+  const captainHint = parsed.data.cards.some((card) => card.heldBy === "captain")
+    ? "\nCards held by the captain: if the captain's question is resolved or its PR merged, close it with `fleet close <id> --result`; otherwise snooze the reminder with `fleet snooze <id> --for 2h` (2h maximum)."
+    : "";
+  return `[fleet] Cards needing attention:\n${lines.join("\n")}\nReview each with \`fleet view <id> --full\` and close, queue, snooze, hand off, or escalate.${captainHint}`;
+}
+
+async function mergedPullRequestNotice(
+  options: WatchMateWakesOptions,
+  event: BoardEvent,
+): Promise<string> {
+  const parsed = ChasePayloadSchema.safeParse(event.payload);
+  if (!parsed.success) return "";
+  const lines: string[] = [];
+  for (const card of parsed.data.cards) {
+    if (card.heldBy !== "captain") continue;
+    const thread = await options.client.getThread(card.id, options.mate).catch(() => undefined);
+    if (thread === undefined) continue;
+    const urls = extractPullRequestUrls([
+      thread.card.title,
+      thread.card.body,
+      ...thread.entries.map((entry) => entry.text),
+    ]);
+    for (const url of urls) {
+      if (await isPullRequestMerged(url, options.signal)) {
+        lines.push(
+          `- #${card.id}: ${url} is merged, so this card is likely done. Verify and close it.`,
+        );
+      }
+    }
+  }
+  return lines.length > 0
+    ? `\nMerged pull requests referenced by captain-held cards:\n${lines.join("\n")}`
+    : "";
 }
 
 function formatHolderTransition(
@@ -232,8 +270,12 @@ export async function watchMateWakes(options: WatchMateWakesOptions): Promise<vo
         attempt = 0;
         if (event.type === "chase.due") initialChase = false;
         if (event.id > 0) lastEventId = Math.max(lastEventId ?? 0, event.id);
-        const notice = formatMateEvent(event, options.mate);
-        if (notice === undefined) continue;
+        const base = formatMateEvent(event, options.mate);
+        if (base === undefined) continue;
+        const notice =
+          event.type === "chase.due"
+            ? base + (await mergedPullRequestNotice(options, event))
+            : base;
         await deliverWake(options, wakeFromEvent(options.mate, notice, event));
       }
     } catch (error) {

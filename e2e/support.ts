@@ -18,12 +18,14 @@ export async function startTestServer(
     readonly now?: () => number;
     readonly chaseIntervalMs?: number;
     readonly staleAfterMs?: number;
+    readonly captainNagMs?: number;
   } = {},
 ): Promise<TestServer> {
   const store = new CardStore({
     ...(options.dataDir !== undefined ? { dataDir: options.dataDir } : { memory: true }),
     ...(options.parents !== undefined ? { parents: options.parents } : {}),
     ...(options.now !== undefined ? { now: options.now } : {}),
+    ...(options.captainNagMs !== undefined ? { captainNagMs: options.captainNagMs } : {}),
   });
   const started = await startBoardServer({
     store,

@@ -97,7 +97,7 @@ Flags:
 Usage:
   fleet snooze <id> --for <duration> [--reason "<why>"]
 Flags:
-  --for <duration>   Duration such as 30s, 15m, 2h, or 1d
+  --for <duration>   Duration such as 30s, 15m, 2h, or 1d (at most 2h on cards held by the captain)
   --reason <text>    Optional reason (e.g. waiting on external PR review)
 Examples:
   fleet snooze 42 --for 2h --reason "Waiting for Stripe support reply"`,
