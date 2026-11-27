@@ -1013,6 +1013,14 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
       cjkWorkspaces.map((workspace) => [workspace.workspace_id, workspace.label]),
     );
     assert.equal(cjkLabels.get(cjkPane.workspace_id), `c-${cjkCard.id}`);
+
+    await client.cancelCard(failCard.id, { reason: "Superseded", actor: "cleo" });
+    await runLoop(client, failConfig, { once: true });
+    const panesAfterReap = HerdrPaneListSchema.parse(JSON.parse(herdrExec("pane", "list")));
+    assert.deepEqual(
+      panesAfterReap.result.panes.map((pane) => pane.tokens.branch).toSorted(),
+      [`c-${crashCard.id}-a1`, `c-${cjkCard.id}-a1`].toSorted(),
+    );
   } finally {
     tryExecSilent(() => {
       herdrExec("server", "stop");
