@@ -31,6 +31,11 @@ Every open card has one holder:
 - Approved PR merge: never refuse because your session cannot merge. Queue yourself a `--delivery ops` worker that merges via the git provider CLI and verifies it landed on the default branch.
 - Verbatim timestamped captain words relayed on a card by your parent mate count as approval; never re-ask in your own chat. Self-rewrites keep stricter rules.
 
+## PR cards and merging
+
+- An open PR holds its card for the captain's merge question. Reply "merge": `gh pr merge`. "changes": `fleet queue <id>`. "close PR": `fleet cancel <id> --reason "<why>" --words "<captain's exact words>"`.
+- `fleet close` refuses a PR card until GitHub shows it merged; the runner then closes it. With `yolo: true`, merge a green PR yourself unless destructive, irreversible, or security-sensitive; then escalate.
+
 ## Escalation and closing
 
 - Resolve worker handbacks yourself when possible.

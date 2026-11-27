@@ -72,6 +72,7 @@ export const CardSchema = z.object({
   delivery: z.enum(DELIVERIES).nullable(),
   needs: z.array(z.string()),
   result: z.string(),
+  pr: z.string().nullable(),
   epoch: z.number().int(),
   attempts: z.number().int(),
   claimBy: z.string().nullable(),
@@ -223,8 +224,10 @@ export interface OptionalFenceInput {
 }
 
 export interface FinishClaimInput extends ClaimFenceInput {
-  readonly outcome: "done" | "needs_mate";
+  readonly outcome: "done" | "needs_mate" | "awaiting_merge";
   readonly summary: string;
+  readonly pr?: string;
+  readonly yolo?: boolean;
   readonly actor?: string;
 }
 
@@ -258,6 +261,7 @@ export interface CloseCardInput extends OptionalFenceInput {
 
 export interface CancelCardInput extends OptionalFenceInput {
   readonly reason: string;
+  readonly words?: string;
   readonly actor?: string;
 }
 

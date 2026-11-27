@@ -13,6 +13,7 @@ const RepoConfigSchema = z.object({
   baseBranch: z.string().min(1).optional(),
   bootstrap: z.string().min(1).optional(),
   delivery: z.enum(DELIVERIES).default("no-mistakes"),
+  yolo: z.boolean().default(false),
 });
 
 const ContainerConfigSchema = z.object({
@@ -156,6 +157,7 @@ const RunnerConfigSchema = FleetConfigObjectSchema.extend({
   maxAttempts: z.number().int().min(1).default(3),
   maxReviewRounds: z.number().int().min(1).max(4).default(4),
   pollWaitSeconds: z.number().int().min(1).max(60).default(15),
+  prPollSeconds: z.number().int().min(1).default(60),
   workerPromptPath: z.string().min(1).optional(),
   spawn: SpawnConfigSchema,
   verify: VerifyConfigSchema.default({

@@ -18,6 +18,7 @@ import {
   runIsolatedCommand,
   type SpawnResult,
 } from "./spawn.ts";
+import { closeMergedPullRequestCards, findBranchPullRequest, type PullRequest } from "./github.ts";
 import { runBoundedVerification } from "./verify.ts";
 import { cleanupWorkspace, prepareWorkspace, type TaskWorkspace } from "./worktree.ts";
 
@@ -207,6 +208,83 @@ async function handleRunOutcome(params: {
 function cardIntent(card: { readonly title: string; readonly body: string }): string {
   const body = card.body.trim();
   return body.length > 0 ? `${card.title}\n\n${body}` : card.title;
+}
+
+function mergeQuestion(pr: PullRequest, mate: string, project: string, yolo: boolean): string {
+  if (yolo) {
+    return [
+      `Done, green PR ready to merge: ${pr.url}`,
+      `Yolo is on for ${project}: ${mate} merges it now unless the change is destructive, irreversible, or security-sensitive. In that case escalate the card for the captain's merge decision.`,
+      "The card closes by itself once GitHub shows the PR merged.",
+    ].join("\n");
+  }
+  return [
+    `Done, awaiting merge decision: ${pr.url}`,
+    "Reply with one of:",
+    `- merge: approve the merge. ${mate} merges the PR and the card closes by itself once GitHub shows it merged.`,
+    "- changes: <what to change>. Your text goes back to the worker on this card.",
+    "- close PR: drop it. Your words are recorded and the card ends as not landed.",
+  ].join("\n");
+}
+
+async function finishDelivered(params: {
+  readonly client: BoardClient;
+  readonly config: RunnerConfig;
+  readonly claim: ClaimReceipt;
+  readonly project: string;
+  readonly yolo: boolean;
+  readonly delivery: Delivery;
+  readonly workspace: TaskWorkspace;
+}): Promise<{ readonly ok: boolean; readonly message: string }> {
+  const { client, config, claim, workspace } = params;
+  const fence = { epoch: claim.epoch, token: claim.token, actor: runnerActor(config.host) };
+  const needsPullRequest = params.delivery === "no-mistakes" || params.delivery === "direct-pr";
+  let pr: PullRequest | undefined;
+  if (needsPullRequest) {
+    try {
+      pr = await findBranchPullRequest(workspace.worktreePath, workspace.branch);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      await client.finishClaim(claim.card.id, {
+        ...fence,
+        outcome: "needs_mate",
+        summary: `Could not check GitHub for the PR on ${workspace.branch}: ${reason}`,
+      });
+      return { ok: false, message: "PR lookup failed" };
+    }
+  }
+  if (needsPullRequest && pr === undefined) {
+    await client.finishClaim(claim.card.id, {
+      ...fence,
+      outcome: "needs_mate",
+      summary: `No PR found for ${workspace.branch}; a ${params.delivery} delivery must report a PR URL. Open the PR or decide how to land this card.`,
+    });
+    return { ok: false, message: "No PR found" };
+  }
+  if (pr?.state === "CLOSED") {
+    await client.finishClaim(claim.card.id, {
+      ...fence,
+      outcome: "needs_mate",
+      summary: `PR ${pr.url} was closed without merging; decide whether to reopen it, rework it, or drop the card.`,
+    });
+    return { ok: false, message: "PR closed unmerged" };
+  }
+  if (pr?.state === "OPEN") {
+    await client.finishClaim(claim.card.id, {
+      ...fence,
+      outcome: "awaiting_merge",
+      pr: pr.url,
+      yolo: params.yolo && pr.green,
+      summary: mergeQuestion(pr, claim.card.mate, params.project, params.yolo && pr.green),
+    });
+    return { ok: true, message: "Awaiting merge decision" };
+  }
+  await client.finishClaim(claim.card.id, {
+    ...fence,
+    outcome: "done",
+    summary: `Completed on ${config.host} (${workspace.branch})${pr === undefined ? "" : `, PR merged: ${pr.url}`}`,
+  });
+  return { ok: true, message: `Completed on ${config.host}` };
 }
 
 async function handleVerification(params: {
@@ -445,13 +523,17 @@ async function runClaim(
       }
     }
 
-    await client.finishClaim(cardId, {
-      epoch: claim.epoch,
-      token: claim.token,
-      outcome: "done",
-      summary: `Completed on ${config.host} (${workspace.branch})`,
-      actor: runnerActor(config.host),
+    const delivered = await finishDelivered({
+      client,
+      config,
+      claim,
+      project,
+      yolo: repo.yolo,
+      delivery,
+      workspace,
     });
+    finalPaneMessage = delivered.message;
+    failed = !delivered.ok;
   } catch (error) {
     failed = true;
     finalPaneMessage = error instanceof Error ? error.message : String(error);
@@ -564,6 +646,22 @@ export async function runLoop(
 
   const isAborted = (): boolean => options.signal?.aborted === true;
 
+  const sweepIntervalMs = config.prPollSeconds * 1000;
+  const projects = new Set(Object.keys(config.repos));
+  let sweeping = false;
+  const sweepMerged = (): void => {
+    if (isAborted() || sweeping) return;
+    sweeping = true;
+    void closeMergedPullRequestCards(client, config.host, projects)
+      .catch(() => undefined)
+      .finally(() => {
+        sweeping = false;
+      });
+  };
+  const sweepTimer = setInterval(sweepMerged, sweepIntervalMs);
+  sweepTimer.unref();
+  sweepMerged();
+
   const slots = Array.from({ length: config.concurrency }, async (_, slot) => {
     while (!isAborted()) {
       try {
@@ -589,5 +687,6 @@ export async function runLoop(
   });
 
   await Promise.all(slots);
+  clearInterval(sweepTimer);
   return handled;
 }

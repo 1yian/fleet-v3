@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS cards (
   delivery TEXT,
   needs_json TEXT NOT NULL DEFAULT '[]',
   result TEXT NOT NULL DEFAULT '',
+  pr TEXT,
   epoch INTEGER NOT NULL DEFAULT 0,
   attempts INTEGER NOT NULL DEFAULT 0,
   claim_token_hash TEXT,
@@ -111,6 +112,7 @@ const CardRowSchema = z.object({
   delivery: z.enum(DELIVERIES).nullable(),
   needs_json: z.string(),
   result: z.string(),
+  pr: z.string().nullable(),
   epoch: z.number().int(),
   attempts: z.number().int(),
   claim_token_hash: z.string().nullable(),
@@ -209,6 +211,7 @@ function rowToCard(row: CardRow): Card {
     delivery: row.delivery,
     needs: StringArraySchema.parse(JSON.parse(row.needs_json)),
     result: row.result,
+    pr: row.pr,
     epoch: row.epoch,
     attempts: row.attempts,
     claimBy: row.claim_by,
@@ -305,6 +308,12 @@ export class CardStore {
     }
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA_SQL);
+    const columns = z
+      .array(z.object({ name: z.string() }))
+      .parse(this.db.prepare("PRAGMA table_info(cards)").all());
+    if (!columns.some((column) => column.name === "pr")) {
+      this.db.exec("ALTER TABLE cards ADD COLUMN pr TEXT");
+    }
   }
 
   public close(): void {
@@ -1096,6 +1105,51 @@ export class CardStore {
       const actor = input.actor ?? row.claim_by ?? "runner";
       const events: BoardEvent[] = [];
 
+      if (input.outcome === "awaiting_merge") {
+        if (input.pr === undefined) {
+          throw new BoardError(400, "missing_pr", "awaiting_merge requires the PR url");
+        }
+        const holder = input.yolo === true ? row.mate : "captain";
+        this.db
+          .prepare(
+            `UPDATE cards
+             SET state = 'held', holder = ?, result = ?, pr = ?, claim_token_hash = NULL, worker_token_hash = NULL,
+                 claim_by = NULL, lease_until = NULL, snooze_until = NULL, updated_at = ?
+             WHERE id = ?`,
+          )
+          .run(holder, input.summary, input.pr, now, id);
+        this.insertEntry({
+          cardId: id,
+          by: actor,
+          kind: "escalation",
+          text: input.summary,
+          internal: false,
+          createdAt: now,
+        });
+        const card = rowToCard(this.getCardRow(id));
+        events.push(
+          this.appendEvent({
+            type: input.yolo === true ? "card.returned" : "card.escalated",
+            cardId: id,
+            mate: card.mate,
+            holder,
+            actor,
+            payload:
+              input.yolo === true
+                ? { id: card.id, title: card.title, summary: input.summary }
+                : {
+                    id: card.id,
+                    title: card.title,
+                    from: card.mate,
+                    to: holder,
+                    reason: input.summary,
+                  },
+            createdAt: now,
+          }),
+        );
+        return { result: card, events };
+      }
+
       if (input.outcome === "done") {
         this.db
           .prepare(
@@ -1456,7 +1510,7 @@ export class CardStore {
     });
   }
 
-  public closeCard(rawId: string, input: CloseCardInput): Card {
+  public closeCard(rawId: string, input: CloseCardInput, mergeVerified = false): Card {
     const id = parseCardId(rawId);
     return this.runTransaction(() => {
       const now = this.nowFn();
@@ -1473,6 +1527,13 @@ export class CardStore {
       if (row.state === "done") return { result: rowToCard(row), events: [] };
       if (row.state === "canceled") {
         throw new BoardError(409, "card_canceled", `Card #${String(id)} is canceled`);
+      }
+      if (row.pr !== null && !mergeVerified) {
+        throw new BoardError(
+          409,
+          "pr_unmerged",
+          `Card #${String(id)} has an unmerged PR (${row.pr}); it closes Done only after the merge is verified on GitHub. Dropping it needs the captain's words: fleet cancel ${String(id)} --reason "<why>" --words "<captain's words>"`,
+        );
       }
       const result = input.result?.trim() ?? "";
       this.db
@@ -1529,6 +1590,14 @@ export class CardStore {
       if (row.state === "done") {
         throw new BoardError(409, "card_done", `Card #${String(id)} is already done`);
       }
+      const words = input.words?.trim() ?? "";
+      if (row.pr !== null && words.length === 0) {
+        throw new BoardError(
+          400,
+          "words_required",
+          `Card #${String(id)} has an open PR (${row.pr}); dropping it needs the captain's words: pass --words "<captain's words>"`,
+        );
+      }
       this.db
         .prepare(
           `UPDATE cards
@@ -1542,7 +1611,10 @@ export class CardStore {
         cardId: id,
         by: actor,
         kind: "status",
-        text: `Canceled: ${reason}`,
+        text:
+          words.length > 0
+            ? `Canceled: ${reason}\nCaptain's words: ${words}`
+            : `Canceled: ${reason}`,
         internal: false,
         createdAt: now,
       });

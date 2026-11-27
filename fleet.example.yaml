@@ -75,3 +75,4 @@ repos:
   example-app:
     remote: git@github.com:example/example-app.git
     delivery: no-mistakes
+    yolo: false

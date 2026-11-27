@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { z } from "zod";
 import { checkWriteIngress } from "./ingress.ts";
+import { isPullRequestMerged } from "./pullrequests.ts";
 import type { CardStore } from "./store.ts";
 import {
   BoardError,
@@ -69,8 +70,10 @@ const FenceBodySchema = z.object({
 const FinishBodySchema = z.object({
   epoch: z.number().int().positive(),
   token: z.string().min(1),
-  outcome: z.enum(["done", "needs_mate"]),
+  outcome: z.enum(["done", "needs_mate", "awaiting_merge"]),
   summary: z.string(),
+  pr: z.url().optional(),
+  yolo: z.boolean().optional(),
   actor: z.string().min(1).optional(),
 });
 
@@ -110,6 +113,7 @@ const CloseBodySchema = z.object({
 const CancelBodySchema = z.object({
   ...FenceFields,
   reason: z.string().min(1),
+  words: z.string().optional(),
   actor: z.string().min(1).optional(),
 });
 
@@ -131,6 +135,7 @@ const TextBodySchema = z.object({
   text: z.string(),
 });
 
+const MERGE_CHECK_TIMEOUT_MS = 30_000;
 const REPLAY_BATCH = 500;
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -457,12 +462,19 @@ async function routeCardTerminalOrFenceAction(
 ): Promise<boolean> {
   if (action === "close") {
     const body = CloseBodySchema.parse(await readJsonBody(req));
+    const pr = store.getThread(cardId).card.pr;
+    const mergeVerified =
+      pr !== null && (await isPullRequestMerged(pr, AbortSignal.timeout(MERGE_CHECK_TIMEOUT_MS)));
     sendJson(res, 200, {
-      card: store.closeCard(cardId, {
-        ...fenceOf(body),
-        ...(body.result !== undefined ? { result: body.result } : {}),
-        ...(body.actor !== undefined ? { actor: body.actor } : {}),
-      }),
+      card: store.closeCard(
+        cardId,
+        {
+          ...fenceOf(body),
+          ...(body.result !== undefined ? { result: body.result } : {}),
+          ...(body.actor !== undefined ? { actor: body.actor } : {}),
+        },
+        mergeVerified,
+      ),
     });
     return true;
   }
@@ -472,6 +484,7 @@ async function routeCardTerminalOrFenceAction(
       card: store.cancelCard(cardId, {
         ...fenceOf(body),
         reason: body.reason,
+        ...(body.words !== undefined ? { words: body.words } : {}),
         ...(body.actor !== undefined ? { actor: body.actor } : {}),
       }),
     });
@@ -495,6 +508,8 @@ async function routeCardTerminalOrFenceAction(
         token: body.token,
         outcome: body.outcome,
         summary: body.summary,
+        ...(body.pr !== undefined ? { pr: body.pr } : {}),
+        ...(body.yolo !== undefined ? { yolo: body.yolo } : {}),
         ...(body.actor !== undefined ? { actor: body.actor } : {}),
       }),
     });
