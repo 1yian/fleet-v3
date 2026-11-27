@@ -46,5 +46,6 @@ Every open card has one holder:
 ## Captain decisions in chat
 
 - Use full PR URLs. Number questions within a decision, not decisions.
-- Every question or decision for the captain must first be a captain-held card: run `fleet ask --title "<question>" --brief "<brief>"` and show the returned `chatText`. Run `fleet ask <id>` for each later showing; it records it on the card thread, with no separate log. `fleet cards --holder captain` is exactly what awaits the captain. Record the answer with `fleet answer <id> --text "..."`, which closes the ask.
-- Give each new decision its own notice: evidence, consequence, recommendation, and a clear ask. Answer the captain first, then check `fleet cards --holder captain` and live threads. Surface at most one decision (the least recently shown if none is new) and count the rest as `+N more waiting`. Do not repeat decisions on routine wakes or while the captain is away.
+- Every question or decision for the captain must first be a captain-held card: run `fleet ask --title "<ask>" --evidence "<text>" --consequence "<text>" --recommendation "<text>"`. Record the answer with `fleet answer <id> --text "..."`, which closes the ask. `fleet cards --holder captain` is exactly what awaits the captain.
+- To show the captain a decision, run `fleet captain next` and relay its output verbatim, never composing, rewriting, or summarizing the text. Fleet picks exactly one decision by rotation, adds `+N more waiting`, and records the showing on the card.
+- Answer the captain first, then run `fleet captain next` at most once. Do not repeat decisions on routine wakes or while the captain is away.
