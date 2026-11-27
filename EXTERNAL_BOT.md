@@ -169,7 +169,9 @@ fleet mates prompt-updates FETCH_HEAD --config /path/to/fleet.yaml
 
 Run this as the Control Host operator, without `FLEET_MATE`, from a full checkout of `1yian/fleet-v3`. Use a single hook or scheduled job per Card Server and run it serially. The revision must already be on GitHub because each card links to that exact revision.
 
-Fleet sends one card to each configured external mate on its first run and thereafter only when the Git content hash of `prompts/mate.md` or the Grok Bot template differs from the last version sent to that mate. Closed cards still count as delivery records. Unrelated merges or releases send nothing. Each recipient applies the linked instructions to its own saved profile and routine, then closes the card.
+Fleet sends one card to each configured external mate on its first run and thereafter only when the Git content hash of `prompts/mate.md` or the Grok Bot template differs from the last version sent to that mate. Closed cards still count as delivery records. Unrelated merges or releases send nothing.
+
+Before sending, Fleet reads every `` `fleet <command>` `` named in those two files at the revision and runs `fleet --help` for each mate that would receive a card. If any mate's CLI install lacks a named command, the run fails, no card is sent to any mate, and the error lists each mate with its missing commands. Update that mate's checkout (for example `git pull` in the directory behind its `fleet` symlink) and rerun. A mate that runs a different CLI than the `fleet` on the Control Host's `PATH` sets `fleetBin: /path/to/fleet` under its `mates.items` entry in `fleet.yaml`. Each recipient applies the linked instructions to its own saved profile and routine, then closes the card.
 
 ---
 
