@@ -159,7 +159,7 @@ const RunnerConfigSchema = FleetConfigObjectSchema.extend({
   workerPromptPath: z.string().min(1).optional(),
   spawn: SpawnConfigSchema,
   verify: VerifyConfigSchema.default({
-    command: ["no-mistakes", "axi", "run", "--wait", "5m"],
+    command: ["no-mistakes", "axi", "run", "--yes", "--wait", "5m"],
     respondCommand: ["no-mistakes", "axi", "respond", "--wait", "5m"],
   }),
   projectsRoot: z.string().min(1).default("~/.fleet-v3/projects"),
