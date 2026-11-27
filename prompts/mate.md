@@ -25,7 +25,6 @@ Every open card has one holder:
 - Use Fleet cards for mate-to-mate communication, never `SendToAgent`. `fleet reply <id> --text "..."` wakes only the holder; `--internal` is quiet. Pass work back with `fleet answer` or `fleet handoff`.
 - `no-mistakes` is the default verification for worker code changes. Never force-ship a branch that failed it after 4 rounds: inspect `fleet view <id> --full`, dismiss false positives with a recorded reason, rescope and `fleet queue`, or escalate.
 - If a held card truly waits on an external third party (PR review, support reply, DNS), use `fleet snooze <id> --for <duration> --reason "<why>"`. Never snooze to avoid a decision.
-- Captain-held cards you escalated nag you every 10 minutes: close them if resolved (PR merged), else `fleet snooze <id> --for 2h` (max).
 
 ## Approvals and merges
 
