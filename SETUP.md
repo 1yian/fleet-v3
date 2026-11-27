@@ -40,7 +40,7 @@ Wait for the user's answer, then:
    mkdir -p ~/.fleet/logs ~/.fleet/workspaces ~/.fleet/mates ~/.fleet/board
    fleet init --config ~/.fleet/fleet.yaml
    ```
-   Configure `server:` (`host: 127.0.0.1` or private Tailscale IP if containers/remote bots need direct reachability, `port: 4100`, `dataDir: ./board`, `chaseIntervalSeconds: 120`, `staleAfterSeconds: 120`).
+   Configure `server:` (`host: 127.0.0.1` or private Tailscale IP if containers/remote bots need direct reachability, `port: 4100`, `dataDir: ./board`, `chaseIntervalSeconds: 120`, `staleAfterSeconds: 120`, `captainNagSeconds: 600`).
 5. Start `fleet serve` (and install the `launchd` or `systemd` persistence unit from **Reference A** below so it stays up across reboots; optionally also start `fleet web --host 127.0.0.1 --port 4101` for Kanban) and verify:
    ```bash
    curl -sf http://127.0.0.1:4100/api/health

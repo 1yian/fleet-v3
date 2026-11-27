@@ -76,6 +76,7 @@ const ServerConfigSchema = z.object({
   dataDir: z.string().min(1).default("~/.fleet/board"),
   chaseIntervalSeconds: z.number().int().min(1).default(120),
   staleAfterSeconds: z.number().int().min(10).default(120),
+  captainNagSeconds: z.number().int().min(10).default(600),
 });
 
 const SpawnConfigSchema = z.object({

@@ -254,15 +254,19 @@ interface StaleChaseCard {
   readonly state: CardState;
   readonly ageMs: number;
   readonly stalledChild?: string;
+  readonly heldBy?: string;
 }
 
 const MAX_DATE_TIMESTAMP = 8_640_000_000_000_000;
+const DEFAULT_CAPTAIN_NAG_MS = 600_000;
+const MAX_CAPTAIN_SNOOZE_MS = 7_200_000;
 
 export interface CardStoreOptions {
   readonly dataDir?: string;
   readonly memory?: boolean;
   readonly parents?: Readonly<Record<string, string>>;
   readonly now?: () => number;
+  readonly captainNagMs?: number;
 }
 
 const CARD_SELECT = `
@@ -275,6 +279,7 @@ export class CardStore {
   private readonly dataDir: string | undefined;
   private readonly parents: Record<string, string>;
   private readonly nowFn: () => number;
+  private readonly captainNagMs: number;
   private readonly memoryCharters = new Map<string, string>();
   private memoryPrefs = "";
   private readonly listeners = new Set<(event: BoardEvent) => void>();
@@ -283,6 +288,7 @@ export class CardStore {
 
   public constructor(options: CardStoreOptions = {}) {
     this.nowFn = options.now ?? (() => Date.now());
+    this.captainNagMs = options.captainNagMs ?? DEFAULT_CAPTAIN_NAG_MS;
     this.parents = { ...options.parents };
     if (options.memory === true || options.dataDir === undefined) {
       this.dataDir = undefined;
@@ -319,6 +325,16 @@ export class CardStore {
   public parentOf(holder: string): string {
     if (holder === "captain") return "captain";
     return Object.hasOwn(this.parents, holder) ? (this.parents[holder] ?? "captain") : "captain";
+  }
+
+  private captainNagTarget(mate: string): string {
+    const seen = new Set<string>();
+    let cur = mate;
+    while (!seen.has(cur) && this.parentOf(cur) !== "captain") {
+      seen.add(cur);
+      cur = this.parentOf(cur);
+    }
+    return cur;
   }
 
   public isInSubtree(actor: string, mate: string): boolean {
@@ -1331,11 +1347,23 @@ export class CardStore {
           "snooze until timestamp must be a representable future time",
         );
       }
-      if (actor !== "captain" && actor !== row.holder) {
+      const captainHeld = row.holder === "captain";
+      if (
+        actor !== "captain" &&
+        actor !== row.holder &&
+        !(captainHeld && actor === this.captainNagTarget(row.mate))
+      ) {
         throw new BoardError(
           409,
           "holder_changed",
           `Card #${String(id)} is held by ${row.holder}, not ${actor}`,
+        );
+      }
+      if (captainHeld && input.until - now > MAX_CAPTAIN_SNOOZE_MS) {
+        throw new BoardError(
+          400,
+          "invalid_snooze",
+          "cards held by the captain can be snoozed for at most 2h at a time",
         );
       }
       const reason = input.reason?.trim() ?? "";
@@ -1603,6 +1631,44 @@ export class CardStore {
     return grouped;
   }
 
+  private captainNagGroups(now: number): Map<string, StaleChaseCard[]> {
+    const rows = this.db
+      .prepare(
+        `${CARD_SELECT}
+         WHERE c.state = 'held' AND c.holder = 'captain'
+         AND c.updated_at <= ?
+         AND (c.snooze_until IS NULL OR c.snooze_until <= ?)
+         ORDER BY c.updated_at ASC`,
+      )
+      .all(now - this.captainNagMs, now);
+    const grouped = new Map<string, StaleChaseCard[]>();
+    for (const raw of rows) {
+      const row = CardRowSchema.parse(raw);
+      const target = this.captainNagTarget(row.mate);
+      const list = grouped.get(target) ?? [];
+      list.push({
+        id: String(row.id),
+        title: row.title,
+        state: row.state,
+        ageMs: Math.max(0, now - row.updated_at),
+        heldBy: "captain",
+      });
+      grouped.set(target, list);
+    }
+    return grouped;
+  }
+
+  private static mergeGroups(
+    ...maps: readonly Map<string, StaleChaseCard[]>[]
+  ): Map<string, StaleChaseCard[]> {
+    const merged = new Map<string, StaleChaseCard[]>();
+    for (const map of maps) {
+      for (const [holder, cards] of map)
+        merged.set(holder, [...(merged.get(holder) ?? []), ...cards]);
+    }
+    return merged;
+  }
+
   private static chaseEvent(holder: string, cards: StaleChaseCard[], now: number): BoardEvent {
     return {
       id: 0,
@@ -1618,13 +1684,21 @@ export class CardStore {
 
   public sweepStale(staleAfterMs: number): void {
     const now = this.nowFn();
-    const groups = this.staleChaseGroups(now, staleAfterMs);
+    const nags = this.captainNagGroups(now);
+    const nagUpdate = this.db.prepare("UPDATE cards SET snooze_until = ? WHERE id = ?");
+    for (const cards of nags.values()) {
+      for (const card of cards) nagUpdate.run(now + this.captainNagMs, Number(card.id));
+    }
+    const groups = CardStore.mergeGroups(this.staleChaseGroups(now, staleAfterMs), nags);
     this.publish([...groups].map(([holder, cards]) => CardStore.chaseEvent(holder, cards, now)));
   }
 
   public pendingChase(holder: string, staleAfterMs: number): BoardEvent | undefined {
     const now = this.nowFn();
-    const cards = this.staleChaseGroups(now, staleAfterMs).get(holder);
+    const cards = CardStore.mergeGroups(
+      this.staleChaseGroups(now, staleAfterMs),
+      this.captainNagGroups(now),
+    ).get(holder);
     return cards === undefined ? undefined : CardStore.chaseEvent(holder, cards, now);
   }
 

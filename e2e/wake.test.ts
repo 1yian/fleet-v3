@@ -8,6 +8,7 @@ import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { attachFleetPiAdapter } from "../src/adapters/pi.ts";
+import { watchMateWakes, type WakeMessage } from "../src/board/wake.ts";
 import { loadFleetConfig } from "../src/config.ts";
 import { ensureMatesUp, listMates } from "../src/mates.ts";
 import { createMockPi, startTestServer, waitFor, type TestServer } from "./support.ts";
@@ -977,6 +978,104 @@ void test("fleet doctor validates board, charter, external mode, and Claude chan
     assert.match(brokenDoc.stdout, /ok: false/u);
   } finally {
     rmSync(root, { recursive: true, force: true });
+    await server.stop();
+  }
+});
+
+void test("captain-held cards nag the escalating mate every 10 minutes, cap snoozes at 2h, and flag merged PRs", async () => {
+  const MINUTE = 60_000;
+  let now = 1_700_000_000_000;
+  const server = await startTestServer({
+    parents: { jarvis: "captain", cleo: "jarvis" },
+    now: () => now,
+    chaseIntervalMs: 40,
+    staleAfterMs: 120 * MINUTE,
+    captainNagMs: 10 * MINUTE,
+  });
+  const { client } = server;
+  const binDir = mkdtempSync(join(tmpdir(), "fleet-gh-"));
+  const ghPath = join(binDir, "gh");
+  writeFileSync(ghPath, '#!/bin/sh\ncase "$3" in *pull/7) echo MERGED;; *) echo OPEN;; esac\n');
+  chmodSync(ghPath, 0o755);
+  const originalPath = process.env["PATH"];
+  process.env["PATH"] = `${binDir}:${originalPath ?? ""}`;
+  const controller = new AbortController();
+  const wakes: WakeMessage[] = [];
+  const watching = watchMateWakes({
+    client,
+    mate: "jarvis",
+    signal: controller.signal,
+    initialCursor: 0,
+    onWake: (wake) => {
+      if (wake.eventType === "chase.due") wakes.push(wake);
+    },
+  });
+  const nagNotices = (): string[] =>
+    wakes.filter((wake) => wake.notice.includes("held by captain")).map((wake) => wake.notice);
+  const nags = (): number => nagNotices().length;
+
+  try {
+    const merged = await client.createCard({
+      mate: "cleo",
+      title: "Review the billing migration",
+      body: "Shipped in https://github.com/acme/app/pull/7 - awaiting captain sign-off",
+      actor: "jarvis",
+    });
+    const open = await client.createCard({
+      mate: "cleo",
+      title: "Pick a vendor",
+      body: "Draft in https://github.com/acme/app/pull/8",
+      actor: "jarvis",
+    });
+    for (const card of [merged, open]) {
+      await client.escalateCard(card.id, { reason: "Need captain call", actor: "cleo" });
+      await client.escalateCard(card.id, { reason: "Need captain call", actor: "jarvis" });
+      const thread = await client.getThread(card.id);
+      assert.equal(thread.card.holder, "captain");
+    }
+
+    await sleep(250);
+    assert.equal(nags(), 0, "a freshly captain-held card is not nagged before 10 minutes");
+
+    now += 11 * MINUTE;
+    assert.equal(await waitFor(() => nags() === 1), true, "the escalating mate is nagged");
+    const first = nagNotices()[0] ?? "";
+    assert.match(first, new RegExp(`#${merged.id} \\[held by captain`, "u"));
+    assert.match(first, new RegExp(`#${open.id} \\[held by captain`, "u"));
+    assert.match(first, /2h maximum/u);
+    assert.ok(
+      first.includes(`#${merged.id}: https://github.com/acme/app/pull/7 is merged`),
+      "a merged PR referenced by the card is surfaced",
+    );
+    assert.ok(!first.includes("pull/8 is merged"), "an open PR is not reported merged");
+
+    await sleep(250);
+    assert.equal(nags(), 1, "the nag repeats only after another 10 minutes");
+
+    await assert.rejects(
+      () => client.snoozeCard(merged.id, { until: now + 3 * 60 * MINUTE, actor: "jarvis" }),
+      (err: unknown) => err instanceof Error && err.message.includes("at most 2h"),
+    );
+    await assert.rejects(
+      () => client.snoozeCard(merged.id, { until: now + 30 * MINUTE, actor: "cleo" }),
+      (err: unknown) => err instanceof Error && err.message.includes("held by captain"),
+    );
+    await client.snoozeCard(merged.id, { until: now + 120 * MINUTE, actor: "jarvis" });
+
+    now += 11 * MINUTE;
+    assert.equal(await waitFor(() => nags() === 2), true, "the unsnoozed card nags again");
+    const second = nagNotices()[1] ?? "";
+    assert.ok(!second.includes(`#${merged.id} `), "a snoozed card is not nagged");
+    assert.match(second, new RegExp(`#${open.id} `, "u"));
+
+    now += 120 * MINUTE;
+    assert.equal(await waitFor(() => nags() >= 3), true, "the snooze lapses after 2h");
+    assert.match(nagNotices().at(-1) ?? "", new RegExp(`#${merged.id} `, "u"));
+  } finally {
+    controller.abort();
+    await watching;
+    process.env["PATH"] = originalPath;
+    rmSync(binDir, { recursive: true, force: true });
     await server.stop();
   }
 });

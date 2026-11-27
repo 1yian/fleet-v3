@@ -153,6 +153,7 @@ function resolveServeOptions(
   readonly parents: Record<string, string>;
   readonly chaseIntervalMs: number;
   readonly staleAfterMs: number;
+  readonly captainNagMs: number;
 } {
   const configPath = stringFlag(values, "config") ?? findDefaultConfig();
   const cfg: FleetConfig | undefined =
@@ -169,6 +170,7 @@ function resolveServeOptions(
     parents: extractMateParents(cfg),
     chaseIntervalMs: (serverCfg?.chaseIntervalSeconds ?? 120) * 1000,
     staleAfterMs: (serverCfg?.staleAfterSeconds ?? 120) * 1000,
+    captainNagMs: (serverCfg?.captainNagSeconds ?? 600) * 1000,
   };
 }
 
@@ -186,7 +188,11 @@ async function serveCommand(args: string[]): Promise<Record<string, unknown>> {
     helpBlock,
   );
   const opts = resolveServeOptions(parsed.values, helpBlock);
-  const store = new CardStore({ dataDir: opts.dataDir, parents: opts.parents });
+  const store = new CardStore({
+    dataDir: opts.dataDir,
+    parents: opts.parents,
+    captainNagMs: opts.captainNagMs,
+  });
   const started = await startBoardServer({
     store,
     host: opts.host,

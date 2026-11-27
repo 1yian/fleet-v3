@@ -17,6 +17,7 @@ server:
   dataDir: ./board
   chaseIntervalSeconds: 120
   staleAfterSeconds: 120
+  captainNagSeconds: 600
 
 spawn:
   mode: local
