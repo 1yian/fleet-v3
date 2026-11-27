@@ -1,6 +1,6 @@
 # Grok Bot Fleet mate template
 
-Use the variant for your configured parent. Replace `<mate>`, `<parent>`, and `<domain>` with your Fleet identity. Save the common instructions, your variant's profile, and the contents of [the shared mate prompt](../prompts/mate.md) as your system instructions. Save the wake line as the prompt for your inbound webhook routine. Keep your existing Fleet environment or MCP connection and webhook endpoint.
+Use the variant for your configured parent. Replace `<mate>`, `<parent>`, and `<domain>` with your Fleet identity. Save the common instructions, your variant's profile, and the contents of [the shared mate prompt](../prompts/mate.md) as your system instructions. Save the wake line as the prompt for your inbound webhook routine. Keep your existing Fleet environment and webhook endpoint.
 
 ## Common instructions
 
