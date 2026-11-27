@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { z } from "zod";
 import { checkWriteIngress } from "./ingress.ts";
+import { isPullRequestMerged } from "./pullrequests.ts";
 import type { CardStore } from "./store.ts";
 import {
   BoardError,
@@ -106,7 +107,6 @@ const AnswerBodySchema = z.object({
 const CloseBodySchema = z.object({
   ...FenceFields,
   result: z.string().optional(),
-  merged: z.boolean().optional(),
   actor: z.string().min(1).optional(),
 });
 
@@ -135,6 +135,7 @@ const TextBodySchema = z.object({
   text: z.string(),
 });
 
+const MERGE_CHECK_TIMEOUT_MS = 30_000;
 const REPLAY_BATCH = 500;
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -461,13 +462,19 @@ async function routeCardTerminalOrFenceAction(
 ): Promise<boolean> {
   if (action === "close") {
     const body = CloseBodySchema.parse(await readJsonBody(req));
+    const pr = store.getThread(cardId).card.pr;
+    const mergeVerified =
+      pr !== null && (await isPullRequestMerged(pr, AbortSignal.timeout(MERGE_CHECK_TIMEOUT_MS)));
     sendJson(res, 200, {
-      card: store.closeCard(cardId, {
-        ...fenceOf(body),
-        ...(body.result !== undefined ? { result: body.result } : {}),
-        ...(body.merged !== undefined ? { merged: body.merged } : {}),
-        ...(body.actor !== undefined ? { actor: body.actor } : {}),
-      }),
+      card: store.closeCard(
+        cardId,
+        {
+          ...fenceOf(body),
+          ...(body.result !== undefined ? { result: body.result } : {}),
+          ...(body.actor !== undefined ? { actor: body.actor } : {}),
+        },
+        mergeVerified,
+      ),
     });
     return true;
   }

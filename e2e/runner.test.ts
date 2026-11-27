@@ -81,7 +81,7 @@ const tempDirs: string[] = [];
 const FAKE_GH_DIR = mkdtempSync(join(tmpdir(), "fleet-v3-fake-gh-"));
 writeFileSync(
   join(FAKE_GH_DIR, "gh"),
-  `#!/usr/bin/env node\nconst sub = process.argv[3];\nprocess.stdout.write(sub === "list" ? "[]" : "{}");\n`,
+  `#!/usr/bin/env node\nconst sub = process.argv[3];\nconst pr = '{"url":"https://github.com/acme/demo/pull/1","state":"MERGED","statusCheckRollup":[]}';\nprocess.stdout.write(sub === "list" ? "[" + pr + "]" : pr);\n`,
 );
 chmodSync(join(FAKE_GH_DIR, "gh"), 0o755);
 process.env["PATH"] = `${FAKE_GH_DIR}${delimiter}${process.env["PATH"] ?? ""}`;

@@ -253,6 +253,14 @@ async function finishDelivered(params: {
       return { ok: false, message: "PR lookup failed" };
     }
   }
+  if (needsPullRequest && pr === undefined) {
+    await client.finishClaim(claim.card.id, {
+      ...fence,
+      outcome: "needs_mate",
+      summary: `No PR found for ${workspace.branch}; a ${params.delivery} delivery must report a PR URL. Open the PR or decide how to land this card.`,
+    });
+    return { ok: false, message: "No PR found" };
+  }
   if (pr?.state === "CLOSED") {
     await client.finishClaim(claim.card.id, {
       ...fence,
@@ -640,9 +648,15 @@ export async function runLoop(
 
   const sweepIntervalMs = config.prPollSeconds * 1000;
   const projects = new Set(Object.keys(config.repos));
+  let sweeping = false;
   const sweepMerged = (): void => {
-    if (isAborted()) return;
-    void closeMergedPullRequestCards(client, config.host, projects).catch(() => undefined);
+    if (isAborted() || sweeping) return;
+    sweeping = true;
+    void closeMergedPullRequestCards(client, config.host, projects)
+      .catch(() => undefined)
+      .finally(() => {
+        sweeping = false;
+      });
   };
   const sweepTimer = setInterval(sweepMerged, sweepIntervalMs);
   sweepTimer.unref();

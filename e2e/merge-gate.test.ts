@@ -170,6 +170,11 @@ void test("a PR card is held for the captain, refuses Done until merged, and clo
     assert.notEqual(refused.exitCode, 0);
     assert.match(refused.out, /unmerged PR/u);
     assert.equal(await stateOf(client, card.id), "held");
+    await assert.rejects(
+      () => client.closeCard(card.id, { result: "forced", actor: "cleo" }),
+      /unmerged PR/u,
+    );
+    assert.equal(await stateOf(client, card.id), "held");
 
     await client.answerCard(card.id, { text: "changes: rename the helper", actor: "captain" });
     const reworked = await client.getThread(card.id);
@@ -193,6 +198,31 @@ void test("a PR card is held for the captain, refuses Done until merged, and clo
     const closedThread = await client.getThread(card.id);
     assert.match(closedThread.card.result, /PR merged/u);
     assert.match(readFileSync(log, "utf8"), /pr view/u);
+  } finally {
+    await server.stop();
+  }
+});
+
+void test("a PR delivery with no PR on GitHub goes to the mate instead of closing Done", async () => {
+  const root = makeTempDir("fleet-v3-merge-gate-");
+  installFakeGh(root);
+  const repoDir = initGitRepo(root);
+  const server = await startTestServer();
+  const { client } = server;
+
+  try {
+    const card = await client.createCard({
+      mate: "cleo",
+      title: "No PR opened",
+      host: "test-host",
+      project: "demo",
+      delivery: "direct-pr",
+    });
+    await runLoop(client, makeConfig(root, repoDir, server.url, false), { once: true });
+    const thread = await client.getThread(card.id);
+    assert.equal(thread.card.state, "held");
+    assert.equal(thread.card.holder, "cleo");
+    assert.match(thread.card.result, /must report a PR URL/u);
   } finally {
     await server.stop();
   }

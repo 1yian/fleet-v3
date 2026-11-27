@@ -1510,7 +1510,7 @@ export class CardStore {
     });
   }
 
-  public closeCard(rawId: string, input: CloseCardInput): Card {
+  public closeCard(rawId: string, input: CloseCardInput, mergeVerified = false): Card {
     const id = parseCardId(rawId);
     return this.runTransaction(() => {
       const now = this.nowFn();
@@ -1528,7 +1528,7 @@ export class CardStore {
       if (row.state === "canceled") {
         throw new BoardError(409, "card_canceled", `Card #${String(id)} is canceled`);
       }
-      if (row.pr !== null && input.merged !== true) {
+      if (row.pr !== null && !mergeVerified) {
         throw new BoardError(
           409,
           "pr_unmerged",

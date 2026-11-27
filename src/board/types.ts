@@ -256,7 +256,6 @@ export interface AnswerCardInput extends OptionalFenceInput {
 
 export interface CloseCardInput extends OptionalFenceInput {
   readonly result?: string;
-  readonly merged?: boolean;
   readonly actor?: string;
 }
 

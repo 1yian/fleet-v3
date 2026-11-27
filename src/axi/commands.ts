@@ -20,7 +20,7 @@ import {
   parseDurationMs,
 } from "../board/types.ts";
 import { loadConfig } from "../config.ts";
-import { cancelCardWithPullRequest, closeCardVerified } from "../runner/github.ts";
+import { cancelCardWithPullRequest } from "../runner/github.ts";
 import { runLoop } from "../runner/loop.ts";
 import { boolFlag, parseStrictFlags, stringFlag } from "./parse.ts";
 
@@ -828,7 +828,7 @@ export async function closeCommand(
     throw new AxiError("card <id> is required for `close`", "VALIDATION_ERROR", [helpBlock]);
   }
   const result = stringFlag(parsed.values, "result");
-  const card = await closeCardVerified(active.board(), id, {
+  const card = await active.board().closeCard(id, {
     ...active.fence,
     ...(result !== undefined ? { result } : {}),
     actor: active.actor,
