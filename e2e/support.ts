@@ -4,6 +4,12 @@ import { startBoardServer } from "../src/board/server.ts";
 import { CardStore } from "../src/board/store.ts";
 import type { BoardEvent } from "../src/board/types.ts";
 
+for (const name of Object.keys(process.env)) {
+  if (name === "BOARD_URL" || name.startsWith("FLEET_") || name.startsWith("HERDR_")) {
+    Reflect.deleteProperty(process.env, name);
+  }
+}
+
 export interface TestServer {
   readonly url: string;
   readonly client: BoardClient;
