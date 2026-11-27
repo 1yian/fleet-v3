@@ -4,6 +4,8 @@ import { runnerActor, type ClaimReceipt, type Delivery } from "../board/types.ts
 import { resolveHerdrConfig, type RunnerConfig } from "../config.ts";
 import {
   closeHerdrPane,
+  closePaneById,
+  listCardPanes,
   openHerdrPane,
   runCommandInHerdrPane,
   updateHerdrPaneStatus,
@@ -466,6 +468,25 @@ async function runClaim(
   }
 }
 
+async function reapClosedCardPanes(client: BoardClient, config: RunnerConfig): Promise<void> {
+  if (config.spawn.viewport !== "herdr") return;
+  const { session } = resolveHerdrConfig(config.spawn);
+  const panes = await listCardPanes(session);
+  const closedCards = new Map<string, boolean>();
+  for (const { paneId, cardId } of panes) {
+    let closed = closedCards.get(cardId);
+    if (closed === undefined) {
+      const state = await client
+        .getThread(cardId)
+        .then((thread) => thread.card.state)
+        .catch(() => undefined);
+      closed = state === "done" || state === "canceled";
+      closedCards.set(cardId, closed);
+    }
+    if (closed) await closePaneById(session, paneId);
+  }
+}
+
 async function executeClaim(
   client: BoardClient,
   config: RunnerConfig,
@@ -485,6 +506,8 @@ async function executeClaim(
         actor: runnerActor(config.host),
       })
       .catch(() => undefined);
+  } finally {
+    await reapClosedCardPanes(client, config);
   }
 }
 
@@ -513,6 +536,7 @@ export async function runLoop(
   options: { readonly once?: boolean; readonly signal?: AbortSignal } = {},
 ): Promise<number> {
   await advertiseHost(client, config);
+  await reapClosedCardPanes(client, config);
   let handled = 0;
 
   if (options.once === true) {
