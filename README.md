@@ -21,9 +21,15 @@ Read [VISION.md](VISION.md) for the design principles, [SETUP.md](SETUP.md) for 
 
 ## Worker names
 
-Each worker gets its own Herdr workspace in the configured session. The workspace label uses the first four ASCII alphanumeric runs from the lowercased card title, joined with hyphens and capped at 40 characters. A title with no ASCII alphanumeric runs falls back to `c-<card-id>`, so `修复登录` on card 19 becomes `c-19`. Permanent mate names are unchanged.
+Each worker gets its own Herdr workspace in the configured session. The workspace label uses the first four ASCII alphanumeric runs from the lowercased card title, joined with hyphens and capped at 40 characters. A title with no ASCII alphanumeric runs falls back to `c-<card-id>`, so `修复登录` on card 19 becomes `c-19`. Permanent mates are long-lived: each local mate gets its own Herdr workspace labeled with the mate name (set `workspace` on a mate or under `mates` to share one), and `fleet mates up` reuses a running pane, restarts an idle shell in place, and closes duplicate tabs. `fleet mates stop` closes the mate's workspace.
 
 The worktree directory and Git branch use `c-<card-id>-a<claim-epoch>`. If that name is already taken by a local branch (or a branch under the same name prefix) or by a worktree directory in the project's managed `worktrees` directory, a short suffix is added to both. Uniqueness covers local refs and local checkout paths only, including boards that share them; remote branches are not consulted. For example, the first claim of card #19, `Restore original worker names today`, opens a Herdr workspace named `restore-original-worker-names` with worktree and branch `c-19-a1`.
+
+## Herdr pane lifecycle
+
+A card has at most one worker workspace at a time. A new attempt closes the panes of every earlier attempt of the same card before it opens its own, so a retried card never leaves two. While a worker runs or verifies, the pane reports `working`. A clean finish, a handoff, a lost lease, an abort, and a superseded attempt all close the pane. Only a crash, a timeout, a failed launch, or a stopped verification keeps the pane, reporting `blocked` with the reason, when `keepPane` is `on-failure`.
+
+The runner reaps stale panes at start, after every claim, and on each idle poll. It closes any pane whose card is done, canceled, waiting, running without a live claim on this runner, or older than the card's newest attempt. Panes of held and queued cards survive until the card moves on.
 
 ## Quick start
 

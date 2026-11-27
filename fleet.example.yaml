@@ -48,7 +48,6 @@ spawn:
     extraArgs: []
 
 mates:
-  workspace: mates
   stateDir: ./mates
   command:
     - ypi

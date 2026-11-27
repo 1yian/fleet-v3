@@ -6,6 +6,7 @@ import {
   closeHerdrPane,
   closePaneById,
   listCardPanes,
+  type CardPane,
   openHerdrPane,
   runCommandInHerdrPane,
   updateHerdrPaneStatus,
@@ -153,13 +154,13 @@ async function handleRunOutcome(params: {
 }): Promise<{ readonly done: boolean; readonly failed: boolean; readonly message: string }> {
   const cardId = params.claim.card.id;
   if (params.leaseLost) {
-    return { done: true, failed: true, message: "Lease lost" };
+    return { done: true, failed: false, message: "Lease lost" };
   }
   if (params.run.aborted) {
     await params.client
       .releaseClaim(cardId, { epoch: params.claim.epoch, token: params.claim.token })
       .catch(() => undefined);
-    return { done: true, failed: true, message: "Aborted" };
+    return { done: true, failed: false, message: "Aborted" };
   }
   if (params.run.timedOut !== null) {
     const tail = params.run.outputTail.slice(-1000);
@@ -189,14 +190,14 @@ async function handleRunOutcome(params: {
   if (latest.card.epoch !== params.claim.epoch) {
     return {
       done: true,
-      failed: true,
+      failed: false,
       message: `Superseded by attempt ${String(latest.card.epoch)}`,
     };
   }
   if (latest.card.state !== "running") {
     return {
       done: true,
-      failed: latest.card.state === "held",
+      failed: false,
       message: `Handed to ${latest.card.holder || latest.card.state}`,
     };
   }
@@ -439,7 +440,7 @@ async function runClaim(
       });
       finalPaneMessage = verification.message;
       if (!verification.ok) {
-        failed = true;
+        failed = !leaseLost;
         return;
       }
     }
@@ -474,22 +475,29 @@ async function runClaim(
   }
 }
 
-async function reapClosedCardPanes(client: BoardClient, config: RunnerConfig): Promise<void> {
+const activeCards = new Set<string>();
+
+async function reapStalePanes(client: BoardClient, config: RunnerConfig): Promise<void> {
   if (config.spawn.viewport !== "herdr") return;
   const { session } = resolveHerdrConfig(config.spawn);
-  const panes = await listCardPanes(session);
-  const closedCards = new Map<string, boolean>();
-  for (const { paneId, cardId } of panes) {
-    let closed = closedCards.get(cardId);
-    if (closed === undefined) {
-      const state = await client
-        .getThread(cardId)
-        .then((thread) => thread.card.state)
-        .catch(() => undefined);
-      closed = state === "done" || state === "canceled";
-      closedCards.set(cardId, closed);
+  const panesByCard = new Map<string, CardPane[]>();
+  for (const pane of await listCardPanes(session)) {
+    if (activeCards.has(pane.cardId)) continue;
+    panesByCard.set(pane.cardId, [...(panesByCard.get(pane.cardId) ?? []), pane]);
+  }
+  for (const [cardId, panes] of panesByCard) {
+    const state = await client
+      .getThread(cardId)
+      .then((thread) => thread.card.state)
+      .catch(() => undefined);
+    if (state === undefined) continue;
+    const kept =
+      state === "held" || state === "queued"
+        ? panes.reduce((newest, pane) => (pane.epoch >= newest.epoch ? pane : newest))
+        : undefined;
+    for (const pane of panes) {
+      if (pane !== kept) await closePaneById(session, pane.paneId);
     }
-    if (closed) await closePaneById(session, paneId);
   }
 }
 
@@ -499,6 +507,7 @@ async function executeClaim(
   claim: ClaimReceipt,
   outerSignal?: AbortSignal,
 ): Promise<void> {
+  activeCards.add(claim.card.id);
   try {
     await runClaim(client, config, claim, outerSignal);
   } catch (error) {
@@ -513,7 +522,8 @@ async function executeClaim(
       })
       .catch(() => undefined);
   } finally {
-    await reapClosedCardPanes(client, config);
+    activeCards.delete(claim.card.id);
+    await reapStalePanes(client, config);
   }
 }
 
@@ -542,7 +552,7 @@ export async function runLoop(
   options: { readonly once?: boolean; readonly signal?: AbortSignal } = {},
 ): Promise<number> {
   await advertiseHost(client, config);
-  await reapClosedCardPanes(client, config);
+  await reapStalePanes(client, config);
   let handled = 0;
 
   if (options.once === true) {
@@ -554,7 +564,7 @@ export async function runLoop(
 
   const isAborted = (): boolean => options.signal?.aborted === true;
 
-  const slots = Array.from({ length: config.concurrency }, async () => {
+  const slots = Array.from({ length: config.concurrency }, async (_, slot) => {
     while (!isAborted()) {
       try {
         const claimed = await claimNextReady(
@@ -563,7 +573,10 @@ export async function runLoop(
           config.pollWaitSeconds,
           options.signal,
         );
-        if (claimed === null) continue;
+        if (claimed === null) {
+          if (slot === 0) await reapStalePanes(client, config);
+          continue;
+        }
         await executeClaim(client, config, claimed, options.signal);
         handled += 1;
       } catch {
