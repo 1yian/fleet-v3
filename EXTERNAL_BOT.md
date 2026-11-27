@@ -16,7 +16,7 @@ Fleet has one way to act and two ways to be woken:
 
 Ask the captain only for anything missing from their message:
 
-- **Mate name:** defaults to `1stmate` (or a domain name like `cleo` for a `2ndmate`).
+- **Mate name:** defaults to `1stmate` (or a domain name like `docs` for a `2ndmate`).
 - **`BOARD_URL`:** the HTTP URL of the captain's Fleet Card Server as reachable from the machine where the bot runs `fleet` (for example `http://127.0.0.1:4100` on the same machine).
 
 Then create or configure a dedicated bot instance for that mate:
