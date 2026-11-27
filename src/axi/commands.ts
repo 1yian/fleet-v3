@@ -121,12 +121,19 @@ Flags:
   --delivery <mode>  ${DELIVERIES.join(" | ")}`,
   snooze: `fleet snooze - defer stale-card chases on a held card while waiting on an external event
 Usage:
-  fleet snooze <id> --for <duration> [--reason "<why>"]
+  fleet snooze <id> --for <duration> [--reason "<why>"] [--captain-deferred "<captain's words>" | --depends-on <card or PR>]
 Flags:
-  --for <duration>   Duration such as 30s, 15m, 2h, or 1d (at most 2h on cards held by the captain)
-  --reason <text>    Optional reason (e.g. waiting on external PR review)
+  --for <duration>            Duration such as 30s, 15m, 2h, or 1d (at most 2h on cards held by the captain)
+  --reason <text>             Optional reason (e.g. waiting on external PR review)
+  --captain-deferred <words>  Declare a captain wait and quote the captain's own words (top-level mate only)
+  --depends-on <ref>          Declare a captain wait blocked on a card or PR (top-level mate only)
+Notes:
+  A card tied to an open captain-held card is a captain wait and requires one of the two captain flags.
+  Only the top-level mate (parent: captain) may snooze a captain wait; other mates escalate to their parent.
 Examples:
-  fleet snooze 42 --for 2h --reason "Waiting for Stripe support reply"`,
+  fleet snooze 42 --for 2h --reason "Waiting for Stripe support reply"
+  fleet snooze 42 --for 1d --captain-deferred "ask me again tomorrow"
+  fleet snooze 42 --for 1d --depends-on "#57"`,
   reply: `fleet reply - post an entry without transferring the card
 Usage:
   fleet reply <id> --text "<message>" [--internal]
@@ -779,6 +786,8 @@ export async function snoozeCommand(
     {
       for: { type: "string", required: true },
       reason: { type: "string" },
+      "captain-deferred": { type: "string" },
+      "depends-on": { type: "string" },
     },
     helpBlock,
   );
@@ -796,11 +805,25 @@ export async function snoozeCommand(
     );
   }
   const reason = stringFlag(parsed.values, "reason");
+  const captainDeferred = stringFlag(parsed.values, "captain-deferred");
+  const dependsOn = stringFlag(parsed.values, "depends-on");
+  if (captainDeferred !== undefined && dependsOn !== undefined) {
+    throw new AxiError("use only one of --captain-deferred or --depends-on", "VALIDATION_ERROR", [
+      helpBlock,
+    ]);
+  }
+  const captainWait =
+    captainDeferred !== undefined
+      ? { kind: "captain-deferred" as const, cite: captainDeferred }
+      : dependsOn !== undefined
+        ? { kind: "depends-on" as const, cite: dependsOn }
+        : undefined;
   const until = Date.now() + durationMs;
   const card = await active.board().snoozeCard(id, {
     ...active.fence,
     until,
     ...(reason !== undefined ? { reason } : {}),
+    ...(captainWait !== undefined ? { captainWait } : {}),
     actor: active.actor,
   });
   return {

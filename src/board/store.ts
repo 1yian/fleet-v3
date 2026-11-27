@@ -590,6 +590,25 @@ export class CardStore {
     });
   }
 
+  private waitsOnCaptain(needs: readonly string[]): boolean {
+    return needs.some((needId) => {
+      const prereq = this.db
+        .prepare("SELECT state, holder FROM cards WHERE id = ?")
+        .get(parseCardId(needId));
+      return (
+        prereq !== undefined &&
+        Reflect.get(prereq, "state") === "held" &&
+        Reflect.get(prereq, "holder") === "captain"
+      );
+    });
+  }
+
+  private isTopLevelMate(actor: string): boolean {
+    return (
+      isMateActor(actor) && Object.hasOwn(this.parents, actor) && this.parents[actor] === "captain"
+    );
+  }
+
   private dependentsOf(prerequisiteId: string, states: readonly CardState[]): CardRow[] {
     return this.db
       .prepare(
@@ -1424,11 +1443,34 @@ export class CardStore {
           "cards held by the captain can be snoozed for at most 2h at a time",
         );
       }
+      const waitsOnCaptain =
+        input.captainWait !== undefined ||
+        this.waitsOnCaptain(StringArraySchema.parse(JSON.parse(row.needs_json)));
+      if (waitsOnCaptain && !this.isTopLevelMate(actor)) {
+        throw new BoardError(
+          403,
+          "captain_wait_forbidden",
+          `Card #${String(id)} is waiting on the captain; only the top-level mate can snooze a captain wait. Escalate it to your parent (${this.parentOf(actor)}) with \`fleet escalate ${String(id)}\` instead of snoozing it`,
+        );
+      }
+      if (waitsOnCaptain && input.captainWait === undefined) {
+        throw new BoardError(
+          400,
+          "captain_wait_reason_required",
+          `Card #${String(id)} is waiting on the captain; snooze it with --captain-deferred "<captain's words>" or --depends-on <card or PR>`,
+        );
+      }
       const reason = input.reason?.trim() ?? "";
       this.db.prepare("UPDATE cards SET snooze_until = ? WHERE id = ?").run(input.until, id);
       const untilIso = new Date(input.until).toISOString();
+      const structured =
+        input.captainWait === undefined
+          ? ""
+          : ` [${input.captainWait.kind}: ${input.captainWait.cite}]`;
       const note =
-        reason.length > 0 ? `Snoozed until ${untilIso}: ${reason}` : `Snoozed until ${untilIso}`;
+        reason.length > 0
+          ? `Snoozed until ${untilIso}${structured}: ${reason}`
+          : `Snoozed until ${untilIso}${structured}`;
       this.insertEntry({
         cardId: id,
         by: actor,
@@ -1449,6 +1491,7 @@ export class CardStore {
           title: card.title,
           snoozeUntil: input.until,
           reason,
+          ...(input.captainWait !== undefined ? { captainWait: input.captainWait } : {}),
         },
         createdAt: now,
       });
