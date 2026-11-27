@@ -133,6 +133,10 @@ void test("home view returns TOON live counts, hosts, open cards, and contextual
   }
 });
 
+function helpScript(commands: string[]): string {
+  return `#!/bin/sh\nprintf '%s\\n' ${commands.map((name) => `'  fleet ${name}  help text'`).join(" ")}\n`;
+}
+
 void test("publishing a Fleet revision only cards external mates when prompt content changes", async () => {
   const server = await startTestServer({
     parents: { first: "captain", cleo: "first", local: "first" },
@@ -147,8 +151,8 @@ void test("publishing a Fleet revision only cards external mates when prompt con
     git("commit", "-qm", path);
     return git("rev-parse", "HEAD");
   };
-  const publish = async (revision: string): Promise<void> => {
-    const result = await runBin(["mates", "prompt-updates", revision, "--config", config], {
+  const publishRaw = (revision: string) =>
+    runBin(["mates", "prompt-updates", revision, "--config", config], {
       cwd: repo,
       env: {
         ...process.env,
@@ -158,6 +162,8 @@ void test("publishing a Fleet revision only cards external mates when prompt con
         FLEET_CLAIM_TOKEN: undefined,
       },
     });
+  const publish = async (revision: string): Promise<void> => {
+    const result = await publishRaw(revision);
     assert.equal(result.exitCode, 0, result.output);
   };
   const expectReleases = async (...revisions: string[]): Promise<void> => {
@@ -207,6 +213,28 @@ void test("publishing a Fleet revision only cards external mates when prompt con
     await publish(template);
     await publish(template);
     await expectReleases(template, shared, first);
+
+    const staleBin = join(repo, "fleet-stale");
+    const currentBin = join(repo, "fleet-current");
+    writeFileSync(staleBin, helpScript(["view", "cards"]), { mode: 0o755 });
+    writeFileSync(currentBin, helpScript(["view", "cards", "captain"]), { mode: 0o755 });
+    const mateYaml = (cleoBin: string): string =>
+      `boardUrl: ${server.url}\nmates:\n  items:\n    - name: first\n      mode: external\n      fleetBin: ${currentBin}\n    - name: cleo\n      parent: first\n      mode: external\n      fleetBin: ${cleoBin}\n`;
+    const newCommand = release(
+      "prompts/mate.md",
+      "Shared prompt v3 - run `fleet captain next` and `fleet view <id>`\n",
+    );
+
+    writeFileSync(config, mateYaml(staleBin));
+    const blocked = await publishRaw(newCommand);
+    assert.notEqual(blocked.exitCode, 0);
+    assert.match(blocked.output, /cleo \(.*fleet-stale\) lacks: fleet captain/u);
+    assert.doesNotMatch(blocked.output, /first \(/u);
+    await expectReleases(template, shared, first);
+
+    writeFileSync(config, mateYaml(currentBin));
+    await publish(newCommand);
+    await expectReleases(newCommand, template, shared, first);
   } finally {
     await server.stop();
   }

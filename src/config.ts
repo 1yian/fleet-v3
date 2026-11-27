@@ -37,6 +37,11 @@ const MateItemConfigSchema = z
     parent: HolderNameSchema.default("captain"),
     mode: z.enum(["local", "external"]).default("local"),
     cwd: z.string().min(1).optional(),
+    fleetBin: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("Path to the fleet CLI this external mate runs; defaults to fleet on PATH"),
     workspace: z.string().min(1).optional(),
     promptPath: z.string().min(1).optional(),
     autoStart: z.boolean().optional(),
@@ -249,6 +254,7 @@ function normalizeMatesConfig(
     items: cfg.items.map((item) => ({
       ...item,
       ...(item.cwd !== undefined ? { cwd: expandPath(item.cwd, baseDir) } : {}),
+      ...(item.fleetBin !== undefined ? { fleetBin: expandPath(item.fleetBin, baseDir) } : {}),
       ...(item.promptPath !== undefined
         ? { promptPath: expandPath(item.promptPath, baseDir) }
         : {}),
