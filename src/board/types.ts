@@ -9,7 +9,7 @@ export type Delivery = (typeof DELIVERIES)[number];
 export const ENTRY_KINDS = ["reply", "status", "escalation", "answer", "ask"] as const;
 export type EntryKind = (typeof ENTRY_KINDS)[number];
 export const POSTABLE_ENTRY_KINDS = ["reply", "status", "escalation", "answer"] as const;
-export type PostableEntryKind = (typeof POSTABLE_ENTRY_KINDS)[number];
+type PostableEntryKind = (typeof POSTABLE_ENTRY_KINDS)[number];
 
 export const EVENT_TYPES = [
   "card.created",
