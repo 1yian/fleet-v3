@@ -6,10 +6,10 @@ import {
   BoardError,
   CARD_STATES,
   DELIVERIES,
-  ENTRY_KINDS,
   HolderFilterSchema,
   HolderNameSchema,
   MateNameSchema,
+  POSTABLE_ENTRY_KINDS,
   type BoardEvent,
   type CardState,
   type ClaimReceipt,
@@ -79,7 +79,7 @@ const EntryBodySchema = z.object({
   text: z.string().min(1),
   by: z.string().min(1).optional(),
   internal: z.boolean().optional(),
-  kind: z.enum(ENTRY_KINDS).optional(),
+  kind: z.enum(POSTABLE_ENTRY_KINDS).optional(),
 });
 
 const EscalateBodySchema = z.object({

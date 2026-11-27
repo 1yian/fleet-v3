@@ -8,6 +8,8 @@ export type Delivery = (typeof DELIVERIES)[number];
 
 export const ENTRY_KINDS = ["reply", "status", "escalation", "answer", "ask"] as const;
 export type EntryKind = (typeof ENTRY_KINDS)[number];
+export const POSTABLE_ENTRY_KINDS = ["reply", "status", "escalation", "answer"] as const;
+export type PostableEntryKind = (typeof POSTABLE_ENTRY_KINDS)[number];
 
 export const EVENT_TYPES = [
   "card.created",
@@ -230,7 +232,7 @@ export interface PostEntryInput extends OptionalFenceInput {
   readonly text: string;
   readonly by?: string;
   readonly internal?: boolean;
-  readonly kind?: EntryKind;
+  readonly kind?: PostableEntryKind;
 }
 
 export interface EscalateCardInput extends OptionalFenceInput {
