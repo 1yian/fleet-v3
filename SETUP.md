@@ -242,7 +242,15 @@ Now ask ONE question:
      - Hand the captain a ready-to-paste prompt explicitly instructing Grok Bot to **create another separate bot** for that domain (or if you are Grok Bot running on the host, create the separate bot directly):
        > Read `https://github.com/1yian/fleet-v3/blob/main/EXTERNAL_BOT.md` and create a new separate bot for my `<name>` secondmate (`mate: <name>`, `parent: 1stmate`, domain: `<domain>`). Use the `fleet` CLI for every action (`BOARD_URL: <board-url>`). Return its incoming webhook URL and auth header when ready.
      - Wire a dedicated `fleet watch --mate <name> --webhook <bot-webhook-url> [--header "..."]` service (with persistence from **Reference A**) once the bot returns its webhook URL.
-  4. Finish with `fleet doctor` and a concise summary of running services and commands.
+  4. **Coding harness `2ndmate` on a remote host (long-lived pi agent in its own Herdr workspace):**
+     - Use this when the 2ndmate belongs on another machine and should be woken by its Fleet cards. Run it from that host's own `fleet.yaml`, not from the control host.
+     - On that host, check out the 2ndmate's repo (its `AGENTS.md` is the agent's instructions) at `<workspacesRoot>/<name>/mate`, and add a `mates` section to that host's `fleet.yaml` with the whole parent chain: `1stmate` as `mode: external` with `parent: captain`, then the 2ndmate with `parent: 1stmate`, `workspace: <name>`, `cwd: ./workspaces/<name>/mate`, and `autoStart: true`. Fleet rejects a host config that omits a parent in the chain.
+     - Set `mates.command` to a `ypi` launch that loads the Fleet pi adapter and the charter prompt, for example `[ypi, -e, "{adapter}", --append-system-prompt, "{prompt}"]` with `mates.env.YPI_OPTCHAT_CONFIG: "{stateDir}/optchat.json"`.
+     - Seed the charter on the board with `fleet charter <name> --set "..."`. The charter lives on the board, so a session restart loses no state.
+     - Keep it running with a `systemd --user` oneshot service plus a 60 second timer (see **Reference A**, Linux, mates timer). Each run fast-forwards the 2ndmate checkout with `git pull --ff-only`, then runs `fleet mates up`, which restarts the pi agent in place if it exited.
+     - Verify with `fleet mates status` on that host, then create a probe card routed to the 2ndmate and confirm the agent replies and closes it.
+     - Before routing cards to it, stop any other process that also wakes the same mate (for example a `fleet watch --mate <name>` service or an external bot routine), or both will receive every wake.
+  5. Finish with `fleet doctor` and a concise summary of running services and commands.
 
 ---
 
@@ -307,6 +315,36 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 ```
+
+Mates timer (a long-lived mate on a Linux host, restarted if it exits): create `fleet-mates.service` and `fleet-mates.timer`.
+
+```ini
+[Unit]
+Description=Fleet mates up
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=FLEET_CONFIG=%h/.fleet/fleet.yaml
+Environment=HERDR_SOCKET_PATH=%h/.config/herdr/herdr.sock
+ExecStartPre=-/usr/bin/git -C %h/.fleet/workspaces/<name>/mate pull --ff-only --quiet
+ExecStart=%h/.local/bin/fleet mates up
+```
+
+```ini
+[Unit]
+Description=Fleet mates up every minute
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=60
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable the timer with `systemctl --user enable --now fleet-mates.timer`.
 
 Add `dirname "$(which node)"` to `PATH` in every unit if Node lives under `nvm` or `mise`. Enable with:
 
