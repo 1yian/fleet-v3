@@ -669,7 +669,9 @@ export async function replyCommand(
     by: active.actor,
     internal,
   });
-  const isHolder = holder === entry.by || (holder === "worker" && active.fence.epoch !== undefined);
+  const isHolder =
+    holder !== undefined &&
+    (holder === entry.by || (holder === "worker" && active.fence.epoch !== undefined));
   return {
     reply: { id: entry.id, cardId: entry.cardId, internal: entry.internal },
     ...(!entry.internal && isHolder

@@ -21,7 +21,7 @@ Ask the captain only for anything missing from their message:
 
 Then create or configure a dedicated bot instance for that mate:
 
-1. **System instructions:** use the [Grok Bot template](templates/grok-bot.md) for your configured parent. Save the profile, shared operating prompt, and one-line webhook routine as directed there. Other bot platforms can use the same template.
+1. **System instructions:** save the short pointer from the [pointer template](templates/grok-bot-pointers.md) (filled in with your mate name, parent, domain, and env script; the filled-in text stays in the captain's private configuration, not in this repo) as both your profile and your webhook routine prompt. The pointer sends you to the [Grok Bot template](templates/grok-bot.md) and the shared prompt on `main`, which you load on every wake. Other bot platforms can use the same pointer and template.
 2. **Identity & board config:** create a bot-local file `fleet-<mate>.env` in the working directory of the machine where the bot runs `fleet`, containing `export FLEET_MATE=<mate>` and `export BOARD_URL=<url>`.
 3. **Domain charter & preferences:** at startup (or when checking context), read your charter and the captain's preferences with `fleet charter <mate>` and `fleet prefs`.
 
@@ -72,7 +72,7 @@ Every wake arrives as `POST <webhook-url>` with `Content-Type: application/json`
 }
 ```
 
-Pass the webhook body's `notice` and `cardId` (if present) to the bot and return HTTP `2xx` once the wake is accepted. Use the top-level or child wake line from the [Grok Bot template](templates/grok-bot.md).
+Pass the webhook body's `notice` and `cardId` (if present) to the bot and return HTTP `2xx` once the wake is accepted. Use the filled-in pointer as the routine prompt.
 
 _(If your bot runs on the same host and consumes a local stream instead of HTTP webhooks, run bare `fleet watch --mate <mate>` to receive the same JSON envelope as NDJSON lines on stdout.)_
 
@@ -157,19 +157,9 @@ If the captain also wants domain `2ndmate`s on this platform (for example multip
 
 ---
 
-## 6. Publish Prompt Updates from the Control Host
+## 6. Instruction Updates
 
-Add `fleet mates prompt-updates HEAD --config <fleet.yaml>` to the Control Host's Fleet deployment hook, after the checkout moves to the published revision. To follow merges without a deployment hook, schedule this with the host scheduler instead:
-
-```bash
-cd /path/to/fleet-v3 &&
-git fetch origin main &&
-fleet mates prompt-updates FETCH_HEAD --config /path/to/fleet.yaml
-```
-
-Run this as the Control Host operator, without `FLEET_MATE`, from a full checkout of `1yian/fleet-v3`. Use a single hook or scheduled job per Card Server and run it serially. The revision must already be on GitHub because each card links to that exact revision.
-
-Fleet sends one card to each configured external mate on its first run and thereafter only when the Git content hash of `prompts/mate.md` or the Grok Bot template differs from the last version sent to that mate. Closed cards still count as delivery records. Unrelated merges or releases send nothing. Each recipient applies the linked instructions to its own saved profile and routine, then closes the card.
+Operating instructions ship as merged pull requests to `templates/grok-bot.md` and `prompts/mate.md` on `main`. Each bot loads them on every wake through its saved pointer, so there is no prompt-update card, hook, or scheduled job, and a bot never rewrites its own saved profile or routine for an instruction change. Only a change to a mate's own values (name, parent, domain, env script) needs the captain to approve a new pointer in that bot's chat.
 
 ---
 
