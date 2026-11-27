@@ -203,6 +203,11 @@ async function handleRunOutcome(params: {
   return { done: false, failed: false, message: `Completed on ${params.config.host}` };
 }
 
+function cardIntent(card: { readonly title: string; readonly body: string }): string {
+  const body = card.body.trim();
+  return body.length > 0 ? `${card.title}\n\n${body}` : card.title;
+}
+
 async function handleVerification(params: {
   readonly client: BoardClient;
   readonly config: RunnerConfig;
@@ -220,6 +225,7 @@ async function handleVerification(params: {
   const verified = await runBoundedVerification({
     config: params.config,
     cwd: params.worktreePath,
+    intent: cardIntent(params.claim.card),
     env: params.workerEnv,
     signal: params.signal,
   });

@@ -15,6 +15,7 @@ const FINDINGS_PATTERN = /\b(?:findings|ask-user|auto-fix|review-failed|gate)\b/
 export async function runBoundedVerification(params: {
   readonly config: RunnerConfig;
   readonly cwd: string;
+  readonly intent: string;
   readonly env: Record<string, string>;
   readonly signal?: AbortSignal;
 }): Promise<VerifyOutcome> {
@@ -22,7 +23,10 @@ export async function runBoundedVerification(params: {
   let lastOutput = "";
 
   for (let round = 1; round <= maxRounds; round += 1) {
-    const argv = round === 1 ? params.config.verify.command : params.config.verify.respondCommand;
+    const argv =
+      round === 1
+        ? [...params.config.verify.command, "--intent", params.intent]
+        : params.config.verify.respondCommand;
     const result = await runIsolatedCommand({
       argv,
       cwd: params.cwd,

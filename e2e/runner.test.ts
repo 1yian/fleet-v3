@@ -523,6 +523,7 @@ void test("caps no-mistakes verification at 4 rounds and hands back to mate with
     const card = await client.createCard({
       mate: "cleo",
       title: "Change that never converges in review",
+      body: "Reviewer keeps raising nitpicks",
       host: "test-host",
       project: "demo",
       delivery: "no-mistakes",
@@ -530,7 +531,9 @@ void test("caps no-mistakes verification at 4 rounds and hands back to mate with
 
     const failVerify = `
       const fs = require("node:fs");
-      fs.appendFileSync(${JSON.stringify(roundsLog)}, process.env.FLEET_REVIEW_ROUND + "\\n");
+      const at = process.argv.indexOf("--intent");
+      const intent = at === -1 ? "none" : process.argv[at + 1];
+      fs.appendFileSync(${JSON.stringify(roundsLog)}, process.env.FLEET_REVIEW_ROUND + "|" + JSON.stringify(intent) + "\\n");
       console.error("findings: reviewer raised another nitpick");
       process.exit(1);
     `;
@@ -538,8 +541,8 @@ void test("caps no-mistakes verification at 4 rounds and hands back to mate with
     const config = makeConfig(root, repoDir, {
       maxReviewRounds: 4,
       verify: {
-        command: ["node", "-e", failVerify],
-        respondCommand: ["node", "-e", failVerify],
+        command: ["node", "-e", failVerify, "--"],
+        respondCommand: ["node", "-e", failVerify, "--"],
       },
     });
 
@@ -547,7 +550,12 @@ void test("caps no-mistakes verification at 4 rounds and hands back to mate with
     assert.equal(handled, 1);
 
     const rounds = readFileSync(roundsLog, "utf8").trim().split("\n");
-    assert.deepEqual(rounds, ["1", "2", "3", "4"]);
+    assert.deepEqual(rounds, [
+      `1|${JSON.stringify("Change that never converges in review\n\nReviewer keeps raising nitpicks")}`,
+      '2|"none"',
+      '3|"none"',
+      '4|"none"',
+    ]);
 
     const thread = await client.getThread(card.id);
     assert.equal(thread.card.state, "held");
