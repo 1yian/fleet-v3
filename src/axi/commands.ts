@@ -8,6 +8,7 @@ import {
   uninstallSessionStartHooks,
   type SessionStartHookScope,
 } from "axi-sdk-js";
+import { askCaptain, showAsk } from "../board/ask.ts";
 import { createHttpBoardClient, type BoardClient } from "../board/client.ts";
 import {
   CARD_STATES,
@@ -86,6 +87,21 @@ Examples:
   fleet dispatch --mate cleo --title "Investigate recent conversion drop"
   fleet dispatch --project Cleo --host p620 --title "Fix webhook timeout"
   fleet dispatch --project Cleo --title "Fix webhook timeout"   (uses defaultHost)`,
+  ask: `fleet ask - put a question or decision to the captain as a captain-held card, or re-show an open one
+Usage:
+  fleet ask --title "<question>" --brief "<decision brief>" [--mate <name>]
+  fleet ask <id>
+Flags:
+  --title <text>     Required one-line question
+  --brief <text>     Required decision brief: context, options, and your recommendation
+  --mate <name>      Asking mate (defaults to $FLEET_MATE)
+Notes:
+  The card is held by the captain, so \`fleet cards --holder captain\` lists everything that awaits the captain.
+  The command returns the chat text to show the captain. Run \`fleet ask <id>\` each time you show an open ask again; it records the showing on the card thread.
+  Record the captain's reply with \`fleet answer <id> --text "<answer>"\`, which closes the card.
+Examples:
+  fleet ask --title "Ship the pricing change?" --brief "Context... Options: A, B. Recommend A."
+  fleet ask 42`,
   queue: `fleet queue - put a held card in the runner queue for a worker (resets retry attempts on held cards)
 Usage:
   fleet queue <id> [--project <repo>] [--host <host>] [--delivery <mode>]
@@ -119,7 +135,7 @@ Usage:
 Flags:
   --to <mate>        Target holder (default: card's home mate)
   --text <message>   Optional handoff note`,
-  answer: `fleet answer - answer an escalated card and hand it back to its mate
+  answer: `fleet answer - answer an escalated card and hand it back to its mate; answering a \`fleet ask\` card records the answer and closes it
 Usage:
   fleet answer <id> --text "<answer>"
 Flags:
@@ -507,6 +523,48 @@ export async function dispatchCommand(
       title: card.title,
     },
     help: [`Run \`fleet view ${card.id}\` to track progress`],
+  };
+}
+
+export async function askCommand(
+  args: string[],
+  ctx: FleetAxiContext | undefined,
+): Promise<Record<string, unknown>> {
+  const active = requireBoard(ctx);
+  const helpBlock = COMMAND_HELP["ask"] ?? "";
+  const parsed = parseStrictFlags(
+    "ask",
+    args,
+    {
+      mate: { type: "string" },
+      title: { type: "string" },
+      brief: { type: "string" },
+    },
+    helpBlock,
+  );
+  const [id] = parsed.positionals;
+  if (id !== undefined) {
+    const shown = await showAsk(active.board(), id, active.actor);
+    return {
+      card: { id: shown.card.id, holder: shown.card.holder, title: shown.card.title },
+      chatText: shown.chatText,
+    };
+  }
+  const mate = stringFlag(parsed.values, "mate") ?? scopeOf(active) ?? "";
+  const title = stringFlag(parsed.values, "title") ?? "";
+  const brief = stringFlag(parsed.values, "brief") ?? "";
+  if (mate.length === 0 || title.length === 0 || brief.length === 0) {
+    throw new AxiError(
+      "--title and --brief are required (and --mate when asking as captain), or pass an ask <id> to show it again",
+      "VALIDATION_ERROR",
+      [helpBlock],
+    );
+  }
+  const asked = await askCaptain(active.board(), { mate, title, brief });
+  return {
+    card: { id: asked.card.id, holder: asked.card.holder, title: asked.card.title },
+    chatText: asked.chatText,
+    help: [`Record the captain's reply with \`fleet answer ${asked.card.id} --text "<answer>"\``],
   };
 }
 

@@ -14,6 +14,7 @@ import {
   runnerActor,
   type AdvertiseHostInput,
   type AnswerCardInput,
+  type AskCardInput,
   type BoardEvent,
   type BoardEventType,
   type BoardOverview,
@@ -817,6 +818,56 @@ export class CardStore {
     return { card, entries };
   }
 
+  public askCard(input: AskCardInput): Card {
+    const mate = input.mate.trim();
+    const title = input.title.trim();
+    const brief = input.brief.trim();
+    if (mate.length === 0) throw new BoardError(400, "invalid_mate", "mate is required");
+    if (title.length === 0) throw new BoardError(400, "invalid_title", "title is required");
+    if (brief.length === 0) throw new BoardError(400, "empty_text", "brief is required");
+
+    return this.runTransaction(() => {
+      const now = this.nowFn();
+      const actor = input.actor ?? mate;
+      if (isMateActor(actor) && actor !== mate) {
+        throw new BoardError(403, "out_of_scope", `Mate "${actor}" can only ask as itself`);
+      }
+      const info = this.db
+        .prepare(
+          `INSERT INTO cards (
+            mate, title, body, state, holder, needs_json, result, epoch, created_by, created_at, updated_at
+          ) VALUES (?, ?, '', 'held', 'captain', '[]', '', 0, ?, ?, ?)`,
+        )
+        .run(mate, title, actor, now, now);
+      const cardId = Number(info.lastInsertRowid);
+      this.insertEntry({
+        cardId,
+        by: actor,
+        kind: "ask",
+        text: brief,
+        internal: false,
+        createdAt: now,
+      });
+      const card = rowToCard(this.getCardRow(cardId));
+      const event = this.appendEvent({
+        type: "card.created",
+        cardId,
+        mate: card.mate,
+        holder: "captain",
+        actor,
+        payload: {
+          id: card.id,
+          title: card.title,
+          state: card.state,
+          host: card.host,
+          project: card.project,
+        },
+        createdAt: now,
+      });
+      return { result: card, events: [event] };
+    });
+  }
+
   public listCards(query: ListCardsQuery = {}): CardPage {
     const conditions: string[] = [];
     const params: (string | number)[] = [];
@@ -1289,15 +1340,19 @@ export class CardStore {
         throw new BoardError(409, "card_terminal", `Card #${String(id)} is ${row.state}`);
       }
       const target = row.mate;
+      const closesAsk =
+        this.db
+          .prepare("SELECT 1 AS found FROM entries WHERE card_id = ? AND kind = 'ask' LIMIT 1")
+          .get(id) !== undefined;
       this.db
         .prepare(
           `UPDATE cards
-           SET state = 'held', holder = ?, result = ?,
+           SET state = ?, holder = ?, result = ?,
                claim_token_hash = NULL, worker_token_hash = NULL, claim_by = NULL, lease_until = NULL,
                snooze_until = NULL, updated_at = ?
            WHERE id = ?`,
         )
-        .run(target, text, now, id);
+        .run(closesAsk ? "done" : "held", closesAsk ? "" : target, text, now, id);
       this.insertEntry({
         cardId: id,
         by: actor,
@@ -1316,7 +1371,10 @@ export class CardStore {
         payload: { id: card.id, title: card.title, to: target, text },
         createdAt: now,
       });
-      return { result: card, events: [event] };
+      return {
+        result: card,
+        events: closesAsk ? [event, ...this.unblockDependentsInternal(card.id, now)] : [event],
+      };
     });
   }
 

@@ -464,7 +464,8 @@ async function loadDrawer(id) {
   bodyEl.scrollTop = scrollTop;
 
   const isOpen = card.state !== "done" && card.state !== "canceled";
-  const nextFootKey = card.id + ":" + card.mate + ":" + isOpen;
+  const isAsk = entries.some(e => e.kind === "ask");
+  const nextFootKey = card.id + ":" + card.mate + ":" + isOpen + ":" + isAsk;
   if (nextFootKey === footKey) return;
   footKey = nextFootKey;
   const foot = $("drawer-foot");
@@ -481,7 +482,7 @@ async function loadDrawer(id) {
     '<textarea class="textarea" id="drawer-reply" placeholder="Reply or answer..."></textarea>'
     + '<div class="foot-row">'
     + '<div style="display:flex;gap:8px">'
-    + '<button class="btn btn-amber" data-action="answer" data-id="' + esc(card.id) + '">Answer &amp; hand to ' + esc(card.mate) + '</button>'
+    + '<button class="btn btn-amber" data-action="answer" data-id="' + esc(card.id) + '">' + (isAsk ? 'Answer &amp; close' : 'Answer &amp; hand to ' + esc(card.mate)) + '</button>'
     + '<button class="btn" data-action="reply" data-id="' + esc(card.id) + '">Reply</button>'
     + '</div>'
     + '<div style="display:flex;gap:8px">'

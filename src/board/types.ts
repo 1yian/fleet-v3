@@ -6,7 +6,7 @@ export type CardState = (typeof CARD_STATES)[number];
 export const DELIVERIES = ["no-mistakes", "direct-pr", "local", "ops"] as const;
 export type Delivery = (typeof DELIVERIES)[number];
 
-export const ENTRY_KINDS = ["reply", "status", "escalation", "answer"] as const;
+export const ENTRY_KINDS = ["reply", "status", "escalation", "answer", "ask"] as const;
 export type EntryKind = (typeof ENTRY_KINDS)[number];
 
 export const EVENT_TYPES = [
@@ -177,6 +177,13 @@ export interface CreateCardInput {
   readonly host?: string;
   readonly delivery?: Delivery;
   readonly needs?: readonly string[];
+  readonly actor?: string;
+}
+
+export interface AskCardInput {
+  readonly mate: string;
+  readonly title: string;
+  readonly brief: string;
   readonly actor?: string;
 }
 

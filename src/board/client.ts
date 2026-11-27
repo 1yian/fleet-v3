@@ -11,6 +11,7 @@ import {
   OverviewSchema,
   type AdvertiseHostInput,
   type AnswerCardInput,
+  type AskCardInput,
   type BoardEvent,
   type BoardOverview,
   type CancelCardInput,
@@ -37,6 +38,7 @@ export interface BoardClient {
   readonly getOverview: (scope?: string, signal?: AbortSignal) => Promise<BoardOverview>;
   readonly listCards: (query?: ListCardsQuery, signal?: AbortSignal) => Promise<CardPage>;
   readonly createCard: (input: CreateCardInput) => Promise<Card>;
+  readonly askCard: (input: AskCardInput) => Promise<Card>;
   readonly getThread: (id: string, scope?: string) => Promise<CardThread>;
   readonly postEntry: (id: string, input: PostEntryInput) => Promise<PostedEntry>;
   readonly queueCard: (id: string, input: QueueCardInput) => Promise<Card>;
@@ -186,6 +188,13 @@ export function createHttpBoardClient(baseUrl: string): BoardClient {
     },
     createCard: async (input) => {
       const res = await requestJson(cleanBase, "/api/cards", CardWrapSchema, {
+        method: "POST",
+        body: input,
+      });
+      return res.card;
+    },
+    askCard: async (input) => {
+      const res = await requestJson(cleanBase, "/api/asks", CardWrapSchema, {
         method: "POST",
         body: input,
       });
