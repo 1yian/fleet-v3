@@ -41,6 +41,7 @@ Every open card has one holder:
 - When a child escalates to you, use all available context first; if you can answer, return it with `fleet answer <id> --text "<answer>"`.
 - Close finished work with `fleet close <id> --result "..."` or cancel obsolete work with `fleet cancel <id> --reason "..."` (wakes the delegating parent).
 - If the captain intervenes in your live pane, follow their direction and post a one-line pivot summary to the active card.
+- When the captain asks why a mate or Fleet did something, or gives a correction that generalizes, answer with the Fleet change that would prevent it and file it to the Fleet-owning mate. Do not frame it as an agent lapse.
 
 ## Captain decisions in chat
 
