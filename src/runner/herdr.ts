@@ -23,7 +23,7 @@ const PaneEntrySchema = z.object({
 });
 const PaneListSchema = z.object({ result: z.object({ panes: z.array(PaneEntrySchema) }) });
 
-const BRANCH_CARD_PATTERN = /^(?:c-|fleet\/t-)(\d+)(?:-|$)/u;
+const BRANCH_CARD_PATTERN = /^(?:c-|fleet\/t-)(\d+)(?:-[ae](\d+))?(?:-|$)/u;
 
 const ExitReceiptSchema = z.object({
   exitCode: z.number().int().nullable(),
@@ -129,6 +129,31 @@ export async function updateHerdrPaneStatus(
   ]).catch(() => undefined);
 }
 
+export async function closePaneById(session: string | undefined, paneId: string): Promise<void> {
+  await runHerdr(session, ["pane", "close", paneId]).catch(() => undefined);
+}
+
+export interface CardPane {
+  readonly paneId: string;
+  readonly cardId: string;
+  readonly epoch: number;
+}
+
+export async function listCardPanes(session: string | undefined): Promise<readonly CardPane[]> {
+  try {
+    const raw = await runHerdr(session, ["pane", "list"]);
+    const { result } = PaneListSchema.parse(JSON.parse(raw));
+    return result.panes.flatMap((pane) => {
+      const match = BRANCH_CARD_PATTERN.exec(pane.tokens?.branch ?? "");
+      const cardId = match?.[1];
+      if (cardId === undefined) return [];
+      return [{ paneId: pane.pane_id, cardId, epoch: Number(match?.[2] ?? 0) }];
+    });
+  } catch {
+    return [];
+  }
+}
+
 export async function openHerdrPane(params: {
   readonly config: HerdrConfig;
   readonly cardId: string;
@@ -143,6 +168,10 @@ export async function openHerdrPane(params: {
   const slug = cardName(params.summary);
   const label = slug === "" ? `c-${params.cardId}` : slug;
   if (params.signal?.aborted === true) return undefined;
+
+  for (const superseded of await listCardPanes(session)) {
+    if (superseded.cardId === params.cardId) await closePaneById(session, superseded.paneId);
+  }
 
   let handle: HerdrPaneHandle;
   try {
@@ -184,10 +213,6 @@ export async function openHerdrPane(params: {
   return handle;
 }
 
-export async function closePaneById(session: string | undefined, paneId: string): Promise<void> {
-  await runHerdr(session, ["pane", "close", paneId]).catch(() => undefined);
-}
-
 export async function closeHerdrPane(
   handle: HerdrPaneHandle,
   options: {
@@ -201,21 +226,6 @@ export async function closeHerdrPane(
     options.keepPane === "never" || (options.keepPane === "on-failure" && !options.failed);
   if (!shouldClose) return;
   await closePaneById(handle.session, handle.paneId);
-}
-
-export async function listCardPanes(
-  session: string | undefined,
-): Promise<readonly { readonly paneId: string; readonly cardId: string }[]> {
-  try {
-    const raw = await runHerdr(session, ["pane", "list"]);
-    const { result } = PaneListSchema.parse(JSON.parse(raw));
-    return result.panes.flatMap((pane) => {
-      const cardId = BRANCH_CARD_PATTERN.exec(pane.tokens?.branch ?? "")?.[1];
-      return cardId === undefined ? [] : [{ paneId: pane.pane_id, cardId }];
-    });
-  } catch {
-    return [];
-  }
 }
 
 function readRecordedPid(pidFile: string): number | undefined {

@@ -121,6 +121,7 @@ interface ExistingPane {
   readonly workspaceId: string;
   readonly tabId: string;
   readonly paneId: string;
+  readonly duplicateTabIds: readonly string[];
 }
 
 export interface MateStatus {
@@ -187,7 +188,7 @@ function resolveMate(config: FleetConfig, mates: MatesConfig, item: MateItemConf
   const cwd = item.cwd ?? stateDir;
   const promptPath = item.promptPath ?? mates.promptPath ?? DEFAULT_MATE_PROMPT;
   const mcpConfigPath = join(stateDir, "mcp.json");
-  const workspace = item.workspace ?? mates.workspace;
+  const workspace = item.workspace ?? mates.workspace ?? item.name;
   const vars: Record<string, string> = {
     name: item.name,
     prompt: promptPath,
@@ -292,7 +293,6 @@ function resolvePrimaryMateName(config: FleetConfig, explicit?: string): string 
 function requireMates(config: FleetConfig): MatesConfig {
   if (config.mates === undefined) {
     return {
-      workspace: "mates",
       stateDir: join(config.workspacesRoot, "mates"),
       env: {},
       command: ["ypi", "-e", "{adapter}", "--append-system-prompt", "{prompt}"],
@@ -313,6 +313,17 @@ async function listWorkspaces(
   }
 }
 
+async function isPaneRunningCommand(session: string | undefined, paneId: string): Promise<boolean> {
+  try {
+    const raw = await runHerdr(session, ["pane", "process-info", "--pane", paneId]);
+    const info = ProcessInfoSchema.parse(JSON.parse(raw)).result.process_info;
+    const shellPid = info.shell_pid ?? null;
+    return info.foreground_processes.some((proc) => proc.pid !== shellPid);
+  } catch {
+    return false;
+  }
+}
+
 async function findExistingMatePane(
   session: string | undefined,
   workspaceLabel: string,
@@ -328,29 +339,36 @@ async function findExistingMatePane(
   ]);
   if (tabsRaw === undefined || panesRaw === undefined) return undefined;
 
-  const tabs = TabListSchema.parse(JSON.parse(tabsRaw)).result.tabs;
-  const tab = tabs.find((entry) => entry.label === mateName);
-  if (tab === undefined) return undefined;
-
+  const tabs = TabListSchema.parse(JSON.parse(tabsRaw)).result.tabs.filter(
+    (entry) => entry.label === mateName,
+  );
   const panes = PaneListSchema.parse(JSON.parse(panesRaw)).result.panes;
-  const pane = panes.find((entry) => entry.tab_id === tab.tab_id);
-  if (pane === undefined) return undefined;
+  const candidates = tabs.flatMap((tab) => {
+    const pane = panes.find((entry) => entry.tab_id === tab.tab_id);
+    return pane === undefined ? [] : [{ tab, pane }];
+  });
+  let chosen = candidates[0];
+  for (const candidate of candidates) {
+    if (await isPaneRunningCommand(session, candidate.pane.pane_id)) {
+      chosen = candidate;
+      break;
+    }
+  }
+  if (chosen === undefined) return undefined;
 
   return {
     workspaceId: ws.workspace_id,
-    tabId: tab.tab_id,
-    paneId: pane.pane_id,
+    tabId: chosen.tab.tab_id,
+    paneId: chosen.pane.pane_id,
+    duplicateTabIds: candidates
+      .filter((candidate) => candidate !== chosen)
+      .map((candidate) => candidate.tab.tab_id),
   };
 }
 
-async function isPaneRunningCommand(session: string | undefined, paneId: string): Promise<boolean> {
-  try {
-    const raw = await runHerdr(session, ["pane", "process-info", "--pane", paneId]);
-    const info = ProcessInfoSchema.parse(JSON.parse(raw)).result.process_info;
-    const shellPid = info.shell_pid ?? null;
-    return info.foreground_processes.some((proc) => proc.pid !== shellPid);
-  } catch {
-    return false;
+async function closeDuplicateTabs(session: string | undefined, pane: ExistingPane): Promise<void> {
+  for (const tabId of pane.duplicateTabIds) {
+    await runHerdr(session, ["tab", "close", tabId]).catch(() => undefined);
   }
 }
 
@@ -374,6 +392,7 @@ async function createMatePane(mate: ResolvedMate): Promise<ExistingPane> {
       workspaceId: existingWs.workspace_id,
       tabId: parsed.result.tab.tab_id,
       paneId: parsed.result.root_pane.pane_id,
+      duplicateTabIds: [],
     };
   }
 
@@ -394,6 +413,7 @@ async function createMatePane(mate: ResolvedMate): Promise<ExistingPane> {
     workspaceId: parsed.result.workspace.workspace_id,
     tabId: parsed.result.tab.tab_id,
     paneId: parsed.result.root_pane.pane_id,
+    duplicateTabIds: [],
   };
 }
 
@@ -515,6 +535,7 @@ export async function ensureMatesUp(
     ensureMateRuntimeFiles(resolved);
     const existing = await findExistingMatePane(resolved.session, resolved.workspace, item.name);
     if (existing !== undefined) {
+      await closeDuplicateTabs(resolved.session, existing);
       const running = await isPaneRunningCommand(resolved.session, existing.paneId);
       if (running) {
         results.push({
@@ -575,6 +596,7 @@ export async function stopMates(
       results.push({ name: item.name, parent: item.parent, action: "not-running" });
       continue;
     }
+    await closeDuplicateTabs(resolved.session, existing);
     await runHerdr(resolved.session, ["pane", "close", existing.paneId]);
     results.push({
       name: item.name,

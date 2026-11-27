@@ -16,6 +16,15 @@ const RecordedEnvSchema = z.object({
   optchat: z.string(),
 });
 
+const HerdrWorkspaceEntrySchema = z.object({ label: z.string() });
+const HerdrWorkspaceListSchema = z.object({
+  result: z.object({ workspaces: z.array(HerdrWorkspaceEntrySchema) }),
+});
+const HerdrTabEntrySchema = z.object({ tab_id: z.string() });
+const HerdrTabListSchema = z.object({
+  result: z.object({ tabs: z.array(HerdrTabEntrySchema) }),
+});
+
 const tempDirs: string[] = [];
 
 function makeTempDir(prefix: string): string {
@@ -263,6 +272,8 @@ void test("fleet mates up idempotently manages permanent interactive panes in He
   const root = makeTempDir("fv3-mates-herdr-");
   const session = `fv3m${Date.now().toString(36).slice(-5)}`;
   const server = spawn("herdr", ["--session", session, "server"], { stdio: "ignore" });
+  const herdrExec = (...args: readonly string[]): string =>
+    execFileSync("herdr", ["--session", session, ...args], { encoding: "utf8", timeout: 10_000 });
   const envDump = join(root, "cleo-env.json");
   const sleeperScript = `import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(envDump)}, JSON.stringify({
@@ -294,7 +305,6 @@ setInterval(() => {}, 1000);`;
       respondCommand: ["true"],
     },
     mates: {
-      workspace: "mates",
       session,
       stateDir: join(root, "mates-state"),
       env: {
@@ -358,10 +368,27 @@ setInterval(() => {}, 1000);`;
     assert.equal(recorded.mate, "cleo");
     assert.equal(recorded.optchat, join(root, "mates-state", "cleo", "optchat.json"));
 
+    const workspaceLabels = (): string[] => {
+      const listed: unknown = JSON.parse(herdrExec("workspace", "list"));
+      const { workspaces } = HerdrWorkspaceListSchema.parse(listed).result;
+      return workspaces.map((workspace) => workspace.label);
+    };
+    assert.deepEqual(workspaceLabels(), ["cleo"], "each mate owns a workspace named after it");
+
+    const cleoWorkspace = first[0]?.workspaceId;
+    assert.ok(cleoWorkspace !== undefined);
+    herdrExec("tab", "create", "--workspace", cleoWorkspace, "--label", "cleo", "--no-focus");
+    const tabCount = (): number => {
+      const listed: unknown = JSON.parse(herdrExec("tab", "list", "--workspace", cleoWorkspace));
+      return HerdrTabListSchema.parse(listed).result.tabs.length;
+    };
+    assert.equal(tabCount(), 2);
+
     const second = await ensureMatesUp(config);
     assert.equal(second.length, 1);
     assert.equal(second[0]?.action, "already-running");
     assert.equal(second[0]?.paneId, cleoPaneId);
+    assert.equal(tabCount(), 1, "a duplicate mate tab is reaped, not kept");
 
     const statuses = await listMates(config);
     assert.equal(statuses.find((entry) => entry.name === "cleo")?.status, "running");
@@ -371,6 +398,7 @@ setInterval(() => {}, 1000);`;
     assert.equal(onDemand.length, 1);
     assert.equal(onDemand[0]?.name, "quiet");
     assert.equal(onDemand[0]?.action, "started");
+    assert.deepEqual(workspaceLabels().toSorted(), ["cleo", "quiet"]);
 
     const stopped = await stopMates(config, { all: true });
     assert.equal(stopped.length, 2);
@@ -378,6 +406,7 @@ setInterval(() => {}, 1000);`;
 
     const afterStop = await listMates(config);
     assert.ok(afterStop.every((entry) => entry.status === "stopped"));
+    assert.deepEqual(workspaceLabels(), [], "stopping a mate closes its workspace");
   } finally {
     tryExecSilent("herdr", ["--session", session, "server", "stop"]);
     server.kill("SIGTERM");

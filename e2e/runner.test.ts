@@ -1029,6 +1029,15 @@ void test("runs workers inside live herdr panes in an isolated session, closing 
       panesAfterReap.result.panes.map((pane) => pane.tokens.branch).toSorted(),
       [`c-${crashCard.id}-a1`, `c-${cjkCard.id}-a1`].toSorted(),
     );
+
+    await client.queueCard(crashCard.id, {});
+    await runLoop(client, crashConfig, { once: true });
+    const panesAfterRetry = HerdrPaneListSchema.parse(JSON.parse(herdrExec("pane", "list")));
+    assert.deepEqual(
+      panesAfterRetry.result.panes.map((pane) => pane.tokens.branch).toSorted(),
+      [`c-${crashCard.id}-a2`, `c-${cjkCard.id}-a1`].toSorted(),
+      "a retried card replaces its earlier attempt's pane instead of adding a second one",
+    );
   } finally {
     tryExecSilent(() => {
       herdrExec("server", "stop");

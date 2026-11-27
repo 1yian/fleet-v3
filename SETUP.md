@@ -67,7 +67,6 @@ Wait for the user's answer, then follow the matching branch:
 1. Add `1stmate` with `mode: external` under `mates.items` in `~/.fleet/fleet.yaml`. The bot's platform runs it, so `fleet chat` reports status instead of launching it and `fleet mates up` skips it. `autoStart` defaults to `false` and cannot be `true`. Omit `mode` (or use `mode: local`) for a mate Fleet launches in a terminal.
    ```yaml
    mates:
-     workspace: 2ndmates
      stateDir: ./mates
      items:
        - name: 1stmate

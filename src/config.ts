@@ -58,7 +58,7 @@ const MateItemConfigSchema = z
   }));
 
 const MatesConfigSchema = z.object({
-  workspace: z.string().min(1).default("mates"),
+  workspace: z.string().min(1).optional(),
   session: z.string().min(1).optional(),
   stateDir: z.string().min(1).default("~/.fleet/mates"),
   promptPath: z.string().min(1).optional(),

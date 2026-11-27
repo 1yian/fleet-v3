@@ -12,7 +12,7 @@ Read [VISION.md](VISION.md) for the design principles, [SETUP.md](SETUP.md) for 
 
 - `src/board/` - minimal 3-table `node:sqlite` Card Server (`cards`, `entries`, `events`) + plain-Markdown charters/prefs, HTTP + SSE push, shared wake loop (`wake.ts`), leases with epoch fencing, subtree scoping, dependencies, snooze, and stateless stale-ball chase (`fleet serve`).
 - `src/bin.ts` + `src/cli.ts` + `src/axi/` - the `fleet` AXI CLI (TOON output, content-first home view, `chat`, `doctor`, unified `dispatch` for `2ndmate`s and `crewmates`, `queue`, `snooze`, `watch`, `channel`, `events`, `--version` fast path, strict flag validation, idempotent `close`, `cancel`, and `init`, and opt-in session-start hooks via `axi-sdk-js`).
-- `src/runner/` - `fleet-runner` claiming queued cards for a host, managing git worktrees, `direnv`, container isolation (`docker` on Linux or Apple `container` on macOS), ephemeral interactive `herdr` panes (kept panes of failed workers are closed once their card is done or canceled), process-group timeouts, and 4-round capped `no-mistakes` verification.
+- `src/runner/` - `fleet-runner` claiming queued cards for a host, managing git worktrees, `direnv`, container isolation (`docker` on Linux or Apple `container` on macOS), ephemeral interactive `herdr` panes, process-group timeouts, and 4-round capped `no-mistakes` verification.
 - `src/mates.ts` - `fleet chat`, `fleet doctor`, and `fleet mates` manage `1stmate` (`parent: captain`) and domain `2ndmate`s (`parent: 1stmate`) with launch-command hook injection (`{adapter}`, `{mcpConfig}`, `{prompt}`) and explicit `mode: external` support for webhook bots.
 - `src/adapters/` - thin optional viewports and wake bridges: the Pi/ypi native extension (`pi.ts`), Claude Code native stdio Channel MCP server (`channel.ts`, invoked via `fleet channel`), the MCP Events wake bridge for ChatGPT Dots (`events.ts` and `events-delivery.ts`, served by `fleet events`, events capability only and no tools), and visual Kanban UI (`kanban.ts`, served only by `fleet web`).
 - `prompts/` - always-loaded role prompts for mates and workers (`prompts/mate.md`, `prompts/worker.md` - under 1,000 words total).
@@ -21,9 +21,15 @@ Read [VISION.md](VISION.md) for the design principles, [SETUP.md](SETUP.md) for 
 
 ## Worker names
 
-Each worker gets its own Herdr workspace in the configured session. The workspace label uses the first four ASCII alphanumeric runs from the lowercased card title, joined with hyphens and capped at 40 characters. A title with no ASCII alphanumeric runs falls back to `c-<card-id>`, so `修复登录` on card 19 becomes `c-19`. Permanent mate names are unchanged.
+Each worker gets its own Herdr workspace in the configured session. The workspace label uses the first four ASCII alphanumeric runs from the lowercased card title, joined with hyphens and capped at 40 characters. A title with no ASCII alphanumeric runs falls back to `c-<card-id>`, so `修复登录` on card 19 becomes `c-19`. Permanent mates are long-lived: each local mate gets its own Herdr workspace labeled with the mate name (set `workspace` on a mate or under `mates` to share one), and `fleet mates up` reuses a running pane, restarts an idle shell in place, and closes duplicate tabs. `fleet mates stop` closes the mate's workspace.
 
 The worktree directory and Git branch use `c-<card-id>-a<claim-epoch>`. If that name is already taken by a local branch (or a branch under the same name prefix) or by a worktree directory in the project's managed `worktrees` directory, a short suffix is added to both. Uniqueness covers local refs and local checkout paths only, including boards that share them; remote branches are not consulted. For example, the first claim of card #19, `Restore original worker names today`, opens a Herdr workspace named `restore-original-worker-names` with worktree and branch `c-19-a1`.
+
+## Herdr pane lifecycle
+
+A card has at most one worker workspace at a time. A new attempt closes the panes of every earlier attempt of the same card before it opens its own, so a retried card never leaves two. While a worker runs or verifies, the pane reports `working`. A clean finish, a handoff, a lost lease, an abort, and a superseded attempt all close the pane. Only a crash, a timeout, a failed launch, or a stopped verification keeps the pane, reporting `blocked` with the reason, when `keepPane` is `on-failure`.
+
+The runner reaps stale panes at start, after every claim, and on each idle poll. It closes any pane whose card is done, canceled, waiting, running without a live claim on this runner, or older than the card's newest attempt. Panes of held and queued cards survive until the card moves on.
 
 ## Quick start
 
