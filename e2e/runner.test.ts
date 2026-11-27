@@ -512,6 +512,8 @@ void test("a requeued card runs its next attempt in its own workspace while the 
   }
 });
 
+const parseArgv = (line: string): string[] => z.array(z.string()).parse(JSON.parse(line));
+
 const GATE_OUTPUT = [
   "gate: review",
   "findings[3]{id,severity,file,line,action,description}:",
@@ -565,9 +567,9 @@ void test("caps no-mistakes verification at 4 rounds and hands back to mate with
 
     const calls = readFileSync(argvLog, "utf8").trim().split("\n");
     assert.equal(calls.length, 4);
-    assert.equal((JSON.parse(calls[0] ?? "") as string[])[0], "--intent");
+    assert.equal(parseArgv(calls[0] ?? "")[0], "--intent");
     for (const call of calls.slice(1)) {
-      assert.deepEqual(JSON.parse(call), [
+      assert.deepEqual(parseArgv(call), [
         "--action",
         "fix",
         "--findings",
@@ -620,8 +622,8 @@ void test("a review gate is answered with finding IDs until the run passes, and 
     const calls = readFileSync(argvLog, "utf8")
       .trim()
       .split("\n")
-      .map((call): unknown => JSON.parse(call));
-    assert.equal((calls[0] as string[])[0], "--intent");
+      .map((call) => parseArgv(call));
+    assert.equal(calls[0]?.[0], "--intent");
     assert.deepEqual(calls.slice(1), [
       ["--action", "fix", "--findings", "r1,r2", "--ignore", "r3"],
       ["--action", "approve"],
