@@ -79,18 +79,27 @@ Wait for the user's answer, then follow the matching branch:
    fleet charter 1stmate --set "You are 1stmate (parent: captain). Handle quick work inline, delegate domain work to 2ndmates, or dispatch crewmates."
    fleet doctor
    ```
-3. **Choose Option A (CLI, preferred) vs. Option B (MCP fallback):**
-   - If the bot has shell access on a machine that can reach `BOARD_URL`, prefer **Option A (`fleet` CLI)** and do not expose `fleet mcp --http`.
-   - If the bot has **no shell access**, start `fleet mcp --http --host <reachable-ip> --port 4102` on the Control Host (with `BOARD_URL` kept private on the Control Host) and install its persistence service from **Reference A**.
+3. **Choose how the bot is woken.** Every external bot acts through the `fleet` CLI, so it needs `fleet` on `PATH` and a `BOARD_URL` it can reach. Only the wake path differs:
+   - **Webhook bots (Grok Bot, Muse, any bot with an inbound webhook):** run `fleet watch --mate 1stmate --webhook <url>` on the Control Host.
+   - **ChatGPT Dots (or any MCP Events client):** run `fleet events --mate 1stmate` on the Control Host and publish it through a public HTTPS tunnel. A Dot runs its shell in OpenAI's cloud, so give it the `fleet` CLI by connecting your own computer to the Dot (ChatGPT desktop app, dot profile, Computers, Allow) so `fleet` runs there with the local `BOARD_URL`. See [`EXTERNAL_BOT.md`](EXTERNAL_BOT.md) section 4 before exposing anything.
 4. **Wire the bot:**
-   - If **you are the external bot itself** running on the Control Host, read and execute [`EXTERNAL_BOT.md`](EXTERNAL_BOT.md) directly (create/configure the `1stmate` bot, create its inbound webhook, and run `fleet watch` below) without asking the captain to copy-paste.
+   - If **you are the external bot itself** running on the Control Host, read and execute [`EXTERNAL_BOT.md`](EXTERNAL_BOT.md) directly (create/configure the `1stmate` bot and its wake path) without asking the captain to copy-paste.
    - Otherwise, hand the captain this single ready-to-paste prompt (for Grok Bot, explicitly instructing it to create a dedicated `1stmate` bot):
-     > Read `https://github.com/1yian/fleet-v3/blob/main/EXTERNAL_BOT.md` and create a dedicated `1stmate` bot for Fleet (`mate: 1stmate`). Prefer the `fleet` CLI if you have shell access (Option A, `BOARD_URL: <board-url>`), otherwise connect via MCP only (Option B, `http://<reachable-ip>:4102/mcp?mate=1stmate`). Return the incoming webhook URL and auth header when ready.
+     > Read `https://github.com/1yian/fleet-v3/blob/main/EXTERNAL_BOT.md` and create a dedicated `1stmate` bot for Fleet (`mate: 1stmate`). Use the `fleet` CLI for every action (`BOARD_URL: <board-url>`). Return the incoming webhook URL and auth header when ready (or, for a Dot, subscribe to the `card.wake` event of the Fleet events plugin).
 5. Once the bot returns its webhook URL (and optional auth header), start `fleet watch` (and install its persistence service from **Reference A**):
+
    ```bash
    fleet watch --mate 1stmate --webhook https://bot.example.com/wake --header "Authorization: Bearer <token>"
    ```
+
    _(Or bare `fleet watch --mate 1stmate` if the bot consumes NDJSON lines on stdout.)_
+
+   For a Dot, start the events endpoint instead (and install its persistence service from **Reference A**), then publish it through your HTTPS tunnel:
+
+   ```bash
+   FLEET_EVENTS_TOKEN="$(openssl rand -hex 24)" fleet events --mate 1stmate --port 4102
+   ```
+
 6. Smoke-test `1stmate`:
    ```bash
    fleet dispatch --mate 1stmate --title "Smoke test: reply ok and close this card"
@@ -207,7 +216,7 @@ Now ask ONE question:
   3. **Grok Bot (or other multi-bot external platform) `2ndmate`s:**
      - Never install any bot app locally. Set `mode: external` on that mate in `~/.fleet/fleet.yaml` (so `fleet mates up` skips it).
      - Hand the captain a ready-to-paste prompt explicitly instructing Grok Bot to **create another separate bot** for that domain (or if you are Grok Bot running on the host, create the separate bot directly):
-       > Read `https://github.com/1yian/fleet-v3/blob/main/EXTERNAL_BOT.md` and create a new separate bot for my `<name>` secondmate (`mate: <name>`, `parent: 1stmate`, domain: `<domain>`). Prefer the `fleet` CLI if you have shell access (Option A, `BOARD_URL: <board-url>`), otherwise connect via MCP only (Option B, `http://<reachable-ip>:4102/mcp?mate=<name>`). Return its incoming webhook URL and auth header when ready.
+       > Read `https://github.com/1yian/fleet-v3/blob/main/EXTERNAL_BOT.md` and create a new separate bot for my `<name>` secondmate (`mate: <name>`, `parent: 1stmate`, domain: `<domain>`). Use the `fleet` CLI for every action (`BOARD_URL: <board-url>`). Return its incoming webhook URL and auth header when ready.
      - Wire a dedicated `fleet watch --mate <name> --webhook <bot-webhook-url> [--header "..."]` service (with persistence from **Reference A**) once the bot returns its webhook URL.
   4. Finish with `fleet doctor` and a concise summary of running services and commands.
 
@@ -222,7 +231,7 @@ Create `~/Library/LaunchAgents/dev.fleet.board.plist` using the template below. 
 - `dev.fleet.board.plist`: Label `dev.fleet.board`, args `["/Users/YOU/.local/bin/fleet", "serve"]`, log `~/.fleet/logs/board.log`
 - `dev.fleet.runner.plist`: Label `dev.fleet.runner`, args `["/Users/YOU/.local/bin/fleet", "run"]`, log `~/.fleet/logs/runner.log`
 - `dev.fleet.kanban.plist`: Label `dev.fleet.kanban`, args `["/Users/YOU/.local/bin/fleet", "web", "--host", "<ip>", "--port", "4101"]`, log `~/.fleet/logs/kanban.log`
-- `dev.fleet.mcp.plist` (Option B shell-free bots only): Label `dev.fleet.mcp`, args `["/Users/YOU/.local/bin/fleet", "mcp", "--http", "--host", "<ip>", "--port", "4102"]`, log `~/.fleet/logs/mcp.log`
+- `dev.fleet.events-<mate>.plist` (ChatGPT Dots only): Label `dev.fleet.events-<mate>`, args `["/Users/YOU/.local/bin/fleet", "events", "--mate", "<mate>", "--port", "4102"]`, an extra `FLEET_EVENTS_TOKEN` entry in `EnvironmentVariables`, log `~/.fleet/logs/events-<mate>.log`
 - `dev.fleet.watch-<mate>.plist` (external webhook bots only): Label `dev.fleet.watch-<mate>`, args `["/Users/YOU/.local/bin/fleet", "watch", "--mate", "<mate>", "--webhook", "<url>"]`, log `~/.fleet/logs/watch-<mate>.log`
 
 ```xml
@@ -253,11 +262,11 @@ Create `~/Library/LaunchAgents/dev.fleet.board.plist` using the template below. 
 </plist>
 ```
 
-Make sure `PATH` includes the directory printed by `dirname "$(which node)"`. Load with `launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/<label>.plist` (start `board` before `runner`, `kanban`, `mcp`, and `watch`).
+Make sure `PATH` includes the directory printed by `dirname "$(which node)"`. Load with `launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/<label>.plist` (start `board` before `runner`, `kanban`, `events`, and `watch`).
 
 ### Linux (`systemd --user`)
 
-Create `~/.config/systemd/user/fleet-board.service` (and matching units for `fleet-runner.service`, optional `fleet-mcp.service`, and `fleet-watch-<mate>.service` with `After=fleet-board.service`):
+Create `~/.config/systemd/user/fleet-board.service` (and matching units for `fleet-runner.service`, optional `fleet-events-<mate>.service`, and `fleet-watch-<mate>.service` with `After=fleet-board.service`):
 
 ```ini
 [Unit]
