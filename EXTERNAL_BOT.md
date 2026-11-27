@@ -21,7 +21,7 @@ Ask the captain only for anything missing from their message:
 
 Then create or configure a dedicated bot instance for that mate:
 
-1. **System instructions:** save the short pointer from [grok-bot-pointers.md](templates/grok-bot-pointers.md) (filled in with your mate name, parent, domain, and env script) as both your profile and your webhook routine prompt. The pointer sends you to the [Grok Bot template](templates/grok-bot.md) and the shared prompt on `main`, which you load on every wake. Other bot platforms can use the same pointer and template.
+1. **System instructions:** save the short pointer from the [pointer template](templates/grok-bot-pointers.md) (filled in with your mate name, parent, domain, and env script; the filled-in text stays in the captain's private configuration, not in this repo) as both your profile and your webhook routine prompt. The pointer sends you to the [Grok Bot template](templates/grok-bot.md) and the shared prompt on `main`, which you load on every wake. Other bot platforms can use the same pointer and template.
 2. **Identity & board config:** create a bot-local file `fleet-<mate>.env` in the working directory of the machine where the bot runs `fleet`, containing `export FLEET_MATE=<mate>` and `export BOARD_URL=<url>`.
 3. **Domain charter & preferences:** at startup (or when checking context), read your charter and the captain's preferences with `fleet charter <mate>` and `fleet prefs`.
 
@@ -71,7 +71,7 @@ Every wake arrives as `POST <webhook-url>` with `Content-Type: application/json`
 }
 ```
 
-Pass the webhook body's `notice` and `cardId` (if present) to the bot and return HTTP `2xx` once the wake is accepted. Use the pointer from [grok-bot-pointers.md](templates/grok-bot-pointers.md) as the routine prompt.
+Pass the webhook body's `notice` and `cardId` (if present) to the bot and return HTTP `2xx` once the wake is accepted. Use the filled-in pointer as the routine prompt.
 
 _(If your bot runs on the same host and consumes a local stream instead of HTTP webhooks, run bare `fleet watch --mate <mate>` to receive the same JSON envelope as NDJSON lines on stdout.)_
 

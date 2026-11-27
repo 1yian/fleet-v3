@@ -92,7 +92,7 @@ Wait for the user's answer, then follow the matching branch:
    fleet watch --mate 1stmate --webhook https://bot.example.com/wake --header "Authorization: Bearer <token>"
    ```
 
-   _(Or bare `fleet watch --mate 1stmate` if the bot consumes NDJSON lines on stdout.)_ Use the matching [pointer](templates/grok-bot-pointers.md) as each mate's profile and wake routine prompt.
+   _(Or bare `fleet watch --mate 1stmate` if the bot consumes NDJSON lines on stdout.)_ Fill in the [pointer template](templates/grok-bot-pointers.md) for each mate and keep the filled-in text in your private configuration, not in the repo.
 
    For a Dot, start the events endpoint instead (and install its persistence service from **Reference A**), then publish it through your HTTPS tunnel:
 
@@ -100,11 +100,11 @@ Wait for the user's answer, then follow the matching branch:
    FLEET_EVENTS_TOKEN="$(openssl rand -hex 24)" fleet events --mate 1stmate --port 4102
    ```
 
-6. Smoke-test `1stmate`:
+6. Smoke-test the mate you just set up (`<mate>` is its configured name):
    ```bash
-   fleet dispatch --mate 1stmate --title "Smoke test: reply ok and close this card"
+   fleet dispatch --mate <mate> --title "Smoke test: reply ok and close this card"
    ```
-   Read the printed card ID, wait for `1stmate` to reply and close it, and confirm `state: done` with `fleet view <card-id> --full`.
+   Read the printed card ID, wait for `<mate>` to reply and close it, and confirm `state: done` with `fleet view <card-id> --full`.
 
 ### Branch B: Coding harness (`ypi`, stock `pi`, or Claude Code)
 
@@ -193,7 +193,7 @@ Wait for the user's answer, then:
      Install `fleet` on the remote host (same clone + `bun install` + symlink), verify `curl -sf http://127.0.0.1:4100/api/health`, and write its `~/.fleet/fleet.yaml` with its unique `host:` name and project remotes under `repos:`.
 4. Start `fleet run` on each execution host (with `launchd` or `systemd` persistence from **Reference A**), verify `fleet hosts` lists every host, and smoke-test a real crewmate worktree run:
    ```bash
-   FLEET_MATE=1stmate fleet dispatch --project <repo> --host <host> --delivery local --title "Smoke test: print git status and exit cleanly"
+   FLEET_MATE=<mate> fleet dispatch --project <repo> --host <host> --delivery local --title "Smoke test: print git status and exit cleanly"
    ```
    Wait for the runner to claim and finish that exact card ID, and confirm completion with `fleet view <card-id> --full`.
 
