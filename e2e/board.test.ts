@@ -1029,3 +1029,88 @@ void test("a startup subscription keeps its replay cursor and still gets the ini
     await server.stop();
   }
 });
+
+void test("captain-wait snoozes need the top-level mate and a structured reason, while external snoozes stay free-form", async () => {
+  const now = 1_700_000_000_000;
+  const server = await startTestServer({
+    parents: { boss: "captain", cleo: "boss" },
+    now: () => now,
+  });
+  const { client } = server;
+
+  try {
+    const blocker = await client.createCard({ mate: "boss", title: "Pick vendor" });
+    const doomed = await client.createCard({ mate: "boss", title: "Doomed prerequisite" });
+    const dependent = await client.createCard({
+      mate: "boss",
+      title: "Sign contract",
+      needs: [blocker.id, doomed.id],
+    });
+    assert.equal(dependent.state, "waiting");
+    const escalated = await client.escalateCard(blocker.id, { reason: "Needs the captain" });
+    assert.equal(escalated.holder, "captain");
+    await client.cancelCard(doomed.id, { reason: "Obsolete", actor: "boss" });
+    const heldThread = await client.getThread(dependent.id);
+    assert.equal(heldThread.card.state, "held");
+    assert.equal(heldThread.card.holder, "boss");
+
+    await assert.rejects(
+      () => client.snoozeCard(dependent.id, { until: now + 60_000, actor: "boss" }),
+      rejectsWith(400, "captain_wait_reason_required"),
+      "a card tied to an open captain-held card needs a structured reason",
+    );
+    await assert.rejects(
+      () =>
+        client.snoozeCard(dependent.id, {
+          until: now + 60_000,
+          actor: "boss",
+          reason: "just waiting",
+        }),
+      rejectsWith(400, "captain_wait_reason_required"),
+      "free-text alone is not a captain-wait reason",
+    );
+    const deferred = await client.snoozeCard(dependent.id, {
+      until: now + 60_000,
+      actor: "boss",
+      captainWait: { kind: "captain-deferred", cite: "ask me later" },
+    });
+    assert.equal(deferred.snoozeUntil, now + 60_000);
+    const thread = await client.getThread(dependent.id);
+    assert.ok(
+      thread.entries.some((entry) => entry.text.includes("[captain-deferred: ask me later]")),
+      "the thread records the cited captain words",
+    );
+
+    const declared = await client.createCard({ mate: "boss", title: "Quarterly plan" });
+    const dependsOn = await client.snoozeCard(declared.id, {
+      until: now + 60_000,
+      actor: "boss",
+      captainWait: { kind: "depends-on", cite: `#${blocker.id}` },
+    });
+    assert.equal(dependsOn.snoozeUntil, now + 60_000);
+
+    const childCard = await client.createCard({ mate: "cleo", title: "Child plan", actor: "boss" });
+    await assert.rejects(
+      () =>
+        client.snoozeCard(childCard.id, {
+          until: now + 60_000,
+          actor: "cleo",
+          captainWait: { kind: "captain-deferred", cite: "ask me later" },
+        }),
+      (err: unknown) =>
+        rejectsWith(403, "captain_wait_forbidden")(err) &&
+        err instanceof Error &&
+        err.message.includes(`fleet escalate ${childCard.id}`) &&
+        err.message.includes("boss"),
+      "a non-top-level mate is told to escalate to its parent",
+    );
+    const external = await client.snoozeCard(childCard.id, {
+      until: now + 60_000,
+      actor: "cleo",
+      reason: "Waiting on Stripe support",
+    });
+    assert.equal(external.snoozeUntil, now + 60_000, "external-party snoozes are unchanged");
+  } finally {
+    await server.stop();
+  }
+});

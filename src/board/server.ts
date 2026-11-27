@@ -5,6 +5,7 @@ import type { CardStore } from "./store.ts";
 import {
   BoardError,
   CARD_STATES,
+  CaptainWaitSchema,
   DELIVERIES,
   HolderFilterSchema,
   HolderNameSchema,
@@ -117,6 +118,7 @@ const SnoozeBodySchema = z.object({
   ...FenceFields,
   until: z.number().int().positive(),
   reason: z.string().optional(),
+  captainWait: CaptainWaitSchema.optional(),
   actor: z.string().min(1).optional(),
 });
 
@@ -409,6 +411,7 @@ async function handleSnoozeCard(
       ...fenceOf(body),
       until: body.until,
       ...(body.reason !== undefined ? { reason: body.reason } : {}),
+      ...(body.captainWait !== undefined ? { captainWait: body.captainWait } : {}),
       ...(body.actor !== undefined ? { actor: body.actor } : {}),
     }),
   });

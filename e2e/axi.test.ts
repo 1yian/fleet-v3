@@ -486,6 +486,14 @@ void test("mate CLI defaults dispatch --mate to self, scopes reads to subtree, a
     assert.equal(snoozed.exitCode, 0);
     assert.match(snoozed.out, /snoozeUntil:/u);
 
+    const captainWait = await captureCli(
+      ["snooze", "1", "--for", "15m", "--captain-deferred", "ask me later"],
+      url,
+      "cleo",
+    );
+    assert.equal(captainWait.exitCode, 1);
+    assert.match(captainWait.out, /fleet escalate 1/u);
+
     const viewed = await captureCli(["view", "1"], url, "cleo");
     assert.equal(viewed.exitCode, 0);
     assert.match(viewed.out, /snoozeUntil:/u);

@@ -261,9 +261,16 @@ export interface CancelCardInput extends OptionalFenceInput {
   readonly actor?: string;
 }
 
+export const CaptainWaitSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("captain-deferred"), cite: z.string().trim().min(1) }),
+  z.object({ kind: z.literal("depends-on"), cite: z.string().trim().min(1) }),
+]);
+type CaptainWait = z.infer<typeof CaptainWaitSchema>;
+
 export interface SnoozeCardInput extends OptionalFenceInput {
   readonly until: number;
   readonly reason?: string;
+  readonly captainWait?: CaptainWait;
   readonly actor?: string;
 }
 
