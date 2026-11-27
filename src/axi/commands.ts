@@ -8,7 +8,7 @@ import {
   uninstallSessionStartHooks,
   type SessionStartHookScope,
 } from "axi-sdk-js";
-import { askCaptain, showAsk } from "../board/ask.ts";
+import { askCaptain, nextCaptainDecision } from "../board/ask.ts";
 import { createHttpBoardClient, type BoardClient } from "../board/client.ts";
 import {
   CARD_STATES,
@@ -87,21 +87,31 @@ Examples:
   fleet dispatch --mate cleo --title "Investigate recent conversion drop"
   fleet dispatch --project Cleo --host p620 --title "Fix webhook timeout"
   fleet dispatch --project Cleo --title "Fix webhook timeout"   (uses defaultHost)`,
-  ask: `fleet ask - put a question or decision to the captain as a captain-held card, or re-show an open one
+  ask: `fleet ask - put a question or decision to the captain as a captain-held card
 Usage:
-  fleet ask --title "<question>" --brief "<decision brief>" [--mate <name>]
-  fleet ask <id>
+  fleet ask --title "<ask>" --evidence "<text>" --consequence "<text>" --recommendation "<text>" [--mate <name>]
 Flags:
-  --title <text>     Required one-line question
-  --brief <text>     Required decision brief: context, options, and your recommendation
-  --mate <name>      Asking mate (defaults to $FLEET_MATE)
+  --title <text>           Required one-line ask the captain must answer
+  --evidence <text>        Required facts the decision rests on
+  --consequence <text>     Required what happens depending on the answer
+  --recommendation <text>  Required your recommended answer
+  --mate <name>            Asking mate (defaults to $FLEET_MATE)
 Notes:
   The card is held by the captain, so \`fleet cards --holder captain\` lists everything that awaits the captain.
-  The command returns the chat text to show the captain. Run \`fleet ask <id>\` each time you show an open ask again; it records the showing on the card thread.
+  The command never produces chat text. Run \`fleet captain next\` to get the decision brief to relay to the captain.
   Record the captain's reply with \`fleet answer <id> --text "<answer>"\`, which closes the card.
 Examples:
-  fleet ask --title "Ship the pricing change?" --brief "Context... Options: A, B. Recommend A."
-  fleet ask 42`,
+  fleet ask --title "Ship the pricing change?" --evidence "Churn is up 4%" --consequence "A ships Monday, B delays a week" --recommendation "A"`,
+  captain: `fleet captain - produce the captain-facing decision text
+Usage:
+  fleet captain next
+Notes:
+  Prints plain text: exactly one decision brief (evidence, consequence, recommendation, ask) from the cards the captain holds in your subtree, then \`+N more waiting\` when others remain.
+  Cards never shown come first, otherwise the least recently shown. Each showing is recorded as an internal entry on that card's thread.
+  Relay the output to the captain verbatim. Do not rewrite, summarize, or add to it.
+  Record the captain's reply with \`fleet answer <id> --text "<answer>"\`.
+Examples:
+  fleet captain next`,
   queue: `fleet queue - put a held card in the runner queue for a worker (resets retry attempts on held cards)
 Usage:
   fleet queue <id> [--project <repo>] [--host <host>] [--delivery <mode>]
@@ -538,34 +548,53 @@ export async function askCommand(
     {
       mate: { type: "string" },
       title: { type: "string" },
-      brief: { type: "string" },
+      evidence: { type: "string" },
+      consequence: { type: "string" },
+      recommendation: { type: "string" },
     },
     helpBlock,
   );
-  const [id] = parsed.positionals;
-  if (id !== undefined) {
-    const shown = await showAsk(active.board(), id, active.actor);
-    return {
-      card: { id: shown.card.id, holder: shown.card.holder, title: shown.card.title },
-      chatText: shown.chatText,
-    };
-  }
   const mate = stringFlag(parsed.values, "mate") ?? scopeOf(active) ?? "";
   const title = stringFlag(parsed.values, "title") ?? "";
-  const brief = stringFlag(parsed.values, "brief") ?? "";
-  if (mate.length === 0 || title.length === 0 || brief.length === 0) {
+  const evidence = stringFlag(parsed.values, "evidence") ?? "";
+  const consequence = stringFlag(parsed.values, "consequence") ?? "";
+  const recommendation = stringFlag(parsed.values, "recommendation") ?? "";
+  if (
+    [mate, title, evidence, consequence, recommendation].some((value) => value.trim().length === 0)
+  ) {
     throw new AxiError(
-      "--title and --brief are required (and --mate when asking as captain), or pass an ask <id> to show it again",
+      "--title, --evidence, --consequence, and --recommendation are required (and --mate when asking as captain)",
       "VALIDATION_ERROR",
       [helpBlock],
     );
   }
-  const asked = await askCaptain(active.board(), { mate, title, brief });
+  const card = await askCaptain(active.board(), {
+    mate,
+    title,
+    evidence,
+    consequence,
+    recommendation,
+  });
   return {
-    card: { id: asked.card.id, holder: asked.card.holder, title: asked.card.title },
-    chatText: asked.chatText,
-    help: [`Record the captain's reply with \`fleet answer ${asked.card.id} --text "<answer>"\``],
+    card: { id: card.id, holder: card.holder, title: card.title },
+    help: ["Run `fleet captain next` to get the decision brief to relay to the captain"],
   };
+}
+
+export async function captainCommand(
+  args: string[],
+  ctx: FleetAxiContext | undefined,
+): Promise<string> {
+  const active = requireBoard(ctx);
+  const helpBlock = COMMAND_HELP["captain"] ?? "";
+  const parsed = parseStrictFlags("captain", args, {}, helpBlock);
+  if (parsed.positionals.length !== 1 || parsed.positionals[0] !== "next") {
+    throw new AxiError("`captain` takes exactly one subcommand: next", "VALIDATION_ERROR", [
+      helpBlock,
+    ]);
+  }
+  const decision = await nextCaptainDecision(active.board(), active.actor, scopeOf(active));
+  return decision === null ? "No decisions waiting for the captain" : decision.text;
 }
 
 export async function queueCommand(

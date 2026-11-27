@@ -607,47 +607,102 @@ void test("defaultHost in fleet.yaml fills a missing --host for dispatch and que
   }
 });
 
-void test("fleet ask makes every captain question a captain-held card whose answer closes it and wakes the asker", async () => {
+function askArgs(title: string, evidence: string): string[] {
+  return [
+    "ask",
+    "--title",
+    title,
+    "--evidence",
+    evidence,
+    "--consequence",
+    "A ships Monday, B slips a week",
+    "--recommendation",
+    "A",
+  ];
+}
+
+void test("fleet captain next relays exactly one decision brief by rotation and records each showing", async () => {
   const server = await startTestServer({ parents: { jarvis: "captain", cleo: "jarvis" } });
   const { client, url } = server;
 
   try {
+    const empty = await captureCli(["captain", "next"], url, "jarvis");
+    assert.equal(empty.exitCode, 0);
+    assert.match(empty.out, /No decisions waiting/u);
+
     const asked = await captureCli(
-      [
-        "ask",
-        "--title",
-        "Ship the pricing change?",
-        "--brief",
-        "Context: churn is up. Options: A, B. Recommend A.",
-      ],
+      askArgs("Ship the pricing change?", "Churn is up 4%"),
       url,
       "jarvis",
     );
     assert.equal(asked.exitCode, 0);
     assert.match(asked.out, /holder: captain/u);
-    assert.match(asked.out, /Decision #1 - Ship the pricing change\?/u);
-    assert.match(asked.out, /Recommend A\./u);
+    assert.ok(!asked.out.includes("Decision #"), "ask never produces chat text");
+    await captureCli(askArgs("Rotate the API key?", "Key is 400 days old"), url, "jarvis");
+    await captureCli(askArgs("Drop the legacy endpoint?", "No traffic in 30 days"), url, "cleo");
+
+    const missing = await captureCli(["ask", "--title", "Incomplete?"], url, "jarvis");
+    assert.equal(missing.exitCode, 2);
+    assert.match(missing.out, /--evidence/u);
 
     const awaiting = await captureCli(["cards", "--holder", "captain"], url);
     assert.match(awaiting.out, /Ship the pricing change\?/u);
     const awaitingOverview = await client.getOverview();
-    assert.equal(awaitingOverview.counts.needsCaptain, 1);
+    assert.equal(awaitingOverview.counts.needsCaptain, 3);
 
-    const shown = await captureCli(["ask", "1"], url, "jarvis");
-    assert.equal(shown.exitCode, 0);
-    assert.match(shown.out, /Recommend A\./u);
+    const first = await captureCli(["captain", "next"], url, "jarvis");
+    assert.equal(first.exitCode, 0);
+    assert.match(first.out, /Decision #1 from jarvis/u);
+    assert.match(first.out, /Evidence: Churn is up 4%/u);
+    assert.match(first.out, /Consequence: A ships Monday, B slips a week/u);
+    assert.match(first.out, /Recommendation: A/u);
+    assert.match(first.out, /Ask: Ship the pricing change\?/u);
+    assert.match(first.out, /\+2 more waiting/u);
+    assert.ok(!first.out.includes("Rotate the API key?"), "only one decision per showing");
+
+    const second = await captureCli(["captain", "next"], url, "jarvis");
+    assert.match(second.out, /Decision #2 from jarvis/u);
+    assert.match(second.out, /\+2 more waiting/u);
+    const third = await captureCli(["captain", "next"], url, "jarvis");
+    assert.match(third.out, /Decision #3 from cleo/u);
+
+    const rotated = await captureCli(["captain", "next"], url, "jarvis");
+    assert.match(rotated.out, /Decision #1 from jarvis/u);
+
+    const newcomer = await captureCli(
+      askArgs("Hire a contractor?", "Backlog is 40 cards"),
+      url,
+      "jarvis",
+    );
+    assert.equal(newcomer.exitCode, 0);
+    const fresh = await captureCli(["captain", "next"], url, "jarvis");
+    assert.match(fresh.out, /Decision #4 from jarvis/u);
+    assert.match(fresh.out, /\+3 more waiting/u);
+
+    const scoped = await captureCli(["captain", "next"], url, "cleo");
+    assert.match(scoped.out, /Decision #3 from cleo/u);
+    assert.ok(!scoped.out.includes("more waiting"), "cleo only sees its own subtree");
+
     const thread = await client.getThread("1");
     assert.deepEqual(
-      thread.entries.map((entry) => [entry.kind, entry.internal, entry.text]),
+      thread.entries.map((entry) => [entry.kind, entry.internal]),
       [
-        ["ask", false, "Context: churn is up. Options: A, B. Recommend A."],
-        ["status", true, "Shown to captain"],
+        ["ask", false],
+        ["status", true],
+        ["status", true],
       ],
     );
+    assert.equal(thread.entries[1]?.text, "Shown to captain");
 
-    const notCaptainAsk = await client.createCard({ mate: "cleo", title: "Plain card" });
-    const rejected = await captureCli(["ask", notCaptainAsk.id], url, "cleo");
-    assert.match(rejected.out, /not an open captain ask/u);
+    const escalated = await client.createCard({
+      mate: "cleo",
+      title: "Approve the refund policy?",
+    });
+    await client.escalateCard(escalated.id, { actor: "cleo", reason: "Refunds exceed budget" });
+    await client.escalateCard(escalated.id, { actor: "jarvis", reason: "Needs captain call" });
+    const escalatedShown = await captureCli(["captain", "next"], url, "jarvis");
+    assert.match(escalatedShown.out, /Decision #5 from cleo/u);
+    assert.match(escalatedShown.out, /Evidence: Needs captain call/u);
 
     const watch = watchEvents(client, { holder: "jarvis", after: await client.latestEventId() });
     const answered = await captureCli(["answer", "1", "--text", "Go with A"], url);
@@ -658,10 +713,13 @@ void test("fleet ask makes every captain question a captain-held card whose answ
     const wake = watch.events.find((e) => e.type === "card.answered");
     assert.equal(wake?.payload["text"], "Go with A");
 
-    const after = await captureCli(["cards", "--holder", "captain"], url);
-    assert.match(after.out, /0 open cards found/u);
     const settledOverview = await client.getOverview();
-    assert.equal(settledOverview.counts.needsCaptain, 0);
+    assert.equal(settledOverview.counts.needsCaptain, 4);
+    const afterAnswer = await captureCli(["captain", "next"], url, "jarvis");
+    assert.ok(
+      !afterAnswer.out.includes("Ship the pricing change?"),
+      "answered ask leaves rotation",
+    );
     const closed = await client.getThread("1");
     assert.equal(closed.card.state, "done");
     assert.equal(closed.card.result, "Go with A");
