@@ -2,7 +2,7 @@
 
 Each Grok Bot mate saves one short, stable pointer as both its profile and its webhook routine prompt. The pointer never changes when Fleet's instructions change, because the instructions live in [grok-bot.md](grok-bot.md) and the shared prompt it links, at `main`.
 
-The captain approves the one-time switch in each bot's own chat by pasting the matching block below and telling the bot to save it as its profile and as its webhook routine prompt, replacing what it has now. The bot keeps its existing Fleet environment or MCP connection and webhook endpoint.
+The captain approves the one-time switch in each bot's own chat by pasting the matching block below and telling the bot to save it as its profile and as its webhook routine prompt, replacing what it has now. The bot keeps its existing Fleet environment and webhook endpoint.
 
 ## Generic pointer
 
