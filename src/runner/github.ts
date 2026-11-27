@@ -1,8 +1,10 @@
 import { execFile } from "node:child_process";
 import { z } from "zod";
 import type { BoardClient } from "../board/client.ts";
+import { isPullRequestMerged } from "../board/pullrequests.ts";
 import { BoardError, runnerActor, type Card, type CloseCardInput } from "../board/types.ts";
 
+const GH_VERIFY_TIMEOUT_MS = 30_000;
 const PR_FIELDS = "url,state,statusCheckRollup";
 const PASSING_CONCLUSIONS: ReadonlySet<string> = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 
@@ -80,11 +82,8 @@ export async function closeCardVerified(
 ): Promise<Card> {
   const { card } = await client.getThread(id);
   if (card.pr === null || card.state === "done") return client.closeCard(id, input);
-  const pullRequest = await viewPullRequest(card.pr);
-  return client.closeCard(id, {
-    ...input,
-    ...(pullRequest.state === "MERGED" ? { merged: true } : {}),
-  });
+  const merged = await isPullRequestMerged(card.pr, AbortSignal.timeout(GH_VERIFY_TIMEOUT_MS));
+  return client.closeCard(id, { ...input, ...(merged ? { merged } : {}) });
 }
 
 export async function cancelCardWithPullRequest(
@@ -115,8 +114,7 @@ export async function closeMergedPullRequestCards(
   const { cards } = await client.listCards({ state: "held" });
   for (const card of cards) {
     if (card.pr === null || card.project === null || !projects.has(card.project)) continue;
-    const pullRequest = await viewPullRequest(card.pr).catch(() => undefined);
-    if (pullRequest?.state !== "MERGED") continue;
+    if (!(await isPullRequestMerged(card.pr, AbortSignal.timeout(GH_VERIFY_TIMEOUT_MS)))) continue;
     await client
       .closeCard(card.id, {
         merged: true,

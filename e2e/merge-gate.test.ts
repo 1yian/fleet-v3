@@ -39,7 +39,10 @@ const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(log)}, args.join(" ") + "\\n");
 if (args[1] === "list") process.stdout.write("[" + (process.env.FAKE_GH_PR ?? "") + "]");
-if (args[1] === "view") process.stdout.write(process.env.FAKE_GH_PR ?? "{}");
+if (args[1] === "view") {
+  const pr = JSON.parse(process.env.FAKE_GH_PR ?? "{}");
+  process.stdout.write(args.includes("--jq") ? String(pr.state) : JSON.stringify(pr));
+}
 `,
   );
   chmodSync(join(bin, "gh"), 0o755);
