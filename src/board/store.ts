@@ -1397,6 +1397,29 @@ export class CardStore {
     });
   }
 
+  private guardCaptainWait(row: CardRow, actor: string, input: SnoozeCardInput): void {
+    const waitsOnCaptain =
+      input.captainWait !== undefined ||
+      this.waitsOnCaptain(StringArraySchema.parse(JSON.parse(row.needs_json)));
+    if (!waitsOnCaptain) {
+      return;
+    }
+    if (!this.isTopLevelMate(actor)) {
+      throw new BoardError(
+        403,
+        "captain_wait_forbidden",
+        `Card #${String(row.id)} is waiting on the captain; only the top-level mate can snooze a captain wait. Escalate it to your parent (${this.parentOf(actor)}) with \`fleet escalate ${String(row.id)}\` instead of snoozing it`,
+      );
+    }
+    if (input.captainWait === undefined) {
+      throw new BoardError(
+        400,
+        "captain_wait_reason_required",
+        `Card #${String(row.id)} is waiting on the captain; snooze it with --captain-deferred "<captain's words>" or --depends-on <card or PR>`,
+      );
+    }
+  }
+
   public snoozeCard(rawId: string, input: SnoozeCardInput): Card {
     const id = parseCardId(rawId);
     return this.runTransaction(() => {
@@ -1443,23 +1466,7 @@ export class CardStore {
           "cards held by the captain can be snoozed for at most 2h at a time",
         );
       }
-      const waitsOnCaptain =
-        input.captainWait !== undefined ||
-        this.waitsOnCaptain(StringArraySchema.parse(JSON.parse(row.needs_json)));
-      if (waitsOnCaptain && !this.isTopLevelMate(actor)) {
-        throw new BoardError(
-          403,
-          "captain_wait_forbidden",
-          `Card #${String(id)} is waiting on the captain; only the top-level mate can snooze a captain wait. Escalate it to your parent (${this.parentOf(actor)}) with \`fleet escalate ${String(id)}\` instead of snoozing it`,
-        );
-      }
-      if (waitsOnCaptain && input.captainWait === undefined) {
-        throw new BoardError(
-          400,
-          "captain_wait_reason_required",
-          `Card #${String(id)} is waiting on the captain; snooze it with --captain-deferred "<captain's words>" or --depends-on <card or PR>`,
-        );
-      }
+      this.guardCaptainWait(row, actor, input);
       const reason = input.reason?.trim() ?? "";
       this.db.prepare("UPDATE cards SET snooze_until = ? WHERE id = ?").run(input.until, id);
       const untilIso = new Date(input.until).toISOString();
