@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit",
     "knip": "knip --treat-config-hints-as-errors",
     "deps": "depcruise src e2e",
-    "test:e2e": "node --test e2e/*.test.ts",
+    "test:e2e": "node --import ./e2e/clean-env.ts --test e2e/*.test.ts",
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run knip && bun run deps && bun run test:e2e"
   },
   "dependencies": {
