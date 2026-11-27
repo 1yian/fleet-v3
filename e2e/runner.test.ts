@@ -565,7 +565,10 @@ void test("caps no-mistakes verification at 4 rounds and hands back to mate with
 
     const calls = readFileSync(argvLog, "utf8").trim().split("\n");
     assert.equal(calls.length, 4);
-    assert.deepEqual(JSON.parse(calls[0] ?? ""), ["--intent", "Change that never converges in review\n\nReviewer keeps raising nitpicks"]);
+    assert.deepEqual(JSON.parse(calls[0] ?? ""), [
+      "--intent",
+      "Change that never converges in review\n\nReviewer keeps raising nitpicks",
+    ]);
     for (const call of calls.slice(1)) {
       assert.deepEqual(JSON.parse(call), [
         "--action",
